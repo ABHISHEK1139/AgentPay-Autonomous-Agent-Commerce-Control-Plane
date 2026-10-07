@@ -140,9 +140,29 @@ class AuditHasher:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def compute_event_hash(event_data: dict[str, Any], previous_hash: str) -> str:
-        """Convenience: canonical JSON then hash in one call."""
-        canonical = AuditHasher.canonical_json(event_data)
+    def compute_event_hash(
+        event_data: dict[str, Any],
+        previous_hash: str,
+        actor: str = "",
+        event_type: str = "",
+        timestamp: datetime | str = "",
+        tenant_id: str = "",
+        agent_id: str | None = None,
+        action_id: str | None = None,
+    ) -> str:
+        """Convenience: canonical JSON of event metadata and data, then hash in one call (§29, §45)."""
+        preimage_dict: dict[str, Any] = {
+            "action_id": action_id or "",
+            "actor": actor,
+            "agent_id": agent_id or "",
+            "data": event_data,
+            "event_type": str(event_type),
+            "tenant_id": tenant_id,
+            "timestamp": timestamp.isoformat()
+            if isinstance(timestamp, datetime)
+            else str(timestamp),
+        }
+        canonical = AuditHasher.canonical_json(preimage_dict)
         return AuditHasher.compute_hash(canonical, previous_hash)
 
 

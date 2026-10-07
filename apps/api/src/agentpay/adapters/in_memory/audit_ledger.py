@@ -56,7 +56,16 @@ class InMemoryAuditLedger(AuditLedger):
         with self._lock:
             events = self._tenant_events.setdefault(tenant_id, [])
             previous_hash = events[-1].event_hash if events else GENESIS_HASH
-            event_hash = AuditHasher.compute_event_hash(redacted_data, previous_hash)
+            event_hash = AuditHasher.compute_event_hash(
+                event_data=redacted_data,
+                previous_hash=previous_hash,
+                actor=actor,
+                event_type=resolved_type.value,
+                timestamp=now,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                action_id=action_id,
+            )
 
             event = AuditEvent(
                 event_id=event_id,
@@ -98,7 +107,16 @@ class InMemoryAuditLedger(AuditLedger):
                 if event.previous_event_hash != expected_prev:
                     return False
 
-                recomputed = AuditHasher.compute_event_hash(event.data, event.previous_event_hash)
+                recomputed = AuditHasher.compute_event_hash(
+                    event_data=event.data,
+                    previous_hash=event.previous_event_hash,
+                    actor=event.actor,
+                    event_type=event.event_type.value,
+                    timestamp=event.timestamp,
+                    tenant_id=event.tenant_id,
+                    agent_id=event.agent_id,
+                    action_id=event.action_id,
+                )
                 if event.event_hash != recomputed:
                     return False
 

@@ -45,6 +45,7 @@ from agentpay.domain.action_request import (
 from agentpay.domain.errors import (
     CrossTenantAccessError,
     DomainError,
+    IdempotencyConflictError,
     InsufficientInventoryError,
     PrivilegeEscalationAttemptError,
 )
@@ -90,15 +91,68 @@ class AgentPayApiApp:
             return str(body["tenant_id"])
         return ""
 
-    def _ensure_resource_inventory(self, tenant_id: str, variant_id: str) -> None:
-        """Ensure virtual inventory exists for digital resources and non-catalog payment mandates."""
+    def _ensure_resource_inventory(
+        self, tenant_id: str, variant_id: str, action: ActionRequest | None = None
+    ) -> None:
+        """Ensure virtual inventory, variant, and product exist for digital resources and non-catalog payment mandates."""
+        if not variant_id:
+            return
+
+        from agentpay.domain.commerce import Inventory, Product, ProductVariant
+        from agentpay.domain.money import Money
+
+        if (
+            self.orchestrator._variant_repo is not None
+            and self.orchestrator._variant_repo.get(tenant_id, variant_id) is None
+        ):
+            price = action.amount if (action and action.amount) else Money(1000, "INR")
+            prod_id = f"prod_{variant_id}"
+
+            default_merchant_id = "merch_01"
+            if self.orchestrator._merchant_repo is not None:
+                for candidate in ["merch_prime", "merch_01", "merch_acme"]:
+                    m = self.orchestrator._merchant_repo.get(tenant_id, candidate)
+                    if m is not None and m.is_active:
+                        default_merchant_id = m.merchant_id
+                        break
+
+            category = "electronics"
+            if self.orchestrator._permissions_repo is not None and action is not None:
+                perms = self.orchestrator._permissions_repo.get(tenant_id, action.agent_id)
+                if perms is not None and perms.allowed_categories:
+                    category = perms.allowed_categories[0]
+
+            if (
+                self.orchestrator._product_repo is not None
+                and self.orchestrator._product_repo.get(tenant_id, prod_id) is None
+            ):
+                self.orchestrator._product_repo.save(
+                    tenant_id,
+                    Product(
+                        product_id=prod_id,
+                        tenant_id=tenant_id,
+                        merchant_id=default_merchant_id,
+                        name=f"Digital Resource {variant_id}",
+                        category=category,
+                        description="Auto-provisioned protocol resource",
+                    ),
+                )
+
+            self.orchestrator._variant_repo.save(
+                tenant_id,
+                ProductVariant(
+                    variant_id=variant_id,
+                    product_id=prod_id,
+                    sku=f"SKU-{variant_id}",
+                    name=f"Digital Resource {variant_id}",
+                    price=price,
+                ),
+            )
+
         if (
             self.orchestrator._inventory_repo is not None
-            and variant_id
             and self.orchestrator._inventory_repo.get(tenant_id, variant_id) is None
         ):
-            from agentpay.domain.commerce import Inventory
-
             self.orchestrator._inventory_repo.save(
                 tenant_id,
                 Inventory(
@@ -166,6 +220,26 @@ class AgentPayApiApp:
         """Synchronous dispatch for hermetic testing and clean request processing."""
         request_id = headers.get("x-request-id", f"req_{uuid.uuid4().hex[:12]}")
         tenant_id = headers.get("x-tenant-id", "")
+
+        try:
+            return self._dispatch(method, path, headers, body, request_id, tenant_id)
+        except Exception:
+            return self._error_response(
+                500,
+                "INTERNAL_ERROR",
+                "An unexpected internal error occurred",
+                request_id,
+            )
+
+    def _dispatch(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: dict[str, Any] | None,
+        request_id: str,
+        tenant_id: str,
+    ) -> tuple[int, dict[str, Any]]:
 
         # 1. Health check
         if path == "/api/v1/health" and method == "GET":
@@ -333,6 +407,8 @@ class AgentPayApiApp:
                 )
             except InsufficientInventoryError as err:
                 return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except IdempotencyConflictError as err:
+                return self._error_response(409, "IDEMPOTENCY_CONFLICT", str(err), request_id)
             except DomainError as err:
                 return self._error_response(400, err.code, str(err), request_id)
 
@@ -437,6 +513,8 @@ class AgentPayApiApp:
                 )
             except InsufficientInventoryError as err:
                 return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except IdempotencyConflictError as err:
+                return self._error_response(409, "IDEMPOTENCY_CONFLICT", str(err), request_id)
             except DomainError as err:
                 return self._error_response(400, err.code, str(err), request_id)
 
@@ -477,7 +555,7 @@ class AgentPayApiApp:
 
             try:
                 v_id = metadata.get("variant_id", "")
-                self._ensure_resource_inventory(tenant_id, v_id)
+                self._ensure_resource_inventory(tenant_id, v_id, action)
                 res = self.orchestrator.execute_purchase(
                     action=action,
                     tenant_id=tenant_id,
@@ -533,7 +611,7 @@ class AgentPayApiApp:
 
             try:
                 v_id = metadata.get("variant_id", "")
-                self._ensure_resource_inventory(tenant_id, v_id)
+                self._ensure_resource_inventory(tenant_id, v_id, action)
                 res = self.orchestrator.execute_purchase(
                     action=action,
                     tenant_id=tenant_id,
@@ -591,7 +669,7 @@ class AgentPayApiApp:
 
             try:
                 v_id = metadata.get("variant_id", "")
-                self._ensure_resource_inventory(tenant_id, v_id)
+                self._ensure_resource_inventory(tenant_id, v_id, action)
                 res = self.orchestrator.execute_purchase(
                     action=action,
                     tenant_id=tenant_id,
@@ -638,8 +716,27 @@ class AgentPayApiApp:
         if body_bytes:
             try:
                 body_json = json.loads(body_bytes.decode("utf-8"))
-            except json.JSONDecodeError:
-                body_json = {}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                req_id = headers.get("x-request-id", f"req_{uuid.uuid4().hex[:12]}")
+                status_code, resp_data = self._error_response(
+                    422,
+                    "INVALID_REQUEST_BODY",
+                    "Request body must be valid JSON",
+                    req_id,
+                )
+                resp_bytes = json.dumps(resp_data).encode("utf-8")
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": status_code,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(resp_bytes)).encode("latin1")],
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": resp_bytes})
+                return
 
         status_code, resp_data = self.handle_request(method, path, headers, body_json)
         resp_bytes = json.dumps(resp_data).encode("utf-8")

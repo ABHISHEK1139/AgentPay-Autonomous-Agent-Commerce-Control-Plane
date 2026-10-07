@@ -10,8 +10,16 @@ from __future__ import annotations
 import threading
 
 from agentpay.application.ports.approval_port import ApprovalRepository
-from agentpay.domain.approval import Approval
-from agentpay.domain.errors import CrossTenantAccessError
+from agentpay.domain.approval import (
+    Approval,
+    ApprovalAlreadyConsumedError,
+    ApprovalStatus,
+)
+from agentpay.domain.errors import (
+    ApprovalBindingMismatchError,
+    CrossTenantAccessError,
+    InvalidCommerceError,
+)
 
 
 class InMemoryApprovalRepository(ApprovalRepository):
@@ -39,3 +47,24 @@ class InMemoryApprovalRepository(ApprovalRepository):
         with self._lock:
             tenant_store = self._approvals.get(tenant_id, {})
             return [appr for appr in tenant_store.values() if appr.binding.action_id == action_id]
+
+    def atomic_consume(self, tenant_id: str, approval_id: str) -> Approval:
+        """Atomically verify and transition approval to CONSUMED under lock (§20, §177 Vector 10)."""
+        with self._lock:
+            tenant_store = self._approvals.setdefault(tenant_id, {})
+            approval = tenant_store.get(approval_id)
+            if approval is None:
+                raise InvalidCommerceError(
+                    f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                )
+            if approval.status == ApprovalStatus.CONSUMED:
+                raise ApprovalAlreadyConsumedError(
+                    f"Approval '{approval_id}' has already been consumed"
+                )
+            if not approval.is_approved:
+                raise ApprovalBindingMismatchError(
+                    f"Approval is in status '{approval.status.value}', not APPROVED"
+                )
+            consumed = approval.consume()
+            tenant_store[approval_id] = consumed
+            return consumed

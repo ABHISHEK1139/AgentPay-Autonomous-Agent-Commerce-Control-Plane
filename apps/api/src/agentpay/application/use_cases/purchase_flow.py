@@ -16,6 +16,7 @@ Coordinates the canonical 12-step vertical slice flow:
 
 from __future__ import annotations
 
+import threading
 import uuid
 from dataclasses import dataclass, field
 
@@ -45,13 +46,15 @@ from agentpay.application.ports.payment_port import (
 from agentpay.application.services.approval_service import ApprovalService
 from agentpay.application.services.identity_service import AgentAuthorizationService
 from agentpay.domain.action_request import ActionRequest, ActionStatus
-from agentpay.domain.approval import Approval
+from agentpay.domain.approval import Approval, ApprovalAlreadyConsumedError, ApprovalStatus
 from agentpay.domain.audit import AuditEventType
+from agentpay.domain.commerce import MerchantStatus
 from agentpay.domain.decision import Decision, DecisionContext
 from agentpay.domain.errors import (
     ApprovalBindingMismatchError,
     CrossTenantAccessError,
     DomainError,
+    IdempotencyConflictError,
     InsufficientInventoryError,
     InvalidCommerceError,
 )
@@ -136,6 +139,7 @@ class PurchaseOrchestrator:
         self._order_repo = order_repo
         self._idempotency_store = idempotency_store
         self._audit_ledger = audit_ledger
+        self._approval_lock = threading.Lock()
 
     def _audit(
         self,
@@ -168,10 +172,28 @@ class PurchaseOrchestrator:
         if action.tenant_id != tenant_id:
             raise CrossTenantAccessError("ActionRequest tenant does not match context")
 
-        # 1b. Idempotency Check (§42)
+        # 1b. Idempotency Check (§42, §177 Vector 2)
         if self._idempotency_store is not None and idempotency_key is not None:
             existing = self._idempotency_store.get(tenant_id, idempotency_key)
             if existing is not None:
+                # Check for payload / amount conflict (§42)
+                expected_amount_minor = existing.result_data.get("amount_minor")
+                if (
+                    expected_amount_minor is not None
+                    and action.amount is not None
+                    and action.amount.minor_units != expected_amount_minor
+                ):
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored amount {expected_amount_minor} != incoming amount {action.amount.minor_units}"
+                    )
+                stored_action_id = existing.result_data.get("action_id", existing.request_hash)
+                if stored_action_id and stored_action_id != action.action_id:
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored action '{stored_action_id}' != incoming action '{action.action_id}'"
+                    )
+
                 cached_order = None
                 order_id = existing.result_data.get("order_id")
                 if order_id and self._order_repo is not None:
@@ -204,80 +226,176 @@ class PurchaseOrchestrator:
             data={"action": action.action, "amount": str(action.amount)},
         )
 
-        # 3. Agent Identity & Authorization validation (§15, §16)
+        # 3. Agent Identity & Authorization validation (§15, §16, §177 Vectors 1 & 4)
         agent = None
         if self._agent_repo is not None:
             agent = self._agent_repo.get(tenant_id, action.agent_id)
 
-        if agent is not None:
-            try:
-                self._auth_service.authorize_action(agent, action, tenant_id)
-            except DomainError as err:
+        if agent is None:
+            # Unregistered or missing agent -> fail closed (§14, §15, §177 Vectors 1 & 4)
+            self._audit(
+                AuditEventType.POLICY_EVALUATED,
+                action,
+                tenant_id,
+                actor="auth_service",
+                data={
+                    "decision": "DENIED",
+                    "reason": "UNREGISTERED_AGENT",
+                    "agent_id": action.agent_id,
+                },
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason=f"Agent '{action.agent_id}' not found in tenant '{tenant_id}'",
+            )
+
+        try:
+            self._auth_service.authorize_action(agent, action, tenant_id)
+        except DomainError as err:
+            self._audit(
+                AuditEventType.POLICY_EVALUATED,
+                action,
+                tenant_id,
+                actor="auth_service",
+                data={"decision": "DENIED", "error": str(err)},
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason=f"Authorization rejected: {err}",
+            )
+
+        # 4. Commerce & Evidence Verification (§30, §32, §33, §177 Vectors 8 & 9)
+        variant = None
+        if self._variant_repo is not None:
+            variant = self._variant_repo.get(tenant_id, variant_id)
+
+        if variant is None:
+            # Missing or unknown variant -> fail closed (§30, §177 Vector 8)
+            self._audit(
+                AuditEventType.POLICY_EVALUATED,
+                action,
+                tenant_id,
+                actor="commerce_service",
+                data={"decision": "DENIED", "reason": "VARIANT_NOT_FOUND"},
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason="Variant not found",
+            )
+
+        inventory = None
+        if self._inventory_repo is not None:
+            inventory = self._inventory_repo.get(tenant_id, variant_id)
+
+        product = None
+        if self._product_repo is not None:
+            product = self._product_repo.get(tenant_id, variant.product_id)
+            if product is None:
                 self._audit(
                     AuditEventType.POLICY_EVALUATED,
                     action,
                     tenant_id,
-                    actor="auth_service",
-                    data={"decision": "DENIED", "error": str(err)},
+                    actor="commerce_service",
+                    data={"decision": "DENIED", "reason": "PRODUCT_NOT_FOUND"},
                 )
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
                     tenant_id=tenant_id,
                     status=ActionStatus.FAILED,
                     decision=PolicyDecision.DENY,
-                    rejection_reason=f"Authorization rejected: {err}",
+                    rejection_reason="Product not found",
                 )
+            if self._permissions_repo is not None:
+                perms = self._permissions_repo.get(tenant_id, agent.agent_id)
+                if perms is not None and not perms.allows_category(product.category):
+                    self._audit(
+                        AuditEventType.POLICY_EVALUATED,
+                        action,
+                        tenant_id,
+                        actor="auth_service",
+                        data={"decision": "DENIED", "category": product.category},
+                    )
+                    return PurchaseExecutionResult(
+                        action_id=action.action_id,
+                        tenant_id=tenant_id,
+                        status=ActionStatus.FAILED,
+                        decision=PolicyDecision.DENY,
+                        rejection_reason=f"Category '{product.category}' is not permitted for agent '{agent.agent_id}'",
+                    )
 
-        # 4. Commerce & Evidence Verification (§30, §32, §33)
-        variant = None
-        if self._variant_repo is not None:
-            variant = self._variant_repo.get(tenant_id, variant_id)
-
-        inventory = None
-        if self._inventory_repo is not None:
-            inventory = self._inventory_repo.get(tenant_id, variant_id)
-
-        if variant is not None:
-            if self._product_repo is not None:
-                product = self._product_repo.get(tenant_id, variant.product_id)
-                if product is not None and self._permissions_repo is not None and agent is not None:
-                    perms = self._permissions_repo.get(tenant_id, agent.agent_id)
-                    if perms is not None and not perms.allows_category(product.category):
-                        self._audit(
-                            AuditEventType.POLICY_EVALUATED,
-                            action,
-                            tenant_id,
-                            actor="auth_service",
-                            data={"decision": "DENIED", "category": product.category},
-                        )
-                        return PurchaseExecutionResult(
-                            action_id=action.action_id,
-                            tenant_id=tenant_id,
-                            status=ActionStatus.FAILED,
-                            decision=PolicyDecision.DENY,
-                            rejection_reason=f"Category '{product.category}' is not permitted for agent '{agent.agent_id}'",
-                        )
-
-            if action.amount is not None:
-                expected_total = variant.price.multiply(quantity)
-            conflicts = EvidenceConflictDetector.detect_all_conflicts(
-                tenant_id=tenant_id,
-                resource_id=variant_id,
-                asserted_price=action.amount,
-                merchant_price=expected_total,
-                asserted_available=None,
-                actual_available=inventory.effective_available if inventory else 0,
-                requested_qty=quantity,
-            )
-            if conflicts:
+        # Merchant verification (§30, §37, §177 Vector 9)
+        merchant = None
+        resolved_merchant_id = product.merchant_id if product is not None else None
+        if self._merchant_repo is not None and resolved_merchant_id is not None:
+            merchant = self._merchant_repo.get(tenant_id, resolved_merchant_id)
+            if merchant is None:
                 self._audit(
-                    AuditEventType.CONFLICT_DETECTED,
+                    AuditEventType.POLICY_EVALUATED,
                     action,
                     tenant_id,
-                    actor="conflict_detector",
+                    actor="merchant_verifier",
+                    data={"decision": "DENIED", "reason": "MERCHANT_NOT_FOUND"},
+                )
+                return PurchaseExecutionResult(
+                    action_id=action.action_id,
+                    tenant_id=tenant_id,
+                    status=ActionStatus.FAILED,
+                    decision=PolicyDecision.DENY,
+                    rejection_reason=f"Merchant '{resolved_merchant_id}' not found in tenant '{tenant_id}'",
+                )
+            if not merchant.is_active or merchant.status != MerchantStatus.ACTIVE:
+                self._audit(
+                    AuditEventType.POLICY_EVALUATED,
+                    action,
+                    tenant_id,
+                    actor="merchant_verifier",
+                    data={"decision": "DENIED", "reason": f"MERCHANT_{merchant.status.value}"},
+                )
+                return PurchaseExecutionResult(
+                    action_id=action.action_id,
+                    tenant_id=tenant_id,
+                    status=ActionStatus.FAILED,
+                    decision=PolicyDecision.DENY,
+                    rejection_reason=f"Merchant '{resolved_merchant_id}' is {merchant.status.value} (not active)",
+                )
+            if not merchant.allowed_agent_purchase:
+                self._audit(
+                    AuditEventType.POLICY_EVALUATED,
+                    action,
+                    tenant_id,
+                    actor="merchant_verifier",
+                    data={"decision": "DENIED", "reason": "AGENT_PURCHASE_NOT_ALLOWED"},
+                )
+                return PurchaseExecutionResult(
+                    action_id=action.action_id,
+                    tenant_id=tenant_id,
+                    status=ActionStatus.FAILED,
+                    decision=PolicyDecision.DENY,
+                    rejection_reason=f"Merchant '{resolved_merchant_id}' does not allow autonomous agent purchases",
+                )
+            if (
+                merchant.max_order_amount_minor is not None
+                and action.amount is not None
+                and action.amount.minor_units > merchant.max_order_amount_minor
+            ):
+                self._audit(
+                    AuditEventType.POLICY_EVALUATED,
+                    action,
+                    tenant_id,
+                    actor="merchant_verifier",
                     data={
-                        "conflict_count": len(conflicts),
-                        "first_conflict": conflicts[0].conflict_type.value,
+                        "decision": "DENIED",
+                        "reason": "MERCHANT_MAX_ORDER_EXCEEDED",
+                        "max_order_minor": merchant.max_order_amount_minor,
                     },
                 )
                 return PurchaseExecutionResult(
@@ -285,32 +403,68 @@ class PurchaseOrchestrator:
                     tenant_id=tenant_id,
                     status=ActionStatus.FAILED,
                     decision=PolicyDecision.DENY,
-                    conflicts=conflicts,
-                    rejection_reason="Evidence conflict detected (price/inventory mismatch)",
+                    rejection_reason=f"Order amount exceeds merchant max order limit of {merchant.max_order_amount_minor} minor units",
                 )
 
-        # 5. Advisory Decision Intelligence (§28)
-        decision_summary = None
-        if self._decision_engine is not None:
-            context = DecisionContext(
-                action_id=action.action_id,
-                tenant_id=tenant_id,
-                agent_id=action.agent_id,
-                amount=action.amount,
-                category=action.resource.type,
-            )
-            decision_summary = self._decision_engine.evaluate(context)
+        expected_total = None
+        if action.amount is not None:
+            expected_total = variant.price.multiply(quantity)
+        conflicts = EvidenceConflictDetector.detect_all_conflicts(
+            tenant_id=tenant_id,
+            resource_id=variant_id,
+            asserted_price=action.amount,
+            merchant_price=expected_total,
+            asserted_available=None,
+            actual_available=inventory.effective_available if inventory else 0,
+            requested_qty=quantity,
+        )
+        if conflicts:
             self._audit(
-                AuditEventType.JEV_EVALUATED,
+                AuditEventType.CONFLICT_DETECTED,
                 action,
                 tenant_id,
-                actor=decision_summary.model_provider,
+                actor="conflict_detector",
                 data={
-                    "recommendation": decision_summary.recommendation.value,
-                    "risk_level": decision_summary.risk_level.value,
-                    "confidence": decision_summary.confidence,
+                    "conflict_count": len(conflicts),
+                    "first_conflict": conflicts[0].conflict_type.value,
                 },
             )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                conflicts=conflicts,
+                rejection_reason="Evidence conflict detected (price/inventory mismatch)",
+            )
+
+        # 5. Advisory Decision Intelligence (§28, §177 Vector 5)
+        decision_summary = None
+        if self._decision_engine is not None:
+            try:
+                context = DecisionContext(
+                    action_id=action.action_id,
+                    tenant_id=tenant_id,
+                    agent_id=action.agent_id,
+                    amount=action.amount,
+                    category=action.resource.type,
+                )
+                decision_summary = self._decision_engine.evaluate(context)
+                self._audit(
+                    AuditEventType.JEV_EVALUATED,
+                    action,
+                    tenant_id,
+                    actor=decision_summary.model_provider,
+                    data={
+                        "recommendation": decision_summary.recommendation.value,
+                        "risk_level": decision_summary.risk_level.value,
+                        "confidence": decision_summary.confidence,
+                    },
+                )
+            except Exception:
+                # Advisory AI provider failure handled gracefully (§2.2, §134)
+                # Advisory AI cannot crash execution or override deterministic policy
+                decision_summary = None
 
         # 6. Deterministic Spending Policy Evaluation (§18, §19)
         # Authoritative spending policy check
@@ -388,12 +542,16 @@ class PurchaseOrchestrator:
             )
 
         # 8. Execution Pipeline (PolicyDecision.ALLOW)
+        resolved_m_id = (
+            merchant.merchant_id if merchant else (resolved_merchant_id or action.resource.id)
+        )
         return self._execute_order_and_payment_pipeline(
             action=action,
             tenant_id=tenant_id,
             variant_id=variant_id,
             quantity=quantity,
             decision_summary=decision_summary,
+            merchant_id=resolved_m_id,
             idempotency_key=idempotency_key or f"idem_{action.action_id}",
         )
 
@@ -405,6 +563,7 @@ class PurchaseOrchestrator:
         quantity: int,
         decision_summary: Decision | None = None,
         approval: Approval | None = None,
+        merchant_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> PurchaseExecutionResult:
         if action.amount is None:
@@ -415,6 +574,8 @@ class PurchaseOrchestrator:
                 decision=PolicyDecision.DENY,
                 rejection_reason="Amount missing",
             )
+
+        effective_merchant_id = merchant_id or action.resource.id
 
         # 1. Atomic Inventory Reservation (§44)
         if self._inventory_repo is not None:
@@ -472,7 +633,7 @@ class PurchaseOrchestrator:
                 cancelled_order = Order(
                     order_id=f"ord_{uuid.uuid4().hex[:16]}",
                     tenant_id=tenant_id,
-                    merchant_id=action.resource.id,
+                    merchant_id=effective_merchant_id,
                     buyer_id=action.principal_id,
                     agent_id=action.agent_id,
                     variant_id=variant_id,
@@ -504,6 +665,8 @@ class PurchaseOrchestrator:
                                 "order_id": cancelled_order.order_id,
                                 "payment_id": payment_attempt.attempt_id,
                                 "status": "FAILED",
+                                "amount_minor": action.amount.minor_units,
+                                "action_id": action.action_id,
                             },
                         ),
                     )
@@ -539,6 +702,8 @@ class PurchaseOrchestrator:
                             result_data={
                                 "payment_id": payment_attempt.attempt_id,
                                 "status": "FAILED",
+                                "amount_minor": action.amount.minor_units,
+                                "action_id": action.action_id,
                             },
                         ),
                     )
@@ -557,7 +722,7 @@ class PurchaseOrchestrator:
         order = Order(
             order_id=order_id,
             tenant_id=tenant_id,
-            merchant_id=action.resource.id,
+            merchant_id=effective_merchant_id,
             buyer_id=action.principal_id,
             agent_id=action.agent_id,
             variant_id=variant_id,
@@ -591,6 +756,8 @@ class PurchaseOrchestrator:
                         "order_id": order.order_id,
                         "payment_id": payment_attempt.attempt_id if payment_attempt else None,
                         "status": "COMPLETED",
+                        "amount_minor": action.amount.minor_units,
+                        "action_id": action.action_id,
                     },
                 ),
             )
@@ -619,25 +786,99 @@ class PurchaseOrchestrator:
         if self._approval_repo is None:
             raise InvalidCommerceError("Approval repository not configured")
 
-        approval = self._approval_repo.get(tenant_id, approval_id)
-        if approval is None:
-            raise InvalidCommerceError(
-                f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
-            )
+        # 1. Atomic check-and-consume or lock-guarded consumption to prevent TOCTOU race (§20, §177 Vector 10)
+        if hasattr(self._approval_repo, "atomic_consume"):
+            consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
+        else:
+            with self._approval_lock:
+                approval = self._approval_repo.get(tenant_id, approval_id)
+                if approval is None:
+                    raise InvalidCommerceError(
+                        f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                    )
+                if approval.status == ApprovalStatus.CONSUMED:
+                    raise ApprovalAlreadyConsumedError(
+                        f"Approval '{approval_id}' has already been consumed"
+                    )
+                if not approval.is_approved:
+                    raise ApprovalBindingMismatchError(
+                        f"Approval is in status '{approval.status.value}', not APPROVED"
+                    )
+                consumed_approval = approval.consume()
+                self._approval_repo.save(tenant_id, consumed_approval)
 
-        # STRICT BINDING VERIFICATION (§0.4, §20)
-        self._approval_service.verify_binding(approval, action)
+        # 2. Strict binding verification (§0.4, §20)
+        self._approval_service.verify_binding(consumed_approval, action)
 
-        if not approval.is_approved:
-            raise ApprovalBindingMismatchError(
-                f"Approval is in status '{approval.status.value}', not APPROVED"
-            )
+        # 3. Merchant verification for approved purchase (§2.4, §20, §30, §177 Vector 9)
+        target_merchant_id = consumed_approval.binding.merchant_id
+        if self._merchant_repo is not None:
+            merchant = None
+            if target_merchant_id:
+                merchant = self._merchant_repo.get(tenant_id, target_merchant_id)
+            if merchant is None and self._product_repo is not None:
+                p = (
+                    self._product_repo.get(tenant_id, target_merchant_id)
+                    if target_merchant_id
+                    else None
+                )
+                if p is None and self._variant_repo is not None:
+                    v = self._variant_repo.get(tenant_id, variant_id)
+                    if v is not None:
+                        p = self._product_repo.get(tenant_id, v.product_id)
+                if p is not None and p.merchant_id:
+                    merchant = self._merchant_repo.get(tenant_id, p.merchant_id)
+
+            if target_merchant_id or merchant is not None:
+                if (
+                    merchant is None
+                    or not merchant.is_active
+                    or merchant.status != MerchantStatus.ACTIVE
+                ):
+                    self._audit(
+                        AuditEventType.POLICY_EVALUATED,
+                        action,
+                        tenant_id,
+                        actor="merchant_verifier",
+                        data={
+                            "decision": "DENIED",
+                            "reason": f"MERCHANT_{merchant.status.value}"
+                            if merchant
+                            else "MERCHANT_NOT_FOUND",
+                        },
+                    )
+                    return PurchaseExecutionResult(
+                        action_id=action.action_id,
+                        tenant_id=tenant_id,
+                        status=ActionStatus.FAILED,
+                        decision=PolicyDecision.DENY,
+                        rejection_reason=(
+                            f"Merchant '{target_merchant_id}' is {merchant.status.value} (not active)"
+                            if merchant
+                            else f"Merchant '{target_merchant_id}' not found in tenant '{tenant_id}'"
+                        ),
+                    )
+                if not merchant.allowed_agent_purchase:
+                    self._audit(
+                        AuditEventType.POLICY_EVALUATED,
+                        action,
+                        tenant_id,
+                        actor="merchant_verifier",
+                        data={"decision": "DENIED", "reason": "AGENT_PURCHASE_NOT_ALLOWED"},
+                    )
+                    return PurchaseExecutionResult(
+                        action_id=action.action_id,
+                        tenant_id=tenant_id,
+                        status=ActionStatus.FAILED,
+                        decision=PolicyDecision.DENY,
+                        rejection_reason=f"Merchant '{merchant.merchant_id}' does not allow autonomous agent purchases",
+                    )
 
         self._audit(
             AuditEventType.APPROVAL_GRANTED,
             action,
             tenant_id,
-            actor=approval.approver_id or "human_approver",
+            actor=consumed_approval.approver_id or "human_approver",
             data={"approval_id": approval_id},
         )
 
@@ -646,6 +887,7 @@ class PurchaseOrchestrator:
             tenant_id=tenant_id,
             variant_id=variant_id,
             quantity=quantity,
-            approval=approval,
+            approval=consumed_approval,
+            merchant_id=consumed_approval.binding.merchant_id,
             idempotency_key=idempotency_key or f"idem_{action.action_id}",
         )

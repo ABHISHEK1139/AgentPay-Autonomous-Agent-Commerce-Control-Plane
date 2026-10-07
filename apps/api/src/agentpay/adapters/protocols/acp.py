@@ -107,11 +107,14 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
 
     def parse_payload(self, raw_data: dict[str, Any]) -> AcpPurchaseRequest:
         """Parse raw ACP dictionary payload into validated AcpPurchaseRequest."""
-        if not isinstance(raw_data, dict):
-            raise MalformedPayloadError("ACP payload must be a JSON object")
+        if not raw_data:
+            raise MalformedPayloadError("ACP payload cannot be empty")
 
-        version = str(raw_data.get("acp_version", raw_data.get("version", "")))
-        if not version or version not in SUPPORTED_ACP_VERSIONS:
+        version_raw = raw_data.get("acp_version", raw_data.get("version"))
+        if not version_raw:
+            raise MalformedPayloadError("Missing required field 'acp_version'")
+        version = str(version_raw)
+        if version not in SUPPORTED_ACP_VERSIONS:
             raise UnsupportedProtocolVersionError(
                 f"Unsupported ACP version '{version}'. Supported: {sorted(SUPPORTED_ACP_VERSIONS)}"
             )
@@ -155,13 +158,29 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
                 raise MalformedPayloadError(f"Cart item #{idx} missing 'product_id'")
 
             try:
-                qty = int(item.get("quantity", 1))
+                raw_qty = item.get("quantity", 1)
+                if isinstance(raw_qty, bool) or not isinstance(raw_qty, int):
+                    raise MalformedPayloadError(
+                        f"Cart item #{idx} quantity must be an integer, got {type(raw_qty).__name__}"
+                    )
+                qty = raw_qty
                 if qty <= 0:
-                    raise ValueError("quantity must be greater than zero")
+                    raise MalformedPayloadError(
+                        f"Cart item #{idx} quantity must be greater than zero"
+                    )
 
-                price = int(item["unit_price_minor"])
+                if "unit_price_minor" not in item:
+                    raise MalformedPayloadError(f"Cart item #{idx} missing 'unit_price_minor'")
+                raw_price = item["unit_price_minor"]
+                if isinstance(raw_price, bool) or not isinstance(raw_price, int):
+                    raise MalformedPayloadError(
+                        f"Cart item #{idx} unit_price_minor must be an integer, got {type(raw_price).__name__}"
+                    )
+                price = raw_price
                 if price < 0:
-                    raise ValueError("unit_price_minor cannot be negative")
+                    raise MalformedPayloadError(
+                        f"Cart item #{idx} unit_price_minor cannot be negative"
+                    )
 
                 curr = str(item.get("currency", "INR")).upper()
                 if not curr:
@@ -179,6 +198,8 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
                         currency=curr,
                     )
                 )
+            except MalformedPayloadError:
+                raise
             except (KeyError, ValueError, TypeError) as err:
                 raise MalformedPayloadError(f"Invalid cart item #{idx}: {err}") from err
 
@@ -196,6 +217,13 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
             if isinstance(intent_data, dict) and "budget_max_minor" in intent_data
             else raw_data.get("budget_max_minor")
         )
+        if budget_max is not None:
+            if isinstance(budget_max, bool) or not isinstance(budget_max, int):
+                raise MalformedPayloadError(
+                    f"budget_max_minor must be an integer, got {type(budget_max).__name__}"
+                )
+            if budget_max < 0:
+                raise MalformedPayloadError("budget_max_minor cannot be negative")
 
         exec_data = raw_data.get("execution", {})
         mode_str = str(

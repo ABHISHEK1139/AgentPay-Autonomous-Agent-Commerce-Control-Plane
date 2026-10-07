@@ -130,3 +130,23 @@ class ApprovalService:
         updated = approval.reject(approver_id, reason, decided_at)
         self._repo.save(tenant_id, updated)
         return updated
+
+    def consume_approval(
+        self,
+        approval_id: str,
+        tenant_id: str,
+        consumed_at: datetime | None = None,
+    ) -> Approval:
+        """Mark an approved request as consumed upon execution (§20)."""
+        if self._repo is None:
+            raise InvalidApprovalError("Repository not configured in ApprovalService")
+
+        approval = self._repo.get(tenant_id, approval_id)
+        if approval is None:
+            raise InvalidApprovalError(
+                f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+            )
+
+        updated = approval.consume(consumed_at)
+        self._repo.save(tenant_id, updated)
+        return updated

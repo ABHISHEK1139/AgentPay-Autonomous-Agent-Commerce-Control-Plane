@@ -9,7 +9,7 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from agentpay.adapters.protocols.base import (
@@ -148,27 +148,58 @@ class Ap2Adapter(BaseProtocolAdapter[Ap2PaymentRequest, Ap2PaymentResponse]):
 
         amount_data = raw_data.get("amount")
         if isinstance(amount_data, dict):
-            try:
-                amt_val = int(amount_data["minor_units"])
-                curr_val = str(amount_data.get("currency", "INR")).upper()
-            except (KeyError, ValueError, TypeError) as err:
-                raise MalformedPayloadError(f"Invalid amount block: {err}") from err
+            raw_val = amount_data.get("minor_units")
+            if isinstance(raw_val, bool) or not isinstance(raw_val, int):
+                raise MalformedPayloadError(
+                    f"amount.minor_units must be an integer, got {type(raw_val).__name__}"
+                )
+            amt_val = raw_val
+            curr_val = str(amount_data.get("currency", "INR")).upper()
         else:
-            try:
-                amt_val = int(raw_data["amount_minor"])
-                curr_val = str(raw_data.get("currency", "INR")).upper()
-            except (KeyError, ValueError, TypeError) as err:
-                raise MalformedPayloadError(f"Missing or invalid amount_minor: {err}") from err
+            if "amount_minor" not in raw_data:
+                raise MalformedPayloadError("Missing required field 'amount' or 'amount_minor'")
+            raw_val = raw_data.get("amount_minor")
+            if isinstance(raw_val, bool) or not isinstance(raw_val, int):
+                raise MalformedPayloadError(
+                    f"amount_minor must be an integer, got {type(raw_val).__name__}"
+                )
+            amt_val = raw_val
+            curr_val = str(raw_data.get("currency", "INR")).upper()
 
         if amt_val < 0:
             raise MalformedPayloadError("Amount minor units cannot be negative")
 
         constraints = raw_data.get("constraints", {})
+        valid_until_raw = raw_data.get("valid_until") or (
+            constraints.get("valid_until") if isinstance(constraints, dict) else None
+        )
+        if valid_until_raw:
+            try:
+                valid_until_dt = parse_iso_utc(str(valid_until_raw))
+            except Exception as err:
+                raise MalformedPayloadError(
+                    f"Invalid valid_until timestamp: {valid_until_raw}"
+                ) from err
+            if valid_until_dt is None:
+                raise MalformedPayloadError(f"Invalid valid_until timestamp: {valid_until_raw}")
+            if valid_until_dt < datetime.now(UTC):
+                raise MalformedPayloadError(
+                    f"AP2 mandate has expired (valid_until: {valid_until_dt.isoformat()})"
+                )
+
         max_auth = (
             constraints.get("max_authorized_minor")
             if isinstance(constraints, dict) and "max_authorized_minor" in constraints
             else raw_data.get("max_authorized_minor")
         )
+        if max_auth is not None:
+            if isinstance(max_auth, bool) or not isinstance(max_auth, int):
+                raise MalformedPayloadError(
+                    f"max_authorized_minor must be an integer, got {type(max_auth).__name__}"
+                )
+            if max_auth < 0:
+                raise MalformedPayloadError("max_authorized_minor cannot be negative")
+
         mode_str = str(
             constraints.get("authorization_mode")
             if isinstance(constraints, dict) and constraints.get("authorization_mode")
@@ -185,7 +216,7 @@ class Ap2Adapter(BaseProtocolAdapter[Ap2PaymentRequest, Ap2PaymentResponse]):
             currency=curr_val,
             purpose=str(raw_data.get("purpose", "AP2 Payment Mandate Settlement")),
             timestamp=parse_iso_utc(raw_data.get("timestamp")),
-            max_authorized_minor=int(max_auth) if max_auth is not None else None,
+            max_authorized_minor=max_auth,
             autonomous=(mode_str == "AUTONOMOUS"),
             idempotency_key=raw_data.get("idempotency_key"),
         )

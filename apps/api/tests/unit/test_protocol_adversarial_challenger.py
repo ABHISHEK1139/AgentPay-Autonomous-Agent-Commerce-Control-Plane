@@ -676,9 +676,9 @@ def test_unregistered_and_foreign_agent_bypass_finding(
     }
     status, body = client.post("/api/v1/protocols/x402/pay", json_body=x402_ghost, headers=headers)
     assert status == 200
-    # Demonstrates that the transaction succeeds despite the agent not existing in the repository
-    assert body["status"] == "PAID"
-    assert body["authorization_token"] is not None
+    # Verifies that the transaction fails closed when the agent is unregistered (§177 Vector 1 & 4)
+    assert body["status"] == "FAILED"
+    assert body["authorization_token"] is None
 
     # 2. Foreign tenant agent in x402
     x402_foreign = {
@@ -695,8 +695,8 @@ def test_unregistered_and_foreign_agent_bypass_finding(
         "/api/v1/protocols/x402/pay", json_body=x402_foreign, headers=headers
     )
     assert status_f == 200
-    assert body_f["status"] == "PAID"
-    assert body_f["authorization_token"] is not None
+    assert body_f["status"] == "FAILED"
+    assert body_f["authorization_token"] is None
 
 
 # ===========================================================================

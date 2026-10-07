@@ -28,6 +28,7 @@ class ApprovalStatus(StrEnum):
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
     CANCELLED = "CANCELLED"
+    CONSUMED = "CONSUMED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +183,10 @@ class Approval:
     def is_approved(self) -> bool:
         return self.status is ApprovalStatus.APPROVED
 
+    @property
+    def is_consumed(self) -> bool:
+        return self.status is ApprovalStatus.CONSUMED
+
     def approve(self, approver_id: str, decided_at: datetime | None = None) -> Approval:
         if self.status is not ApprovalStatus.PENDING:
             raise InvalidApprovalTransitionError(
@@ -262,6 +267,23 @@ class Approval:
             reason="Approval window expired",
         )
 
+    def consume(self, consumed_at: datetime | None = None) -> Approval:
+        if self.status is not ApprovalStatus.APPROVED:
+            raise InvalidApprovalTransitionError(
+                f"Cannot consume approval with status '{self.status.value}'; must be APPROVED"
+            )
+        now = consumed_at or datetime.now(UTC)
+        return Approval(
+            approval_id=self.approval_id,
+            tenant_id=self.tenant_id,
+            binding=self.binding,
+            status=ApprovalStatus.CONSUMED,
+            requested_at=self.requested_at,
+            approver_id=self.approver_id,
+            decided_at=self.decided_at or now,
+            reason=self.reason,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ApprovalTier:
@@ -297,3 +319,9 @@ class ApprovalPolicy:
         if not matching:
             return None
         return max(matching, key=lambda t: t.threshold_minor)
+
+
+class ApprovalAlreadyConsumedError(ApprovalBindingMismatchError):
+    """Raised when attempting to execute an approval that has already been consumed (§20)."""
+
+    code = "APPROVAL_ALREADY_CONSUMED"
