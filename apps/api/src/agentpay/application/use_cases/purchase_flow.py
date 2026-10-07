@@ -852,11 +852,7 @@ class PurchaseOrchestrator:
                         tenant_id=tenant_id,
                         status=ActionStatus.FAILED,
                         decision=PolicyDecision.DENY,
-                        rejection_reason=(
-                            f"Merchant '{target_merchant_id}' is {merchant.status.value} (not active)"
-                            if merchant
-                            else f"Merchant '{target_merchant_id}' not found in tenant '{tenant_id}'"
-                        ),
+                        rejection_reason=f"Merchant '{target_merchant_id}' is not active",
                     )
                 if not merchant.allowed_agent_purchase:
                     self._audit(
@@ -871,7 +867,7 @@ class PurchaseOrchestrator:
                         tenant_id=tenant_id,
                         status=ActionStatus.FAILED,
                         decision=PolicyDecision.DENY,
-                        rejection_reason=f"Merchant '{merchant.merchant_id}' does not allow autonomous agent purchases",
+                        rejection_reason=f"Merchant '{target_merchant_id}' does not allow autonomous agent purchases",
                     )
 
         self._audit(
