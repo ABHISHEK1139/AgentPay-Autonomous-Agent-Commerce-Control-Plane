@@ -17,6 +17,16 @@ from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any
 
+from agentpay.adapters.protocols import (
+    AcpAdapter,
+    Ap2Adapter,
+    MalformedPayloadError,
+    ProtocolError,
+    UapAdapter,
+    UnsupportedActionError,
+    UnsupportedProtocolVersionError,
+    X402Adapter,
+)
 from agentpay.api.schemas import (
     ActionSubmissionRequest,
     ApiErrorDetail,
@@ -52,6 +62,52 @@ class AgentPayApiApp:
         self.orchestrator = orchestrator
         self._emergency_paused: bool = False
         self._pause_metadata: dict[str, Any] = {}
+        self.acp_adapter = AcpAdapter()
+        self.ap2_adapter = Ap2Adapter()
+        self.uap_adapter = UapAdapter()
+        self.x402_adapter = X402Adapter()
+
+    def _extract_protocol_tenant(self, path: str, body: dict[str, Any] | None) -> str:
+        """Extract tenant context from protocol payload when header is omitted."""
+        if not body or not isinstance(body, dict):
+            return ""
+        if "/acp/" in path:
+            buyer = body.get("buyer")
+            if isinstance(buyer, dict) and buyer.get("tenant_id"):
+                return str(buyer["tenant_id"])
+        elif "/ap2/" in path:
+            payer = body.get("payer")
+            if isinstance(payer, dict) and payer.get("tenant_id"):
+                return str(payer["tenant_id"])
+        elif "/uap/" in path:
+            hdr = body.get("header")
+            if isinstance(hdr, dict) and hdr.get("tenant"):
+                return str(hdr["tenant"])
+        elif "/x402/" in path:
+            if body.get("tenant_id"):
+                return str(body["tenant_id"])
+        if body.get("tenant_id"):
+            return str(body["tenant_id"])
+        return ""
+
+    def _ensure_resource_inventory(self, tenant_id: str, variant_id: str) -> None:
+        """Ensure virtual inventory exists for digital resources and non-catalog payment mandates."""
+        if (
+            self.orchestrator._inventory_repo is not None
+            and variant_id
+            and self.orchestrator._inventory_repo.get(tenant_id, variant_id) is None
+        ):
+            from agentpay.domain.commerce import Inventory
+
+            self.orchestrator._inventory_repo.save(
+                tenant_id,
+                Inventory(
+                    variant_id=variant_id,
+                    tenant_id=tenant_id,
+                    available=999999,
+                    reserved=0,
+                ),
+            )
 
     @property
     def is_emergency_paused(self) -> bool:
@@ -128,10 +184,21 @@ class AgentPayApiApp:
                     "/api/v1/actions": {"post": {"summary": "Submit ActionRequest"}},
                     "/agent/catalog": {"get": {"summary": "Agent Catalog Discovery"}},
                     "/api/v1/emergency/pause": {"post": {"summary": "Kill Switch Pause"}},
+                    "/api/v1/protocols/acp/checkout": {"post": {"summary": "ACP Checkout"}},
+                    "/api/v1/protocols/ap2/mandates": {
+                        "post": {"summary": "AP2 Mandate Settlement"}
+                    },
+                    "/api/v1/protocols/uap/rpc": {"post": {"summary": "UAP JSON-RPC Invocation"}},
+                    "/api/v1/protocols/x402/pay": {
+                        "post": {"summary": "x402 Challenge Settlement"}
+                    },
                 },
             }
 
         # Tenant header required for all tenant-scoped routes (§49, §50)
+        if not tenant_id and path.startswith("/api/v1/protocols/"):
+            tenant_id = self._extract_protocol_tenant(path, body)
+
         if not tenant_id:
             return self._error_response(
                 400, "MISSING_TENANT_HEADER", "X-Tenant-ID header is required", request_id
@@ -320,6 +387,231 @@ class AgentPayApiApp:
                     "status": updated.status.value,
                     "approver_id": updated.approver_id,
                 }
+
+        # 7. Protocol Adapter Endpoints (§107, §108)
+        if (
+            path in ("/api/v1/protocols/acp/checkout", "/api/v1/protocols/acp/actions")
+            and method == "POST"
+        ):
+            if self._emergency_paused:
+                return self._error_response(
+                    503,
+                    "EMERGENCY_PAUSE_ACTIVE",
+                    "Autonomous payment processing is temporarily suspended by emergency control",
+                    request_id,
+                )
+            try:
+                acp_req = self.acp_adapter.parse_payload(body or {})
+                if tenant_id and acp_req.buyer.tenant_id and tenant_id != acp_req.buyer.tenant_id:
+                    return self._error_response(
+                        403,
+                        "CROSS_TENANT_ACCESS_DENIED",
+                        "Header tenant does not match buyer tenant",
+                        request_id,
+                    )
+                action, metadata = self.acp_adapter.to_action_request(acp_req, tenant_id=tenant_id)
+            except MalformedPayloadError as err:
+                return self._error_response(422, err.code, str(err), request_id, err.details)
+            except UnsupportedProtocolVersionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except UnsupportedActionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except ProtocolError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except DomainError as err:
+                return self._error_response(422, err.code, str(err), request_id)
+
+            try:
+                res = self.orchestrator.execute_purchase(
+                    action=action,
+                    tenant_id=tenant_id,
+                    variant_id=metadata.get("variant_id", ""),
+                    quantity=metadata.get("quantity", 1),
+                    idempotency_key=metadata.get("idempotency_key"),
+                )
+            except CrossTenantAccessError as err:
+                return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
+            except PrivilegeEscalationAttemptError as err:
+                return self._error_response(
+                    403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                )
+            except InsufficientInventoryError as err:
+                return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except DomainError as err:
+                return self._error_response(400, err.code, str(err), request_id)
+
+            acp_resp = self.acp_adapter.from_execution_result(acp_req, res)
+            return 200, acp_resp.to_dict()
+
+        if (
+            path in ("/api/v1/protocols/ap2/mandates", "/api/v1/protocols/ap2/payments")
+            and method == "POST"
+        ):
+            if self._emergency_paused:
+                return self._error_response(
+                    503,
+                    "EMERGENCY_PAUSE_ACTIVE",
+                    "Autonomous payment processing is temporarily suspended by emergency control",
+                    request_id,
+                )
+            try:
+                ap2_req = self.ap2_adapter.parse_payload(body or {})
+                if tenant_id and ap2_req.payer.tenant_id and tenant_id != ap2_req.payer.tenant_id:
+                    return self._error_response(
+                        403,
+                        "CROSS_TENANT_ACCESS_DENIED",
+                        "Header tenant does not match payer tenant",
+                        request_id,
+                    )
+                action, metadata = self.ap2_adapter.to_action_request(ap2_req, tenant_id=tenant_id)
+            except MalformedPayloadError as err:
+                return self._error_response(422, err.code, str(err), request_id, err.details)
+            except UnsupportedProtocolVersionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except UnsupportedActionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except ProtocolError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except DomainError as err:
+                return self._error_response(422, err.code, str(err), request_id)
+
+            try:
+                v_id = metadata.get("variant_id", "")
+                self._ensure_resource_inventory(tenant_id, v_id)
+                res = self.orchestrator.execute_purchase(
+                    action=action,
+                    tenant_id=tenant_id,
+                    variant_id=v_id,
+                    quantity=metadata.get("quantity", 1),
+                    idempotency_key=metadata.get("idempotency_key"),
+                )
+            except CrossTenantAccessError as err:
+                return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
+            except PrivilegeEscalationAttemptError as err:
+                return self._error_response(
+                    403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                )
+            except InsufficientInventoryError as err:
+                return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except DomainError as err:
+                return self._error_response(400, err.code, str(err), request_id)
+
+            ap2_resp = self.ap2_adapter.from_execution_result(ap2_req, res)
+            return 200, ap2_resp.to_dict()
+
+        if (
+            path in ("/api/v1/protocols/uap/rpc", "/api/v1/protocols/uap/messages")
+            and method == "POST"
+        ):
+            if self._emergency_paused:
+                return self._error_response(
+                    503,
+                    "EMERGENCY_PAUSE_ACTIVE",
+                    "Autonomous payment processing is temporarily suspended by emergency control",
+                    request_id,
+                )
+            try:
+                uap_req = self.uap_adapter.parse_payload(body or {})
+                if tenant_id and uap_req.header.tenant and tenant_id != uap_req.header.tenant:
+                    return self._error_response(
+                        403,
+                        "CROSS_TENANT_ACCESS_DENIED",
+                        "Header tenant does not match message tenant",
+                        request_id,
+                    )
+                action, metadata = self.uap_adapter.to_action_request(uap_req, tenant_id=tenant_id)
+            except MalformedPayloadError as err:
+                return self._error_response(422, err.code, str(err), request_id, err.details)
+            except UnsupportedProtocolVersionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except UnsupportedActionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except ProtocolError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except DomainError as err:
+                return self._error_response(422, err.code, str(err), request_id)
+
+            try:
+                v_id = metadata.get("variant_id", "")
+                self._ensure_resource_inventory(tenant_id, v_id)
+                res = self.orchestrator.execute_purchase(
+                    action=action,
+                    tenant_id=tenant_id,
+                    variant_id=v_id,
+                    quantity=metadata.get("quantity", 1),
+                    idempotency_key=metadata.get("idempotency_key"),
+                )
+            except CrossTenantAccessError as err:
+                return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
+            except PrivilegeEscalationAttemptError as err:
+                return self._error_response(
+                    403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                )
+            except InsufficientInventoryError as err:
+                return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except DomainError as err:
+                return self._error_response(400, err.code, str(err), request_id)
+
+            uap_resp = self.uap_adapter.from_execution_result(uap_req, res)
+            return 200, uap_resp.to_dict()
+
+        if (
+            path in ("/api/v1/protocols/x402/pay", "/api/v1/protocols/x402/challenge")
+            and method == "POST"
+        ):
+            if self._emergency_paused:
+                return self._error_response(
+                    503,
+                    "EMERGENCY_PAUSE_ACTIVE",
+                    "Autonomous payment processing is temporarily suspended by emergency control",
+                    request_id,
+                )
+            try:
+                x402_req = self.x402_adapter.parse_payload(body or {})
+                if tenant_id and x402_req.tenant_id and tenant_id != x402_req.tenant_id:
+                    return self._error_response(
+                        403,
+                        "CROSS_TENANT_ACCESS_DENIED",
+                        "Header tenant does not match payload tenant",
+                        request_id,
+                    )
+                action, metadata = self.x402_adapter.to_action_request(
+                    x402_req, tenant_id=tenant_id
+                )
+            except MalformedPayloadError as err:
+                return self._error_response(422, err.code, str(err), request_id, err.details)
+            except UnsupportedProtocolVersionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except UnsupportedActionError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except ProtocolError as err:
+                return self._error_response(400, err.code, str(err), request_id, err.details)
+            except DomainError as err:
+                return self._error_response(422, err.code, str(err), request_id)
+
+            try:
+                v_id = metadata.get("variant_id", "")
+                self._ensure_resource_inventory(tenant_id, v_id)
+                res = self.orchestrator.execute_purchase(
+                    action=action,
+                    tenant_id=tenant_id,
+                    variant_id=v_id,
+                    quantity=metadata.get("quantity", 1),
+                    idempotency_key=metadata.get("idempotency_key"),
+                )
+            except CrossTenantAccessError as err:
+                return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
+            except PrivilegeEscalationAttemptError as err:
+                return self._error_response(
+                    403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                )
+            except InsufficientInventoryError as err:
+                return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except DomainError as err:
+                return self._error_response(400, err.code, str(err), request_id)
+
+            x402_resp = self.x402_adapter.from_execution_result(x402_req, res)
+            return 200, x402_resp.to_dict()
 
         return self._error_response(
             404, "ENDPOINT_NOT_FOUND", f"Cannot {method} {path}", request_id
