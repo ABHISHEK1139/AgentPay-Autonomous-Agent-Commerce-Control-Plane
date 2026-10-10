@@ -112,6 +112,7 @@ def test_vector_14_audit_chain_baseline_validity() -> None:
         "tenant_id",
         "agent_id",
         "action_id",
+        "trace_id",
         "data",
         "previous_event_hash",
     ],
@@ -146,6 +147,8 @@ def test_vector_14_metadata_tampering_at_all_positions(
         tampered_value = "forged_agent_999" if orig_value is None else None
     elif field_name == "action_id":
         tampered_value = "forged_act_hijack" if orig_value is None else None
+    elif field_name == "trace_id":
+        tampered_value = "forged_trace_999" if orig_value is None else None
     elif field_name == "data":
         tampered_value = {**orig_value, "tampered_key": "tampered_value"}
     elif field_name == "previous_event_hash":
@@ -193,7 +196,7 @@ def test_vector_14_structural_stream_tampering_deletion_and_reorder() -> None:
 @given(
     target_pos=st.integers(min_value=0, max_value=7),
     field_choice=st.sampled_from(
-        ["actor", "event_type", "timestamp", "tenant_id", "agent_id", "action_id"]
+        ["actor", "event_type", "timestamp", "tenant_id", "agent_id", "action_id", "trace_id"]
     ),
 )
 @settings(max_examples=50)
@@ -222,6 +225,8 @@ def test_vector_14_property_based_tamper_detection(target_pos: int, field_choice
         mutation = "prop_agent" if orig is None else None
     elif field_choice == "action_id":
         mutation = "prop_action" if orig is None else None
+    elif field_choice == "trace_id":
+        mutation = "prop_trace" if orig is None else None
 
     object.__setattr__(ev, field_choice, mutation)
     assert ledger.verify_chain(tenant) is False

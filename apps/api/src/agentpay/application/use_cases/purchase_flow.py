@@ -161,6 +161,7 @@ class PurchaseOrchestrator:
         agent_id: str,
         tool_name: str,
         parameters: dict[str, Any] | None = None,
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute a registered and authorized tool on behalf of an agent (§26, §27)."""
         params = parameters or {}
@@ -194,6 +195,7 @@ class PurchaseOrchestrator:
                     "parameters": params,
                 },
                 agent_id=agent_id,
+                trace_id=trace_id,
             )
 
         # 5. Dispatch based on tool name
@@ -264,6 +266,7 @@ class PurchaseOrchestrator:
         tenant_id: str,
         actor: str,
         data: dict[str, object],
+        trace_id: str | None = None,
     ) -> None:
         if self._audit_ledger is not None:
             self._audit_ledger.record_event(
@@ -273,6 +276,7 @@ class PurchaseOrchestrator:
                 actor=actor,
                 data=data,
                 agent_id=action.agent_id,
+                trace_id=trace_id,
             )
 
     def execute_purchase(
@@ -282,6 +286,7 @@ class PurchaseOrchestrator:
         variant_id: str,
         quantity: int = 1,
         idempotency_key: str | None = None,
+        trace_id: str | None = None,
     ) -> PurchaseExecutionResult:
         """Execute the canonical end-to-end purchase flow (§74)."""
         # 1. Multi-tenant context validation (§49, §50)
@@ -340,6 +345,7 @@ class PurchaseOrchestrator:
             tenant_id,
             actor=action.agent_id,
             data={"action": action.action, "amount": str(action.amount)},
+            trace_id=trace_id,
         )
 
         # 3. Agent Identity & Authorization validation (§15, §16, §177 Vectors 1 & 4)
@@ -359,6 +365,7 @@ class PurchaseOrchestrator:
                     "reason": "UNREGISTERED_AGENT",
                     "agent_id": action.agent_id,
                 },
+                trace_id=trace_id,
             )
             return PurchaseExecutionResult(
                 action_id=action.action_id,
@@ -377,6 +384,7 @@ class PurchaseOrchestrator:
                 tenant_id,
                 actor="auth_service",
                 data={"decision": "DENIED", "error": str(err)},
+                trace_id=trace_id,
             )
             return PurchaseExecutionResult(
                 action_id=action.action_id,
@@ -399,6 +407,7 @@ class PurchaseOrchestrator:
                 tenant_id,
                 actor="commerce_service",
                 data={"decision": "DENIED", "reason": "VARIANT_NOT_FOUND"},
+                trace_id=trace_id,
             )
             return PurchaseExecutionResult(
                 action_id=action.action_id,
@@ -422,6 +431,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="commerce_service",
                     data={"decision": "DENIED", "reason": "PRODUCT_NOT_FOUND"},
+                    trace_id=trace_id,
                 )
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
@@ -439,6 +449,7 @@ class PurchaseOrchestrator:
                         tenant_id,
                         actor="auth_service",
                         data={"decision": "DENIED", "category": product.category},
+                        trace_id=trace_id,
                     )
                     return PurchaseExecutionResult(
                         action_id=action.action_id,
@@ -460,6 +471,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="merchant_verifier",
                     data={"decision": "DENIED", "reason": "MERCHANT_NOT_FOUND"},
+                    trace_id=trace_id,
                 )
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
@@ -475,6 +487,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="merchant_verifier",
                     data={"decision": "DENIED", "reason": f"MERCHANT_{merchant.status.value}"},
+                    trace_id=trace_id,
                 )
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
@@ -490,6 +503,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="merchant_verifier",
                     data={"decision": "DENIED", "reason": "AGENT_PURCHASE_NOT_ALLOWED"},
+                    trace_id=trace_id,
                 )
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
@@ -513,6 +527,7 @@ class PurchaseOrchestrator:
                         "reason": "MERCHANT_MAX_ORDER_EXCEEDED",
                         "max_order_minor": merchant.max_order_amount_minor,
                     },
+                    trace_id=trace_id,
                 )
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
@@ -544,6 +559,7 @@ class PurchaseOrchestrator:
                     "conflict_count": len(conflicts),
                     "first_conflict": conflicts[0].conflict_type.value,
                 },
+                trace_id=trace_id,
             )
             return PurchaseExecutionResult(
                 action_id=action.action_id,
@@ -566,16 +582,22 @@ class PurchaseOrchestrator:
                     category=action.resource.type,
                 )
                 decision_summary = self._decision_engine.evaluate(context)
+                jev_data: dict[str, Any] = {
+                    "recommendation": decision_summary.recommendation.value,
+                    "risk_level": decision_summary.risk_level.value,
+                    "confidence": decision_summary.confidence,
+                    "model_version": decision_summary.model_version,
+                    "prompt_version": decision_summary.prompt_version,
+                    "tool_policy_version": decision_summary.tool_policy_version,
+                    "policy_version": decision_summary.policy_version,
+                }
                 self._audit(
                     AuditEventType.JEV_EVALUATED,
                     action,
                     tenant_id,
                     actor=decision_summary.model_provider,
-                    data={
-                        "recommendation": decision_summary.recommendation.value,
-                        "risk_level": decision_summary.risk_level.value,
-                        "confidence": decision_summary.confidence,
-                    },
+                    data=jev_data,
+                    trace_id=trace_id,
                 )
             except Exception:
                 # Advisory AI provider failure handled gracefully (§2.2, §134)
@@ -617,6 +639,7 @@ class PurchaseOrchestrator:
                 "decision": policy_result.decision.value,
                 "requires_approval": policy_result.requires_approval,
             },
+            trace_id=trace_id,
         )
 
         if policy_result.decision is PolicyDecision.DENY:
@@ -647,6 +670,7 @@ class PurchaseOrchestrator:
                 tenant_id,
                 actor="system",
                 data={"approval_id": approval.approval_id, "amount": str(action.amount)},
+                trace_id=trace_id,
             )
             return PurchaseExecutionResult(
                 action_id=action.action_id,
@@ -669,6 +693,7 @@ class PurchaseOrchestrator:
             decision_summary=decision_summary,
             merchant_id=resolved_m_id,
             idempotency_key=idempotency_key or f"idem_{action.action_id}",
+            trace_id=trace_id,
         )
 
     def _execute_order_and_payment_pipeline(
@@ -681,6 +706,7 @@ class PurchaseOrchestrator:
         approval: Approval | None = None,
         merchant_id: str | None = None,
         idempotency_key: str | None = None,
+        trace_id: str | None = None,
     ) -> PurchaseExecutionResult:
         if action.amount is None:
             return PurchaseExecutionResult(
@@ -730,6 +756,7 @@ class PurchaseOrchestrator:
                     "status": payment_attempt.status.value,
                     "amount": str(action.amount),
                 },
+                trace_id=trace_id,
             )
 
             # Check payment success
@@ -744,6 +771,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="payment_provider",
                     data={"payment_id": payment_attempt.attempt_id, "status": "DECLINED"},
+                    trace_id=trace_id,
                 )
 
                 cancelled_order = Order(
@@ -767,6 +795,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="order_service",
                     data={"order_id": cancelled_order.order_id, "reason": "Payment declined"},
+                    trace_id=trace_id,
                 )
 
                 if self._idempotency_store is not None and idempotency_key is not None:
@@ -805,6 +834,7 @@ class PurchaseOrchestrator:
                     tenant_id,
                     actor="payment_provider",
                     data={"payment_id": payment_attempt.attempt_id, "status": "UNKNOWN"},
+                    trace_id=trace_id,
                 )
 
                 if self._idempotency_store is not None and idempotency_key is not None:
@@ -857,6 +887,7 @@ class PurchaseOrchestrator:
             tenant_id,
             actor="order_service",
             data={"order_id": order.order_id, "status": order.status.value},
+            trace_id=trace_id,
         )
 
         # 4. Save Idempotency record (§42)
@@ -897,6 +928,7 @@ class PurchaseOrchestrator:
         variant_id: str,
         quantity: int = 1,
         idempotency_key: str | None = None,
+        trace_id: str | None = None,
     ) -> PurchaseExecutionResult:
         """Execute a purchase that was previously approved by a human (§20)."""
         if self._approval_repo is None:
@@ -962,6 +994,7 @@ class PurchaseOrchestrator:
                             if merchant
                             else "MERCHANT_NOT_FOUND",
                         },
+                        trace_id=trace_id,
                     )
                     return PurchaseExecutionResult(
                         action_id=action.action_id,
@@ -977,6 +1010,7 @@ class PurchaseOrchestrator:
                         tenant_id,
                         actor="merchant_verifier",
                         data={"decision": "DENIED", "reason": "AGENT_PURCHASE_NOT_ALLOWED"},
+                        trace_id=trace_id,
                     )
                     return PurchaseExecutionResult(
                         action_id=action.action_id,
@@ -992,6 +1026,7 @@ class PurchaseOrchestrator:
             tenant_id,
             actor=consumed_approval.approver_id or "human_approver",
             data={"approval_id": approval_id},
+            trace_id=trace_id,
         )
 
         return self._execute_order_and_payment_pipeline(
@@ -1002,4 +1037,5 @@ class PurchaseOrchestrator:
             approval=consumed_approval,
             merchant_id=consumed_approval.binding.merchant_id,
             idempotency_key=idempotency_key or f"idem_{action.action_id}",
+            trace_id=trace_id,
         )

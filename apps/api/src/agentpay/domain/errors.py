@@ -165,6 +165,16 @@ class RateLimitExceededError(DomainError):
 
     code = "RATE_LIMIT_EXCEEDED"
 
+    def __init__(
+        self,
+        message: str = "Rate limit exceeded",
+        retry_after_seconds: float = 0.0,
+        scope: str = "agent",
+    ) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+        self.scope = scope
+
 
 # Tool Registry Errors (§26, §27)
 class ToolRegistryError(DomainError):

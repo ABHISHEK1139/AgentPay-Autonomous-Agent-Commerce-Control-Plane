@@ -39,6 +39,9 @@ class MockDecisionEngine(DecisionEngine):
                 ),
                 model_provider="mock",
                 model_version="mock-v1",
+                prompt_version="prompt-commerce-v1",
+                tool_policy_version="tool-policy-v1",
+                policy_version="spending-policy-v1",
             )
         elif 200_000 < amount.minor_units <= 500_000:
             return Decision(
@@ -55,6 +58,9 @@ class MockDecisionEngine(DecisionEngine):
                 ),
                 model_provider="mock",
                 model_version="mock-v1",
+                prompt_version="prompt-commerce-v1",
+                tool_policy_version="tool-policy-v1",
+                policy_version="spending-policy-v1",
             )
         elif 500_000 < amount.minor_units <= 2_000_000:
             return Decision(
@@ -71,6 +77,9 @@ class MockDecisionEngine(DecisionEngine):
                 ),
                 model_provider="mock",
                 model_version="mock-v1",
+                prompt_version="prompt-commerce-v1",
+                tool_policy_version="tool-policy-v1",
+                policy_version="spending-policy-v1",
             )
         else:
             return Decision(
@@ -87,4 +96,7 @@ class MockDecisionEngine(DecisionEngine):
                 ),
                 model_provider="mock",
                 model_version="mock-v1",
+                prompt_version="prompt-commerce-v1",
+                tool_policy_version="tool-policy-v1",
+                policy_version="spending-policy-v1",
             )

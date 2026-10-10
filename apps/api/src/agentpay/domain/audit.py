@@ -68,6 +68,7 @@ class AuditEvent:
     action_id: str | None = None
     request_id: str | None = None
     correlation_id: str | None = None
+    trace_id: str | None = None
     version: int = 1
 
     def __post_init__(self) -> None:
@@ -85,6 +86,7 @@ class AuditEvent:
             ("action_id", self.action_id),
             ("request_id", self.request_id),
             ("correlation_id", self.correlation_id),
+            ("trace_id", self.trace_id),
         )
         for field_name, value in optional_strings:
             if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -149,6 +151,7 @@ class AuditHasher:
         tenant_id: str = "",
         agent_id: str | None = None,
         action_id: str | None = None,
+        trace_id: str | None = None,
     ) -> str:
         """Convenience: canonical JSON of event metadata and data, then hash in one call (§29, §45)."""
         preimage_dict: dict[str, Any] = {
@@ -161,6 +164,7 @@ class AuditHasher:
             "timestamp": timestamp.isoformat()
             if isinstance(timestamp, datetime)
             else str(timestamp),
+            "trace_id": trace_id or "",
         }
         canonical = AuditHasher.canonical_json(preimage_dict)
         return AuditHasher.compute_hash(canonical, previous_hash)

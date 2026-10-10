@@ -118,6 +118,7 @@ def verify_exported_stream(file_path: str) -> bool:
             timestamp = str(ev.get("timestamp", ""))
             agent_id = ev.get("agent_id")
             action_id = ev.get("action_id")
+            trace_id = ev.get("trace_id")
 
             recomputed = AuditHasher.compute_event_hash(
                 event_data=event_data,
@@ -128,6 +129,7 @@ def verify_exported_stream(file_path: str) -> bool:
                 tenant_id=tenant_id,
                 agent_id=str(agent_id) if agent_id is not None else None,
                 action_id=str(action_id) if action_id is not None else None,
+                trace_id=str(trace_id) if trace_id is not None else None,
             )
 
             if curr_hash != recomputed:

@@ -39,6 +39,7 @@ class InMemoryAuditLedger(AuditLedger):
         agent_id: str | None = None,
         request_id: str | None = None,
         correlation_id: str | None = None,
+        trace_id: str | None = None,
     ) -> AuditEvent:
         tenant_id_val: object = tenant_id
         if not isinstance(tenant_id_val, str) or not tenant_id_val.strip():
@@ -65,6 +66,7 @@ class InMemoryAuditLedger(AuditLedger):
                 tenant_id=tenant_id,
                 agent_id=agent_id,
                 action_id=action_id,
+                trace_id=trace_id,
             )
 
             event = AuditEvent(
@@ -80,6 +82,7 @@ class InMemoryAuditLedger(AuditLedger):
                 action_id=action_id,
                 request_id=request_id,
                 correlation_id=correlation_id,
+                trace_id=trace_id,
                 version=1,
             )
             events.append(event)
@@ -116,6 +119,7 @@ class InMemoryAuditLedger(AuditLedger):
                     tenant_id=event.tenant_id,
                     agent_id=event.agent_id,
                     action_id=event.action_id,
+                    trace_id=event.trace_id,
                 )
                 if event.event_hash != recomputed:
                     return False

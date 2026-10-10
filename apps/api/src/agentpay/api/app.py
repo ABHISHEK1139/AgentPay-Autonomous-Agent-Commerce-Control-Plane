@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
@@ -20,6 +21,7 @@ from typing import Any
 
 from agentpay.adapters.in_memory.approval_repository import InMemoryApprovalRepository
 from agentpay.adapters.in_memory.identity_repository import InMemoryCredentialRepository
+from agentpay.adapters.in_memory.rate_limiter import InMemoryRateLimiter
 from agentpay.adapters.protocols import (
     AcpAdapter,
     Ap2Adapter,
@@ -36,6 +38,7 @@ from agentpay.api.schemas import (
     ApiErrorResponse,
 )
 from agentpay.application.ports.identity_port import CredentialRepository
+from agentpay.application.ports.rate_limit_port import RateLimiter
 from agentpay.application.use_cases.purchase_flow import (
     PurchaseExecutionResult,
     PurchaseOrchestrator,
@@ -52,6 +55,7 @@ from agentpay.domain.errors import (
     IdempotencyConflictError,
     InsufficientInventoryError,
     PrivilegeEscalationAttemptError,
+    RateLimitExceededError,
     UnauthorizedToolAccessError,
     UnknownToolError,
 )
@@ -70,6 +74,37 @@ Send = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 _current_trace_id: ContextVar[str | None] = ContextVar("_current_trace_id", default=None)
 
 
+class ApiResponse(tuple[Any, ...]):
+    """HTTP response 2-tuple (status_code, body) compatible with tuple unpacking, with .headers attribute."""
+
+    _headers: dict[str, str]
+
+    def __new__(
+        cls,
+        status_code: int,
+        body: dict[str, Any],
+        headers: dict[str, str] | None = None,
+    ) -> ApiResponse:
+        inst = super().__new__(cls, (status_code, body))
+        inst._headers = {k.lower(): str(v) for k, v in (headers or {}).items()}
+        return inst
+
+    @property
+    def status_code(self) -> int:
+        return self[0]  # type: ignore[no-any-return]
+
+    @property
+    def body(self) -> dict[str, Any]:
+        return self[1]  # type: ignore[no-any-return]
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return dict(self._headers)
+
+    def as_tuple(self) -> tuple[int, dict[str, Any], dict[str, str]]:
+        return (self[0], self[1], dict(self._headers))
+
+
 class AgentPayApiApp:
     """Core HTTP Application exposing AgentPay control plane APIs."""
 
@@ -77,17 +112,42 @@ class AgentPayApiApp:
         self,
         orchestrator: PurchaseOrchestrator,
         credential_repo: CredentialRepository | None = None,
+        rate_limiter: RateLimiter | None = None,
+        mutating_agent_capacity: int = 10,
+        mutating_agent_refill_rate: float = 2.0,
+        mutating_tenant_capacity: int = 50,
+        mutating_tenant_refill_rate: float = 10.0,
+        read_agent_capacity: int = 100,
+        read_agent_refill_rate: float = 20.0,
+        read_tenant_capacity: int = 500,
+        read_tenant_refill_rate: float = 100.0,
     ) -> None:
         self.orchestrator = orchestrator
         self.credential_repo: CredentialRepository = (
             credential_repo if credential_repo is not None else InMemoryCredentialRepository()
         )
+        self.rate_limiter: RateLimiter = (
+            rate_limiter if rate_limiter is not None else InMemoryRateLimiter()
+        )
+        self._mutating_agent_capacity = mutating_agent_capacity
+        self._mutating_agent_refill_rate = mutating_agent_refill_rate
+        self._mutating_tenant_capacity = mutating_tenant_capacity
+        self._mutating_tenant_refill_rate = mutating_tenant_refill_rate
+        self._read_agent_capacity = read_agent_capacity
+        self._read_agent_refill_rate = read_agent_refill_rate
+        self._read_tenant_capacity = read_tenant_capacity
+        self._read_tenant_refill_rate = read_tenant_refill_rate
+        self._last_response_headers: dict[str, str] = {}
         self._emergency_paused: bool = False
         self._pause_metadata: dict[str, Any] = {}
         self.acp_adapter = AcpAdapter()
         self.ap2_adapter = Ap2Adapter()
         self.uap_adapter = UapAdapter()
         self.x402_adapter = X402Adapter()
+
+    @property
+    def last_response_headers(self) -> dict[str, str]:
+        return dict(self._last_response_headers)
 
     def _extract_protocol_tenant(self, path: str, body: dict[str, Any] | None) -> str:
         """Extract tenant context from protocol payload when header is omitted."""
@@ -221,8 +281,11 @@ class AgentPayApiApp:
         request_id: str | None = None,
         details: dict[str, Any] | None = None,
         trace_id: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         effective_trace_id = trace_id or _current_trace_id.get()
+        if headers:
+            self._last_response_headers.update(headers)
         err = ApiErrorResponse(
             error=ApiErrorDetail(
                 code=code,
@@ -233,6 +296,135 @@ class AgentPayApiApp:
             )
         )
         return status_code, err.to_dict()
+
+    def _is_mutating_route(self, path: str, method: str) -> bool:
+        """Determine if an endpoint is a high-risk/mutating financial route (§62)."""
+        if method != "POST":
+            return False
+        return (
+            path in ("/api/v1/actions", "/agent/actions")
+            or path.startswith("/api/v1/protocols/")
+            or path.startswith("/api/v1/tools/")
+            or path.startswith("/agent/tools/")
+            or (
+                path.startswith("/api/v1/approvals/")
+                and any(path.endswith(f"/{action}") for action in ("approve", "reject", "grant"))
+            )
+        )
+
+    def _is_read_route(self, path: str, method: str) -> bool:
+        """Determine if an endpoint is a read-only resource route (§62)."""
+        return method == "GET" and (
+            path == "/agent/catalog"
+            or path.startswith("/agent/products/")
+            or path == "/api/v1/approvals"
+        )
+
+    def _check_rate_limits(
+        self,
+        path: str,
+        method: str,
+        tenant_id: str,
+        principal_id: str,
+        request_id: str,
+    ) -> tuple[int, dict[str, Any], dict[str, str]] | None:
+        """Evaluate dual-tier rate limiting (agent bucket + tenant bucket) (§52, §62).
+
+        Returns:
+            (status_code, error_body, headers) if rate limit exceeded, else None.
+        """
+        is_mutating = self._is_mutating_route(path, method)
+        is_read = self._is_read_route(path, method)
+
+        if not is_mutating and not is_read:
+            return None
+
+        if is_mutating:
+            agent_cap = self._mutating_agent_capacity
+            agent_refill = self._mutating_agent_refill_rate
+            tenant_cap = self._mutating_tenant_capacity
+            tenant_refill = self._mutating_tenant_refill_rate
+            agent_key = f"agent:{tenant_id}:{principal_id}"
+            tenant_key = f"tenant:{tenant_id}"
+        else:
+            agent_cap = self._read_agent_capacity
+            agent_refill = self._read_agent_refill_rate
+            tenant_cap = self._read_tenant_capacity
+            tenant_refill = self._read_tenant_refill_rate
+            agent_key = f"agent:read:{tenant_id}:{principal_id}"
+            tenant_key = f"tenant:read:{tenant_id}"
+
+        # 1. Check Agent Bucket
+        agent_res = self.rate_limiter.check_rate_limit(
+            key=agent_key,
+            cost=1,
+            capacity=agent_cap,
+            refill_rate_per_sec=agent_refill,
+        )
+        if not agent_res.allowed:
+            retry_secs = max(1, math.ceil(agent_res.retry_after_seconds))
+            details = {
+                "retry_after_seconds": agent_res.retry_after_seconds,
+                "limit": agent_res.limit,
+                "remaining": agent_res.remaining,
+                "scope": "agent",
+            }
+            rl_headers = {
+                "retry-after": str(retry_secs),
+                "x-ratelimit-limit": str(agent_res.limit),
+                "x-ratelimit-remaining": str(agent_res.remaining),
+                "x-ratelimit-reset": str(math.ceil(agent_res.reset_time)),
+            }
+            status, body = self._error_response(
+                429,
+                "RATE_LIMIT_EXCEEDED",
+                f"Rate limit exceeded. Please retry after {retry_secs} seconds.",
+                request_id=request_id,
+                details=details,
+                headers=rl_headers,
+            )
+            return status, body, rl_headers
+
+        # 2. Check Tenant Bucket
+        tenant_res = self.rate_limiter.check_rate_limit(
+            key=tenant_key,
+            cost=1,
+            capacity=tenant_cap,
+            refill_rate_per_sec=tenant_refill,
+        )
+        if not tenant_res.allowed:
+            retry_secs = max(1, math.ceil(tenant_res.retry_after_seconds))
+            details = {
+                "retry_after_seconds": tenant_res.retry_after_seconds,
+                "limit": tenant_res.limit,
+                "remaining": tenant_res.remaining,
+                "scope": "tenant",
+            }
+            rl_headers = {
+                "retry-after": str(retry_secs),
+                "x-ratelimit-limit": str(tenant_res.limit),
+                "x-ratelimit-remaining": str(tenant_res.remaining),
+                "x-ratelimit-reset": str(math.ceil(tenant_res.reset_time)),
+            }
+            status, body = self._error_response(
+                429,
+                "RATE_LIMIT_EXCEEDED",
+                f"Rate limit exceeded. Please retry after {retry_secs} seconds.",
+                request_id=request_id,
+                details=details,
+                headers=rl_headers,
+            )
+            return status, body, rl_headers
+
+        # Both passed: store rate limit headers for success responses
+        self._last_response_headers.update(
+            {
+                "x-ratelimit-limit": str(agent_res.limit),
+                "x-ratelimit-remaining": str(agent_res.remaining),
+                "x-ratelimit-reset": str(math.ceil(agent_res.reset_time)),
+            }
+        )
+        return None
 
     def _authenticate_request(
         self, headers: dict[str, str], request_id: str
@@ -306,32 +498,72 @@ class AgentPayApiApp:
         path: str,
         headers: dict[str, str],
         body: dict[str, Any] | None = None,
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> ApiResponse:
         """Synchronous dispatch for hermetic testing and clean request processing."""
         hdrs = {k.lower(): v for k, v in headers.items()}
         request_id = hdrs.get("x-request-id", f"req_{uuid.uuid4().hex[:12]}")
         trace_id = (
-            hdrs.get("x-trace-id") or hdrs.get("traceparent") or f"trace_{uuid.uuid4().hex[:16]}"
+            hdrs.get("x-trace-id") or hdrs.get("traceparent") or f"trace_{uuid.uuid4().hex[:12]}"
         )
         tenant_id = hdrs.get("x-tenant-id", "")
 
         ctx_token = _current_trace_id.set(trace_id)
+        self._last_response_headers = {
+            "x-trace-id": trace_id,
+            "x-request-id": request_id,
+        }
         try:
-            return self._dispatch(method, path, hdrs, body, request_id, tenant_id)
+            status_code, resp_data = self._dispatch(
+                method, path, hdrs, body, request_id, tenant_id, trace_id
+            )
+            return ApiResponse(status_code, resp_data, self._last_response_headers)
+        except RateLimitExceededError as err:
+            ceil_secs = max(1, math.ceil(err.retry_after_seconds))
+            rl_headers = {
+                "retry-after": str(ceil_secs),
+            }
+            status_code, resp_data = self._error_response(
+                429,
+                "RATE_LIMIT_EXCEEDED",
+                str(err),
+                request_id,
+                details={
+                    "retry_after_seconds": err.retry_after_seconds,
+                    "scope": err.scope,
+                },
+                headers=rl_headers,
+            )
+            return ApiResponse(status_code, resp_data, self._last_response_headers)
         except UnknownToolError as err:
-            return self._error_response(400, "UNKNOWN_TOOL", str(err), request_id)
+            status_code, resp_data = self._error_response(400, "UNKNOWN_TOOL", str(err), request_id)
+            return ApiResponse(status_code, resp_data, self._last_response_headers)
         except UnauthorizedToolAccessError as err:
-            return self._error_response(403, "UNAUTHORIZED_TOOL_ACCESS", str(err), request_id)
+            status_code, resp_data = self._error_response(
+                403, "UNAUTHORIZED_TOOL_ACCESS", str(err), request_id
+            )
+            return ApiResponse(status_code, resp_data, self._last_response_headers)
         except Exception:
-            return self._error_response(
+            status_code, resp_data = self._error_response(
                 500,
                 "INTERNAL_ERROR",
                 "An unexpected internal error occurred",
                 request_id,
                 trace_id=trace_id,
             )
+            return ApiResponse(status_code, resp_data, self._last_response_headers)
         finally:
             _current_trace_id.reset(ctx_token)
+
+    def handle_request_with_headers(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        """Dispatch returning explicit 3-tuple (status_code, body, headers)."""
+        resp = self.handle_request(method, path, headers, body)
+        return resp.status_code, resp.body, resp.headers
 
     def _dispatch(
         self,
@@ -341,6 +573,7 @@ class AgentPayApiApp:
         body: dict[str, Any] | None,
         request_id: str,
         tenant_id: str,
+        trace_id: str = "",
     ) -> tuple[int, dict[str, Any]]:
 
         # 1. Health check
@@ -460,6 +693,22 @@ class AgentPayApiApp:
                 },
             )
 
+        # --- RATE LIMITING ENFORCEMENT (§52, §62) ---
+        effective_principal = cred.principal_id
+        if isinstance(body, dict) and body.get("agent_id"):
+            effective_principal = str(body["agent_id"])
+
+        rate_limit_err = self._check_rate_limits(
+            path=path,
+            method=method,
+            tenant_id=tenant_id,
+            principal_id=effective_principal,
+            request_id=request_id,
+        )
+        if rate_limit_err is not None:
+            status_code, err_body, _ = rate_limit_err
+            return status_code, err_body
+
         # 4. Agent Catalog endpoints (§38)
         if path == "/agent/catalog" and method == "GET":
             products = []
@@ -536,7 +785,9 @@ class AgentPayApiApp:
                     agent_id=agent_id,
                     tool_name=tool_name,
                     parameters=parameters,
+                    trace_id=trace_id,
                 )
+                res_dict["trace_id"] = trace_id
                 return 200, res_dict
             except UnknownToolError as err:
                 return self._error_response(400, "UNKNOWN_TOOL", str(err), request_id)
@@ -604,6 +855,7 @@ class AgentPayApiApp:
                     variant_id=sub.variant_id,
                     quantity=sub.quantity,
                     idempotency_key=sub.idempotency_key,
+                    trace_id=trace_id,
                 )
             except CrossTenantAccessError as err:
                 return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
@@ -626,6 +878,7 @@ class AgentPayApiApp:
                 "payment_id": res.payment.attempt_id if res.payment else None,
                 "approval_id": res.approval.approval_id if res.approval else None,
                 "rejection_reason": res.rejection_reason,
+                "trace_id": trace_id,
             }
 
         # 6. Approvals (GET /api/v1/approvals or POST /api/v1/approvals/{id}/approve or reject or grant)
@@ -729,6 +982,7 @@ class AgentPayApiApp:
                     variant_id=metadata.get("variant_id", ""),
                     quantity=metadata.get("quantity", 1),
                     idempotency_key=metadata.get("idempotency_key"),
+                    trace_id=trace_id,
                 )
             except CrossTenantAccessError as err:
                 return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
@@ -744,7 +998,9 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id)
 
             acp_resp = self.acp_adapter.from_execution_result(acp_req, res)
-            return 200, acp_resp.to_dict()
+            acp_dict = acp_resp.to_dict()
+            acp_dict["trace_id"] = trace_id
+            return 200, acp_dict
 
         if (
             path in ("/api/v1/protocols/ap2/mandates", "/api/v1/protocols/ap2/payments")
@@ -787,6 +1043,7 @@ class AgentPayApiApp:
                     variant_id=v_id,
                     quantity=metadata.get("quantity", 1),
                     idempotency_key=metadata.get("idempotency_key"),
+                    trace_id=trace_id,
                 )
             except CrossTenantAccessError as err:
                 return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
@@ -800,7 +1057,9 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id)
 
             ap2_resp = self.ap2_adapter.from_execution_result(ap2_req, res)
-            return 200, ap2_resp.to_dict()
+            ap2_dict = ap2_resp.to_dict()
+            ap2_dict["trace_id"] = trace_id
+            return 200, ap2_dict
 
         if (
             path in ("/api/v1/protocols/uap/rpc", "/api/v1/protocols/uap/messages")
@@ -843,6 +1102,7 @@ class AgentPayApiApp:
                     variant_id=v_id,
                     quantity=metadata.get("quantity", 1),
                     idempotency_key=metadata.get("idempotency_key"),
+                    trace_id=trace_id,
                 )
             except CrossTenantAccessError as err:
                 return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
@@ -856,7 +1116,9 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id)
 
             uap_resp = self.uap_adapter.from_execution_result(uap_req, res)
-            return 200, uap_resp.to_dict()
+            uap_dict = uap_resp.to_dict()
+            uap_dict["trace_id"] = trace_id
+            return 200, uap_dict
 
         if (
             path in ("/api/v1/protocols/x402/pay", "/api/v1/protocols/x402/challenge")
@@ -901,6 +1163,7 @@ class AgentPayApiApp:
                     variant_id=v_id,
                     quantity=metadata.get("quantity", 1),
                     idempotency_key=metadata.get("idempotency_key"),
+                    trace_id=trace_id,
                 )
             except CrossTenantAccessError as err:
                 return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
@@ -914,7 +1177,9 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id)
 
             x402_resp = self.x402_adapter.from_execution_result(x402_req, res)
-            return 200, x402_resp.to_dict()
+            x402_dict = x402_resp.to_dict()
+            x402_dict["trace_id"] = trace_id
+            return 200, x402_dict
 
         return self._error_response(
             404, "ENDPOINT_NOT_FOUND", f"Cannot {method} {path}", request_id
@@ -966,14 +1231,18 @@ class AgentPayApiApp:
         status_code, resp_data = self.handle_request(method, path, headers, body_json)
         resp_bytes = json.dumps(resp_data).encode("utf-8")
 
+        resp_headers_raw: list[list[bytes]] = [
+            [b"content-type", b"application/json"],
+            [b"content-length", str(len(resp_bytes)).encode("latin1")],
+        ]
+        for hk, hv in self.last_response_headers.items():
+            resp_headers_raw.append([hk.lower().encode("latin1"), str(hv).encode("latin1")])
+
         await send(
             {
                 "type": "http.response.start",
                 "status": status_code,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"content-length", str(len(resp_bytes)).encode("latin1")],
-                ],
+                "headers": resp_headers_raw,
             }
         )
         await send({"type": "http.response.body", "body": resp_bytes})
@@ -1064,6 +1333,11 @@ class ApiTestClient:
             self._tokens_by_tenant[key] = self.create_token(tenant_id=tenant_id, role=role)
         return self._tokens_by_tenant[key]
 
+    @property
+    def last_response_headers(self) -> dict[str, str]:
+        """Return response headers from the most recent request."""
+        return self.app.last_response_headers
+
     def request(
         self,
         method: str,
@@ -1071,7 +1345,7 @@ class ApiTestClient:
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         auth: bool = True,
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> ApiResponse:
         hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
         # Auto-inject default authentication unless explicitly disabled or already provided
@@ -1091,12 +1365,23 @@ class ApiTestClient:
 
         return self.app.handle_request(method, path, hdrs, json_body)
 
+    def request_with_headers(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+        auth: bool = True,
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        resp = self.request(method, path, headers=headers, json_body=json_body, auth=auth)
+        return resp.status_code, resp.body, resp.headers
+
     def get(
         self,
         path: str,
         headers: dict[str, str] | None = None,
         auth: bool = True,
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> ApiResponse:
         return self.request("GET", path, headers=headers, auth=auth)
 
     def post(
@@ -1105,5 +1390,5 @@ class ApiTestClient:
         json_body: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
         auth: bool = True,
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> ApiResponse:
         return self.request("POST", path, headers=headers, json_body=json_body, auth=auth)

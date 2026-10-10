@@ -121,3 +121,12 @@ class Decision:
             raise InvalidDecisionError(
                 f"confidence must be a float between 0.0 and 1.0, got {conf_obj!r}"
             )
+
+        optional_version_strings: tuple[tuple[str, object], ...] = (
+            ("prompt_version", self.prompt_version),
+            ("tool_policy_version", self.tool_policy_version),
+            ("policy_version", self.policy_version),
+        )
+        for name, val in optional_version_strings:
+            if val is not None and (not isinstance(val, str) or not val.strip()):
+                raise InvalidDecisionError(f"{name} must be None or a non-empty string")

@@ -26,6 +26,7 @@ class AuditLedger(Protocol):
         agent_id: str | None = None,
         request_id: str | None = None,
         correlation_id: str | None = None,
+        trace_id: str | None = None,
     ) -> AuditEvent:
         """Record an immutable, tamper-evident audit event."""
         ...
