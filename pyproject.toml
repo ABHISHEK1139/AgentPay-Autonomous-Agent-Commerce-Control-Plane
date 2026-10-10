@@ -3,7 +3,9 @@ name = "agentpay"
 version = "0.0.0"
 description = "AgentPay - agent action-control and transaction platform"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "sqlalchemy>=2.1.4",
+]
 
 [dependency-groups]
 dev = [

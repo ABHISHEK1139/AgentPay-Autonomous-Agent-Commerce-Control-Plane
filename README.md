@@ -21,12 +21,12 @@ governs your change (see its §0.5 index) before writing code.
 | Area | State |
 | --- | --- |
 | Tooling (uv, ruff, mypy, pytest, node, CI) | working, fully locked |
-| Domain model (`Money`, `ActionRequest`, `Identity`, `Commerce`, `Evidence`, `Decision`, `Approval`, `Payments`, `Audit`, `Safety`) | implemented, unit + property tested |
-| Application Layer (`AgentAuthorizationService`, `ApprovalService`, `PurchaseOrchestrator`) | implemented, hermetic orchestration |
+| Domain model (`Money` + ISO 4217 `currencies`, `ActionRequest`, `Identity`, `Commerce`, `Evidence`, `Decision`, `Approval`, `Payments`, `Audit`, `Safety`, `Tools`) | implemented, unit + property tested |
+| Application Layer (`AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`, `PurchaseOrchestrator`) | implemented, hermetic orchestration |
 | Protocol Adapters (ACP, AP2, UAP, x402) | implemented, pure domain mapping (§107, §108) |
 | Web Control Center (`apps/web/`) | implemented, 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67) |
-| Adapters (In-memory repos, mock PSP, mock JEV decision engine) | implemented, multi-tenant isolated |
-| HTTP API Layer (`/api/v1/...`, `/agent/...`, emergency pause/resume) | implemented, ASGI standard-library |
+| Adapters (In-memory repos, SQLAlchemy 2.0 relational repos, mock PSP, mock JEV decision engine) | implemented, multi-tenant isolated |
+| HTTP API Layer (`/api/v1/...`, `/agent/...`, `POST /api/v1/webhooks/payments`, emergency pause/resume) | implemented, ASGI standard-library |
 | Failure Engineering & Chaos Testing (§112) | implemented (price drift, timeout, decline saga, oversell) |
 | Red-Team Adversarial Corpus & 14 Vectors (§177) | implemented and verified (all 14 vectors defended) |
 | Dependency-boundary enforcement (§10) | enforced by 7 boundary tests (0 forbidden imports) |
@@ -37,10 +37,10 @@ Run from the repository root. These are the exact commands CI runs.
 
 ```powershell
 uv sync                             # create/update .venv from uv.lock
-uv run ruff format --check .        # format verification (81 files formatted)
+uv run ruff format --check .        # format verification (121 files formatted)
 uv run ruff check .                 # lint (clean)
-uv run mypy                         # strict type check (78 source files clean)
-uv run pytest                       # 491 unit, property, chaos & adversarial tests pass
+uv run mypy                         # strict type check (109 source files clean)
+uv run pytest                       # 566 unit, property, chaos, persistence & adversarial tests pass
 node --test tests/web.test.mjs      # 3 web control center suites pass
 ```
 
@@ -56,15 +56,16 @@ are the interface. Do not invent commands that do not exist.
 apps/
     api/src/agentpay/
         domain/          business meaning; imports no framework (blueprint §10)
-        application/     use cases, orchestration, purchase flow, approval service
-        api/             HTTP translation, OpenAPI, error envelopes, emergency controls
+        application/     use cases, orchestration, purchase flow, approval & reconciliation services
+        api/             HTTP translation, OpenAPI, webhooks, error envelopes, emergency controls
+        infrastructure/  SQLAlchemy 2.0 relational models and tenant-scoped repositories
         adapters/        in-memory repositories, mock payment provider, decision engine
         adapters/protocols/ ACP, AP2, UAP, x402 agent commerce protocol adapters
-    api/tests/unit/      unit, property-based, chaos, protocol, and adversarial security tests
+    api/tests/unit/      unit, property-based, chaos, protocol, persistence, and adversarial security tests
     web/                 React/TypeScript Control Center (10-step visualizer, approval UI, kill switch)
 docs/                    architecture, ADRs, threat model, runbooks, audit reports, technical debt
 tests/
-    adversarial/         concurrency and protocol stress testing harnesses
+    adversarial/         concurrency, protocol, privilege, money, and webhook stress testing harnesses
     web.test.mjs         Node test runner for web control center
 ```
 

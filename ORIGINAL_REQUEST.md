@@ -246,3 +246,79 @@ Deliver missing operational runbooks and engineering journals:
 ## Follow-up — 2026-10-10T11:26:20Z
 
 Server restarted. Please resume work on the remaining deliverables: R2 (Tool Registry integration and unit tests), R3 (Rate Limiting integration in API endpoints and unit tests), R4 (trace_id correlation across app and audit events), and R6 (the 9 named operational runbooks in docs/runbooks/ and ASVS mapping). All gates currently green with 424 passed tests. Continue and finish the plan.
+
+
+## Follow-up — 2026-10-10T16:56:02Z
+
+# Teamwork Project — AgentPay Production Hardening & Core Architecture (Sprint 14)
+
+> **Status:** Launched
+> **Goal:** Comprehensive platform hardening across test harness security, ISO 4217 multi-currency exponent engine (TD-002), payment webhook ingestion with HMAC replay defense (§61), and persistent database architecture (§49).
+> **Requested team:** Full team (Lead Orchestrator with teamwork_preview)
+
+AgentPay is an autonomous agent commerce control plane enforcing deterministic spending policies, cryptographic human approval bindings, and fail-closed safety. This milestone hardens the test harness against silent privilege escalation, resolves multi-currency math (TD-002), introduces cryptographically verified payment webhook ingestion (§61), and establishes persistent storage architecture (§49).
+
+Working directory: c:\Users\ak612\OneDrive\Desktop\platfrom
+Integrity mode: development
+
+---
+
+## Requirements
+
+### R1. Test Harness Hardening & Least-Privilege Test Client
+Tighten `ApiTestClient` in `apps/api/src/agentpay/api/app.py`:
+- Eliminate silent `ADMIN` token injection. Change `default_role` to least-privilege `UserRole.BUYER`.
+- Add explicit, fluent client helpers:
+  - `client.as_admin(tenant_id)`: injects valid administrator credentials.
+  - `client.as_agent(agent_id, tenant_id)`: injects valid agent credentials.
+  - `client.as_unauthenticated()`: explicitly disables credential injection.
+- Ensure negative security tests and emergency kill-switch tests explicitly state their authentication context and cannot pass vacuously.
+
+### R2. ISO 4217 Currency Exponent Engine & Multi-Currency Safety (TD-002)
+Resolve technical debt TD-002:
+- Implement an ISO 4217 currency registry mapping standard 3-letter currency codes to their minor-unit exponents (e.g. `JPY`: 0, `INR`/`USD`/`EUR`: 2, `KWD`/`BHD`: 3).
+- Enhance `Money` validation and formatting so zero-decimal and 3-decimal currencies are handled safely without binary floating-point drift.
+- Ensure cross-currency calculations strictly fail closed unless explicit exchange rates are provided.
+
+### R3. Payment Webhook Ingestion & Cryptographic Replay Protection (§61)
+Implement incoming payment webhook handling:
+- Add HTTP endpoint `POST /api/v1/webhooks/payments` supporting provider event callbacks.
+- Enforce HMAC-SHA256 signature verification against configured webhook secrets (`X-Webhook-Signature`).
+- Enforce timestamp freshness (reject events older than 300 seconds) and replay protection via idempotency store.
+- Reconcile asynchronous payment transitions (`payment.captured`, `payment.failed`, `payment.refunded`) into the domain payment state machine and update orders accordingly.
+
+### R4. Persistent Storage Architecture & Database Foundation (§49)
+Establish the relational database persistence layer:
+- Define SQLAlchemy / SQLModel schema definitions in `infrastructure/database/` mirroring domain entities (`Tenant`, `Agent`, `Product`, `Order`, `Payment`, `AuditEvent`, `Credential`).
+- Ensure schema enforces tenant isolation and foreign key integrity.
+- Maintain seamless dual-mode capability: retain in-memory adapters for hermetic unit testing, while providing database-backed repository implementations for staging/production.
+
+---
+
+## Acceptance Criteria
+
+### Test Harness Security (R1)
+- [ ] `ApiTestClient` defaults to `BUYER` role and rejects unprivileged access to `/api/v1/emergency/*` with HTTP 403 `UNAUTHORIZED_OPERATOR`.
+- [ ] Fluent helpers (`.as_admin()`, `.as_unauthenticated()`, `.as_agent()`) work seamlessly across all test suites.
+- [ ] 100% of existing and new test suites pass with zero false positives.
+
+### Currency Engine (R2)
+- [ ] ISO 4217 currency exponent table correctly resolves exponents for JPY (0), USD (2), KWD (3).
+- [ ] Zero floating-point arithmetic is used; minor units are strictly validated as integers according to exponent rules.
+- [ ] Unit tests verify proper handling and rejection of currency mismatches.
+
+### Webhook Security (R3)
+- [ ] Webhook requests with invalid or missing HMAC signatures are rejected with HTTP 401 `INVALID_WEBHOOK_SIGNATURE`.
+- [ ] Replayed webhook payloads or expired timestamps are rejected.
+- [ ] Valid webhooks cleanly transition payment and order states and record tamper-evident audit events.
+
+### Persistence Foundation (R4)
+- [ ] Relational schemas in `infrastructure/database/` cleanly map all core domain models without polluting domain purity (§10).
+- [ ] AST boundary tests verify zero forbidden database imports in `domain/`.
+
+### Quality & Verification Gates
+- [ ] `uv run ruff format --check .` passes with 0 violations.
+- [ ] `uv run ruff check .` passes with 0 lint errors.
+- [ ] `uv run mypy` passes cleanly across all source files.
+- [ ] `uv run pytest` passes 100% of tests.
+- [ ] Auxiliary suites (`node --test tests/web.test.mjs`, protocol stress tests, concurrency stress tests) pass cleanly.

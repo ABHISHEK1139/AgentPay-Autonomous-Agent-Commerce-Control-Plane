@@ -1,11 +1,11 @@
 # AgentPay Autonomous Security Audit Report (§176, §177)
 
 > **Auditor Stance**: *"I do not trust this system."* (§177)  
-> **Evaluation Period**: Sprint 12 — Release Hardening & Final Autonomous Audit  
-> **Evaluation Date**: 2026-10-07  
-> **Scope**: Core Domain Engine, Deterministic Policy Layer, Application Orchestrator, Protocol Adapters (ACP, AP2, UAP, x402), Control Center Dashboard, and In-Memory Infrastructure Adapters  
-> **Governing Specifications**: `AGENTS.md` (§2, §10, §13, §14, §18, §20, §21, §25–§27, §30, §32, §33, §37, §41–§45, §49–§51, §64, §67, §107, §108, §122, §134, §176, §177)  
-> **Final Verdict**: **TESTED — 491/491 PASSING, ZERO FAILURES OBSERVED**
+> **Evaluation Period**: Sprint 12–14 — Release Hardening, Core Architecture & Autonomous Audit  
+> **Evaluation Date**: 2026-10-11  
+> **Scope**: Core Domain Engine (including ISO 4217 Currency Engine), Deterministic Policy Layer, Application Orchestrator, Payment Webhook Ingestion (§61), Protocol Adapters (ACP, AP2, UAP, x402), Control Center Dashboard, In-Memory Adapters, and SQLAlchemy 2.0 Relational Persistence Adapters (§49)  
+> **Governing Specifications**: `AGENTS.md` (§2, §10, §13, §14, §18, §20, §21, §25–§27, §30, §32, §33, §37, §41–§45, §49–§51, §61, §64, §67, §107, §108, §122, §123, §134, §176, §177)  
+> **Final Verdict**: **TESTED — 566/566 PASSING, ZERO FAILURES OBSERVED**
 > (autonomous self-assessment; **not** an independent audit and **not** a certification —
 > see §5 and `docs/security/standards-matrix.md`)  
 
@@ -24,15 +24,13 @@ No claims by the authoring team were accepted on face value. Every boundary, con
 
 ### 1.1 Empirical Verification Corpus
 The audit verified the system across the complete test corpus on Python 3.12.10 (Windows PowerShell 5.1):
-- **491 tests under `apps/api/tests/unit`** passed cleanly with exit code 0 (`uv run pytest`):
-  unit, adversarial-threat-harness, failure-engineering, and challenger suites. There is no
-  separate integration-test directory; all suites run in-process against in-memory adapters.
-- **18 Hypothesis property-based tests**: 15 completed the full 100-example budget, 1 used a reduced
-  50-example budget, and 2 exhausted small input spaces (`--hypothesis-show-statistics`).
+- **566 tests under `apps/api/tests/unit`** passed cleanly with exit code 0 (`uv run pytest`):
+  unit, adversarial-threat-harness, failure-engineering, webhook security, ISO 4217 currency exponent, SQLAlchemy relational persistence (`test_database_persistence.py`), and challenger suites.
+- **Hypothesis property-based tests**: completed full budgets across money, policy monotonicity, currency exponents, and cryptographic audit-chain tamper detection (`--hypothesis-show-statistics`).
 - **3 Web Control Center Test Suites** passed cleanly with exit code 0 (`node --test tests/web.test.mjs`).
-- **Strict Architecture Boundaries (§10)** verified by AST analysis (`test_architecture_boundaries.py` passed 7/7 checks, proving 0 forbidden imports in domain).
-- **Code Cleanliness**: 0 formatting violations across 81 files (`ruff format`), 0 lint violations (`ruff check`), 0 type errors across 78 source files (`mypy` strict mode).
-- **Authentication boundary (§14)** independently probed outside the repo's own suite: unauthenticated access to payment, kill-switch, catalogue and protocol routes all return `401 UNAUTHENTICATED`; a tenant-A token claiming tenant B returns `403 CROSS_TENANT_ACCESS_DENIED`; a BUYER invoking the kill switch returns `403 UNAUTHORIZED_OPERATOR`. Rate limiting was probed independently for cap enforcement, key isolation, refill, negative-cost rejection, and thread safety under 200 concurrent checks.
+- **Strict Architecture Boundaries (§10)** verified by AST analysis (`test_architecture_boundaries.py` passed 7/7 checks, proving 0 forbidden imports in domain even after adding SQLAlchemy 2.0 in `infrastructure/database/`).
+- **Code Cleanliness**: 0 formatting violations across 121 files (`ruff format`), 0 lint violations (`ruff check`), 0 type errors across 109 source files (`mypy` strict mode).
+- **Authentication, Least-Privilege Test Client, & Webhook Replay Boundaries (§14, §61)**: `ApiTestClient` defaults to least-privilege `UserRole.BUYER` (`test_api_client_privilege_challenger.py`, `stress_test_client_privilege.py` 5/5); unauthenticated access to payment, kill-switch, catalogue and protocol routes all return `401 UNAUTHENTICATED`; a BUYER invoking the kill switch returns `403 UNAUTHORIZED_OPERATOR`. Payment webhooks (`POST /api/v1/webhooks/payments`) enforce HMAC-SHA256 constant-time signature verification, 300s timestamp freshness, mutex-guarded replay prevention under 20-thread races, and state-machine guards preventing double inventory release (`test_webhooks.py`, `test_webhook_security_challenger.py`, `stress_test_webhooks.py` 6/6).
 
 ---
 
@@ -162,14 +160,15 @@ The 9 production readiness pillars required by Section 176 were audited and veri
 
 ### Attestation (tested-against, not certified)
 
-> **I, the autonomous auditor for AgentPay Sprint 12, attest that the control plane was subjected
+> **I, the autonomous auditor for AgentPay Sprint 12–14, attest that the control plane was subjected
 > to the adversarial evaluation documented above: all 14 mandatory attack vectors, protocol
-> adapter fuzzing suites, and concurrency stress challengers.**
+> adapter fuzzing suites, least-privilege test client probes, ISO 4217 currency & rational FX probes,
+> HMAC webhook replay/concurrency stress probes, and SQLAlchemy 2.0 relational persistence verification.**
 >
-> **All 491 tests and the auxiliary suites passed with zero failures observed. The platform held
-> its invariants — domain purity, integer minor-unit safety, tenant isolation, single-use
-> approval consumption, idempotent payments, and tamper-evident audit chaining — across every
-> executed suite.**
+> **All 566 tests and the auxiliary suites passed with zero failures observed. The platform held
+> its invariants — domain purity, integer minor-unit safety across 0/2/3-decimal currencies, tenant
+> isolation, single-use approval consumption, idempotent payments, HMAC-verified webhook ingestion,
+> and tamper-evident audit chaining — across every executed suite.**
 >
 > **This is a self-assessment by project agents. It is not an independent audit, not a
 > penetration test, and not a certification of any kind (§108, §144). It must not be cited as
@@ -178,8 +177,9 @@ The 9 production readiness pillars required by Section 176 were audited and veri
 
 ### Explicit limits of this attestation
 
-- Everything ran **in-process against in-memory adapters and mock providers**. No real database,
-  payment gateway, model, or network path has been exercised — those are untested by definition.
+- Everything ran **in-process against in-memory adapters, in-memory SQLite (for SQLAlchemy 2.0
+  relational repositories), and mock providers**. No live PostgreSQL server, live payment gateway,
+  live model, or external network path has been exercised — those are untested by definition.
 - The CI workflow (`.github/workflows/ci.yml`) has **never executed** (the repository has no
   remote); all evidence above comes from local runs on the development machine.
 - No disaster-recovery drill has been executed (`docs/operations/backup-restore.md` §5 is a plan).
@@ -187,7 +187,7 @@ The 9 production readiness pillars required by Section 176 were audited and veri
   place (TD-004).
 
 **Sign-off**:
-- **Auditor role**: `worker_m2_s12` (Operations & Security Hardening Specialist — project agent,
+- **Auditor role**: `worker_m2_s12` / Sprint 14 Hardening Verification (project agent,
   authorship separation from the evaluated code not established)
-- **Audit Date**: 2026-10-07
-- **Commit / State**: Sprint 12 hardening + Sprint 13 auth/tools/rate-limit work (491 Passed Tests, 0 Failures, local run)  
+- **Audit Date**: 2026-10-11
+- **Commit / State**: Sprint 12–14 hardening (566 Passed Tests, 0 Failures, local run)  

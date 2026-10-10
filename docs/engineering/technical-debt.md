@@ -19,9 +19,13 @@ resolution is a decision to accept the debt, and should say so explicitly.
   core would hard-code currency knowledge (§122) and create a second thing to keep current.
 - **Impact:** a currency whose smallest unit is not 1/100 (JPY, KRW) cannot be represented
   correctly. Formatting a JPY amount would be wrong by a factor of 100.
-- **Resolution:** resolve before any multi-currency work, by carrying an explicit exponent resolved
-  at the adapter boundary from a maintained library, not from a table written into the domain.
-- **Status:** **Open, tracked.** **Blocking for:** multi-currency commerce.
+- **Resolution:** Resolved in Sprint 14 Milestone 2. Implemented pure standard library `CurrencyRegistry`
+  in `apps/api/src/agentpay/domain/currencies.py` mapping ISO 4217 3-letter codes to their minor-unit exponents
+  (0, 2, 3, 4) with zero third-party dependencies, preserving domain purity (§10). Enhanced `Money` with
+  `exponent` property, zero-drift decimal formatting (`to_decimal_str`, `format_amount`), strict decimal parsing
+  (`from_decimal`, `from_major`), and exact rational cross-currency exchange conversions (`ExchangeRate`, `convert`)
+  with round-half-up integer scaling. Cross-currency operations fail closed without explicit rate.
+- **Status:** **Resolved** (Sprint 14 Milestone 2; 100% verified via unit and Hypothesis property test suites).
 
 ## TD-003 — No `Makefile` or `justfile`
 

@@ -541,13 +541,117 @@ def test_existing_test_pattern_without_explicit_auth_passes_cleanly(
     assert "products" in body
 
 
-def test_existing_emergency_pattern_without_explicit_auth_passes_cleanly(
+def test_unprivileged_default_client_accessing_emergency_pause_returns_403(
     api_client: ApiTestClient,
 ) -> None:
-    """Proves legacy emergency pause calls continue to succeed via default operator role."""
+    """An unprivileged default client (BUYER role) cannot trigger emergency pause (§14, §67)."""
     status, body = api_client.post(
         "/api/v1/emergency/pause",
-        json_body={"operator_id": "sec_operator", "reason": "legacy test"},
+        json_body={"operator_id": "buyer_01", "reason": "unauthorized attempt"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "UNAUTHORIZED_OPERATOR"
+    assert "operator" in body["error"]["message"].lower()
+
+
+def test_fluent_admin_client_accessing_emergency_pause_succeeds(
+    api_client: ApiTestClient,
+) -> None:
+    """A client elevated with as_admin() can trigger emergency pause (§14, §67)."""
+    status, body = api_client.as_admin().post(
+        "/api/v1/emergency/pause",
+        json_body={"operator_id": "sec_admin", "reason": "authorized incident response"},
     )
     assert status == 200
     assert body["status"] == "PAUSED"
+
+
+def test_fluent_unauthenticated_client_accessing_emergency_pause_returns_401(
+    api_client: ApiTestClient,
+) -> None:
+    """A client with as_unauthenticated() is rejected with HTTP 401 UNAUTHENTICATED (§14)."""
+    status, body = api_client.as_unauthenticated().post(
+        "/api/v1/emergency/pause",
+        json_body={"operator_id": "op_01", "reason": "test"},
+    )
+    assert status == 401
+    assert body["error"]["code"] == "UNAUTHENTICATED"
+
+
+def test_fluent_agent_client_accessing_emergency_pause_returns_403(
+    api_client: ApiTestClient,
+) -> None:
+    """An agent client with as_agent() is rejected with HTTP 403 UNAUTHORIZED_OPERATOR (§14, §67)."""
+    status, body = api_client.as_agent("agent_01").post(
+        "/api/v1/emergency/pause",
+        json_body={"operator_id": "agent_01", "reason": "test"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "UNAUTHORIZED_OPERATOR"
+
+
+def test_fluent_buyer_client_accessing_emergency_pause_returns_403(
+    api_client: ApiTestClient,
+) -> None:
+    """A client explicitly scoped with as_buyer() is rejected with HTTP 403 UNAUTHORIZED_OPERATOR (§14, §67)."""
+    status, body = api_client.as_buyer().post(
+        "/api/v1/emergency/pause",
+        json_body={"operator_id": "buyer_02", "reason": "test"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "UNAUTHORIZED_OPERATOR"
+
+
+def test_fluent_helpers_immutability_and_chaining(
+    api_client: ApiTestClient,
+) -> None:
+    """Fluent helper calls return scoped clones without mutating base client default role."""
+    admin_client = api_client.as_admin()
+    unauth_client = api_client.as_unauthenticated()
+    agent_client = api_client.as_agent("agent_01")
+    buyer_client = api_client.as_buyer()
+
+    # Base client remains BUYER
+    assert api_client.default_role == UserRole.BUYER
+    assert api_client._auth_mode == "default"
+
+    # Admin client succeeds on emergency
+    s_admin, _ = admin_client.get("/api/v1/emergency/status")
+    assert s_admin == 200
+
+    # Unauthenticated client rejected with 401
+    s_unauth, _ = unauth_client.get("/api/v1/emergency/status")
+    assert s_unauth == 401
+
+    # Agent client rejected with 403
+    s_agent, _ = agent_client.get("/api/v1/emergency/status")
+    assert s_agent == 403
+
+    # Explicit buyer client rejected with 403
+    s_buyer, _ = buyer_client.get("/api/v1/emergency/status")
+    assert s_buyer == 403
+
+    # Base client rejected with 403 (unprivileged BUYER)
+    s_base, _ = api_client.get("/api/v1/emergency/status")
+    assert s_base == 403
+
+
+def test_token_cache_partitioned_by_tenant_principal_and_role(
+    api_client: ApiTestClient,
+) -> None:
+    """Tokens are cached by (tenant_id, principal_id, role) preventing cross-role collisions."""
+    token_buyer = api_client.get_or_create_token("tenant_01", role=UserRole.BUYER)
+    token_admin = api_client.get_or_create_token("tenant_01", role=UserRole.ADMIN)
+    token_agent = api_client.get_or_create_token("tenant_01", role=None, principal_id="agent_01")
+
+    assert token_buyer != token_admin
+    assert token_buyer != token_agent
+    assert token_admin != token_agent
+
+    # Re-fetching returns identical cached token
+    assert api_client.get_or_create_token("tenant_01", role=UserRole.BUYER) == token_buyer
+    assert api_client.get_or_create_token("tenant_01", role=UserRole.ADMIN) == token_admin
+    assert (
+        api_client.get_or_create_token("tenant_01", role=None, principal_id="agent_01")
+        == token_agent
+    )

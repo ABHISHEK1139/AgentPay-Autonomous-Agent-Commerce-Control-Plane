@@ -91,10 +91,11 @@ def test_emergency_kill_switch_lifecycle() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
     client = ApiTestClient(app)
+    admin_client = client.as_admin()
     headers = {"x-tenant-id": "tenant_01"}
 
-    # 1. Trigger kill switch pause (§21, §67)
-    status_code, body = client.post(
+    # 1. Trigger kill switch pause via admin credentials (§21, §67)
+    status_code, body = admin_client.post(
         "/api/v1/emergency/pause",
         json_body={"operator_id": "sec_operator", "reason": "Suspected breach"},
         headers=headers,
@@ -116,8 +117,8 @@ def test_emergency_kill_switch_lifecycle() -> None:
     assert status_code == 503
     assert body["error"]["code"] == "EMERGENCY_PAUSE_ACTIVE"
 
-    # 3. Resume operations
-    status_code, body = client.post(
+    # 3. Resume operations via admin credentials
+    status_code, body = admin_client.post(
         "/api/v1/emergency/resume",
         json_body={"operator_id": "sec_operator"},
         headers=headers,
@@ -194,7 +195,7 @@ def test_emergency_endpoints_accessible_without_tenant_header() -> None:
     """Verify operator can query status, pause, and resume without X-Tenant-ID header (§21, §67)."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_admin()
 
     # 1. Query status without tenant header
     status, body = client.get("/api/v1/emergency/status", headers={"x-operator-id": "secops_01"})

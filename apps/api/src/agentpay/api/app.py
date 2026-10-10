@@ -11,8 +11,11 @@ Provides:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import math
+import threading
 import uuid
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
@@ -21,7 +24,12 @@ from typing import Any
 
 from agentpay.adapters.in_memory.approval_repository import InMemoryApprovalRepository
 from agentpay.adapters.in_memory.identity_repository import InMemoryCredentialRepository
+from agentpay.adapters.in_memory.payment_repository import (
+    InMemoryIdempotencyStore,
+    InMemoryPaymentRepository,
+)
 from agentpay.adapters.in_memory.rate_limiter import InMemoryRateLimiter
+from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.adapters.protocols import (
     AcpAdapter,
     Ap2Adapter,
@@ -38,7 +46,9 @@ from agentpay.api.schemas import (
     ApiErrorResponse,
 )
 from agentpay.application.ports.identity_port import CredentialRepository
+from agentpay.application.ports.payment_port import IdempotencyStore
 from agentpay.application.ports.rate_limit_port import RateLimiter
+from agentpay.application.services.reconciliation_service import PaymentReconciler
 from agentpay.application.use_cases.purchase_flow import (
     PurchaseExecutionResult,
     PurchaseOrchestrator,
@@ -66,6 +76,7 @@ from agentpay.domain.identity import (
     UserRole,
 )
 from agentpay.domain.money import Money
+from agentpay.domain.payments import IdempotencyRecord
 
 Scope = dict[str, Any]
 Receive = Callable[[], Coroutine[Any, Any, dict[str, Any]]]
@@ -121,6 +132,9 @@ class AgentPayApiApp:
         read_agent_refill_rate: float = 20.0,
         read_tenant_capacity: int = 500,
         read_tenant_refill_rate: float = 100.0,
+        webhook_secret: str = "whsec_test_secret_32bytes_minimum_length",
+        reconciler: PaymentReconciler | None = None,
+        idempotency_store: IdempotencyStore | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.credential_repo: CredentialRepository = (
@@ -137,9 +151,34 @@ class AgentPayApiApp:
         self._read_agent_refill_rate = read_agent_refill_rate
         self._read_tenant_capacity = read_tenant_capacity
         self._read_tenant_refill_rate = read_tenant_refill_rate
+        self.webhook_secret: str = webhook_secret
+
+        if idempotency_store is not None:
+            self.idempotency_store = idempotency_store
+        elif orchestrator._idempotency_store is not None:
+            store = orchestrator._idempotency_store
+            assert isinstance(store, IdempotencyStore)
+            self.idempotency_store = store
+        else:
+            self.idempotency_store = InMemoryIdempotencyStore()
+
+        if reconciler is not None:
+            self.reconciler = reconciler
+        else:
+            provider = getattr(orchestrator, "_payment_provider", None) or MockPaymentProvider()
+            pay_repo = getattr(orchestrator, "_payment_repo", None) or InMemoryPaymentRepository()
+            self.reconciler = PaymentReconciler(
+                payment_provider=provider,
+                payment_repo=pay_repo,
+                order_repo=getattr(orchestrator, "_order_repo", None),
+                inventory_repo=getattr(orchestrator, "_inventory_repo", None),
+                audit_ledger=getattr(orchestrator, "_audit_ledger", None),
+            )
+
         self._last_response_headers: dict[str, str] = {}
         self._emergency_paused: bool = False
         self._pause_metadata: dict[str, Any] = {}
+        self._webhook_lock: threading.Lock = threading.Lock()
         self.acp_adapter = AcpAdapter()
         self.ap2_adapter = Ap2Adapter()
         self.uap_adapter = UapAdapter()
@@ -565,6 +604,175 @@ class AgentPayApiApp:
         resp = self.handle_request(method, path, headers, body)
         return resp.status_code, resp.body, resp.headers
 
+    def _handle_payment_webhook(
+        self,
+        headers: dict[str, str],
+        body: dict[str, Any] | None,
+        request_id: str,
+        tenant_id: str,
+        trace_id: str,
+    ) -> tuple[int, dict[str, Any]]:
+        """Process incoming provider payment webhook with HMAC validation and replay protection (§61)."""
+        if body is None or not isinstance(body, dict):
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Missing or invalid JSON payload", request_id
+            )
+
+        # 1. Enforce X-Webhook-Signature header
+        sig_header = headers.get("x-webhook-signature", "").strip()
+        if not sig_header:
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Missing or blank X-Webhook-Signature header",
+                request_id,
+            )
+
+        # 2. Enforce Timestamp Freshness
+        ts_str = headers.get("x-webhook-timestamp", "").strip()
+        if not ts_str and "timestamp" in body:
+            ts_str = str(body["timestamp"]).strip()
+
+        if not ts_str:
+            return self._error_response(
+                400,
+                "INVALID_WEBHOOK_TIMESTAMP",
+                "Missing webhook timestamp in header or payload",
+                request_id,
+            )
+
+        try:
+            ts_num = float(ts_str)
+            if ts_num > 1e11:  # epoch milliseconds
+                ts_num = ts_num / 1000.0
+            event_dt = datetime.fromtimestamp(ts_num, tz=UTC)
+        except (ValueError, OverflowError):
+            try:
+                event_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except ValueError:
+                return self._error_response(
+                    400,
+                    "INVALID_WEBHOOK_TIMESTAMP",
+                    f"Unparseable webhook timestamp '{ts_str}'",
+                    request_id,
+                )
+
+        age = abs((datetime.now(UTC) - event_dt).total_seconds())
+        if age > 300.0:
+            return self._error_response(
+                401,
+                "EXPIRED_WEBHOOK_TIMESTAMP",
+                f"Webhook timestamp expired ({int(age)}s exceeds 300s window)",
+                request_id,
+                details={"age_seconds": age, "max_age_seconds": 300},
+            )
+
+        # 3. Compute and Verify HMAC-SHA256 Signature
+        raw_json_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        header_ts = headers.get("x-webhook-timestamp", "").strip()
+        canonical = f"{header_ts}.{raw_json_str}" if header_ts else raw_json_str
+
+        expected_sig = hmac.new(
+            self.webhook_secret.encode("utf-8"),
+            canonical.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        received_sig = sig_header
+        if received_sig.startswith("sha256="):
+            received_sig = received_sig[7:]
+        elif received_sig.startswith("v1="):
+            received_sig = received_sig[3:]
+
+        if not hmac.compare_digest(expected_sig, received_sig):
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Webhook HMAC signature verification failed",
+                request_id,
+            )
+
+        # 4. Enforce Replay Protection via IdempotencyStore
+        effective_tenant = (
+            headers.get("x-tenant-id", "").strip()
+            or str(body.get("tenant_id") or "").strip()
+            or tenant_id
+            or "tenant_01"
+        )
+        event_id = str(
+            body.get("event_id") or headers.get("x-webhook-id") or body.get("id") or ""
+        ).strip()
+
+        if not event_id:
+            return self._error_response(
+                400,
+                "INVALID_PAYLOAD",
+                "Missing event_id in payload or X-Webhook-Id header",
+                request_id,
+            )
+
+        event_type = str(
+            body.get("event_type") or body.get("event") or body.get("type") or ""
+        ).strip()
+
+        if not event_type:
+            return self._error_response(
+                400,
+                "INVALID_PAYLOAD",
+                "Missing event_type in webhook payload",
+                request_id,
+            )
+
+        replay_key = f"webhook:{effective_tenant}:{event_id}"
+        with self._webhook_lock:
+            existing_record = self.idempotency_store.get(effective_tenant, replay_key)
+            if existing_record is not None:
+                return self._error_response(
+                    409,
+                    "WEBHOOK_REPLAY_DETECTED",
+                    f"Webhook event '{event_id}' has already been processed",
+                    request_id,
+                    details={"event_id": event_id, "replay_key": replay_key},
+                )
+
+            # 5. Dispatch to PaymentReconciler under lock
+            try:
+                reconcile_result = self.reconciler.reconcile_webhook_event(
+                    tenant_id=effective_tenant,
+                    event_type=event_type,
+                    payload=body,
+                    trace_id=trace_id,
+                )
+            except DomainError as err:
+                return self._error_response(
+                    400,
+                    err.code,
+                    str(err),
+                    request_id,
+                    details=getattr(err, "details", {}),
+                )
+            except Exception as err:
+                return self._error_response(
+                    500,
+                    "RECONCILIATION_FAILED",
+                    f"Webhook reconciliation failed: {err}",
+                    request_id,
+                )
+
+            # Save idempotency record to prevent future replay
+            self.idempotency_store.save(
+                effective_tenant,
+                IdempotencyRecord(
+                    key=replay_key,
+                    tenant_id=effective_tenant,
+                    operation_type="webhook",
+                    request_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    result_data=reconcile_result,
+                ),
+            )
+
+        return 200, reconcile_result
+
     def _dispatch(
         self,
         method: str,
@@ -607,8 +815,15 @@ class AgentPayApiApp:
                     "/api/v1/protocols/x402/pay": {
                         "post": {"summary": "x402 Challenge Settlement"}
                     },
+                    "/api/v1/webhooks/payments": {
+                        "post": {"summary": "Payment Provider Webhook Ingestion"}
+                    },
                 },
             }
+
+        # 2.5 Webhook Ingestion (§61) - Dedicated unauthenticated/signature-verified route!
+        if path == "/api/v1/webhooks/payments" and method == "POST":
+            return self._handle_payment_webhook(headers, body, request_id, tenant_id, trace_id)
 
         # --- AUTHENTICATION ENFORCEMENT (§14) ---
         cred, auth_err = self._authenticate_request(headers, request_id)
@@ -1248,6 +1463,9 @@ class AgentPayApiApp:
         await send({"type": "http.response.body", "body": resp_bytes})
 
 
+_DEFAULT_ROLE_SENTINEL = object()
+
+
 class ApiTestClient:
     """Fast, synchronous client for testing the AgentPay HTTP API with automated test authentication."""
 
@@ -1255,25 +1473,89 @@ class ApiTestClient:
         self,
         app: AgentPayApiApp,
         default_tenant: str = "tenant_01",
-        default_role: UserRole = UserRole.ADMIN,
+        default_role: UserRole = UserRole.BUYER,
     ) -> None:
         self.app = app
         self.default_tenant = default_tenant
         self.default_role = default_role
         self._tokens_by_tenant: dict[str, str] = {}
         self._api_keys_by_tenant: dict[str, str] = {}
+        self._auth_mode: str = "default"
+        self._active_principal: str | None = None
+        self._active_role: UserRole | None = None
+
+    def _clone(self) -> ApiTestClient:
+        """Create an immutable context clone sharing app and token caches."""
+        clone = ApiTestClient(
+            app=self.app,
+            default_tenant=self.default_tenant,
+            default_role=self.default_role,
+        )
+        clone._tokens_by_tenant = self._tokens_by_tenant
+        clone._api_keys_by_tenant = self._api_keys_by_tenant
+        clone._auth_mode = self._auth_mode
+        clone._active_principal = self._active_principal
+        clone._active_role = self._active_role
+        return clone
+
+    def as_admin(self, tenant_id: str | None = None) -> ApiTestClient:
+        """Return a client context configured with valid administrator credentials (§14, §67)."""
+        clone = self._clone()
+        clone.default_tenant = tenant_id or self.default_tenant
+        clone._auth_mode = "admin"
+        clone._active_principal = "usr_test_admin"
+        clone._active_role = UserRole.ADMIN
+        return clone
+
+    def as_agent(
+        self,
+        agent_id: str = "agent_01",
+        tenant_id: str | None = None,
+    ) -> ApiTestClient:
+        """Return a client context configured with valid agent credentials (§14, §15)."""
+        clone = self._clone()
+        clone.default_tenant = tenant_id or self.default_tenant
+        clone._auth_mode = "agent"
+        clone._active_principal = agent_id
+        clone._active_role = None
+        return clone
+
+    def as_unauthenticated(self) -> ApiTestClient:
+        """Return a client context with credential auto-injection explicitly disabled (§14)."""
+        clone = self._clone()
+        clone._auth_mode = "unauthenticated"
+        return clone
+
+    def as_buyer(self, tenant_id: str | None = None) -> ApiTestClient:
+        """Return a client context configured with standard buyer credentials (§14)."""
+        clone = self._clone()
+        clone.default_tenant = tenant_id or self.default_tenant
+        clone._auth_mode = "default"
+        clone._active_principal = "usr_test_buyer"
+        clone._active_role = UserRole.BUYER
+        return clone
 
     def create_token(
         self,
         tenant_id: str = "tenant_01",
-        principal_id: str = "usr_test_operator",
-        role: UserRole | None = UserRole.ADMIN,
+        principal_id: str | None = None,
+        role: UserRole | None = UserRole.BUYER,
         status: CredentialStatus = CredentialStatus.ACTIVE,
         expires_at: datetime | None = None,
-        scopes: tuple[str, ...] = ("admin", "operator", "commerce:read", "commerce:write"),
+        scopes: tuple[str, ...] | None = None,
         raw_token: str | None = None,
     ) -> str:
         """Create and store a Bearer token credential in the app's credential repository."""
+        if role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
+            effective_principal = principal_id or "usr_test_admin"
+            effective_scopes = scopes or ("admin", "operator", "commerce:read", "commerce:write")
+        elif role is None:
+            effective_principal = principal_id or "agent_01"
+            effective_scopes = scopes or ("agent", "commerce:read", "commerce:write")
+        else:
+            effective_principal = principal_id or "usr_test_buyer"
+            effective_scopes = scopes or ("commerce:read", "commerce:write")
+
         token = raw_token or f"test_bearer_{tenant_id}_{uuid.uuid4().hex[:8]}"
         secret_hash = Credential.hash_secret(token)
         cred_id = f"cred_{uuid.uuid4().hex[:8]}"
@@ -1282,13 +1564,13 @@ class ApiTestClient:
         cred = Credential(
             credential_id=cred_id,
             tenant_id=tenant_id,
-            principal_id=principal_id,
+            principal_id=effective_principal,
             credential_type=CredentialType.BEARER_TOKEN,
             secret_hash=secret_hash,
             expires_at=exp,
             status=status,
             role=role,
-            scopes=scopes,
+            scopes=effective_scopes,
         )
         if hasattr(self.app, "credential_repo") and self.app.credential_repo is not None:
             self.app.credential_repo.save(tenant_id, cred)
@@ -1297,14 +1579,24 @@ class ApiTestClient:
     def create_api_key(
         self,
         tenant_id: str = "tenant_01",
-        principal_id: str = "usr_test_operator",
-        role: UserRole | None = UserRole.ADMIN,
+        principal_id: str | None = None,
+        role: UserRole | None = UserRole.BUYER,
         status: CredentialStatus = CredentialStatus.ACTIVE,
         expires_at: datetime | None = None,
-        scopes: tuple[str, ...] = ("admin", "operator", "commerce:read", "commerce:write"),
+        scopes: tuple[str, ...] | None = None,
         raw_key: str | None = None,
     ) -> str:
         """Create and store an API key credential in the app's credential repository."""
+        if role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
+            effective_principal = principal_id or "usr_test_admin"
+            effective_scopes = scopes or ("admin", "operator", "commerce:read", "commerce:write")
+        elif role is None:
+            effective_principal = principal_id or "agent_01"
+            effective_scopes = scopes or ("agent", "commerce:read", "commerce:write")
+        else:
+            effective_principal = principal_id or "usr_test_buyer"
+            effective_scopes = scopes or ("commerce:read", "commerce:write")
+
         key = raw_key or f"apk_{tenant_id}_{uuid.uuid4().hex[:12]}"
         secret_hash = Credential.hash_secret(key)
         cred_id = f"cred_apk_{uuid.uuid4().hex[:8]}"
@@ -1313,24 +1605,52 @@ class ApiTestClient:
         cred = Credential(
             credential_id=cred_id,
             tenant_id=tenant_id,
-            principal_id=principal_id,
+            principal_id=effective_principal,
             credential_type=CredentialType.API_KEY,
             secret_hash=secret_hash,
             expires_at=exp,
             status=status,
             role=role,
-            scopes=scopes,
+            scopes=effective_scopes,
         )
         if hasattr(self.app, "credential_repo") and self.app.credential_repo is not None:
             self.app.credential_repo.save(tenant_id, cred)
         return key
 
-    def get_or_create_token(self, tenant_id: str, role: UserRole | None = UserRole.ADMIN) -> str:
-        """Retrieve cached token or provision a new one for the given tenant and role."""
-        role_key = role.value if role is not None else "none"
-        key = f"{tenant_id}:{role_key}"
+    def get_or_create_token(
+        self,
+        tenant_id: str,
+        role: UserRole | object | None = _DEFAULT_ROLE_SENTINEL,
+        principal_id: str | None = None,
+        scopes: tuple[str, ...] | None = None,
+    ) -> str:
+        """Retrieve cached token or provision a new one for the given tenant, principal, and role."""
+        effective_role: UserRole | None
+        if role is _DEFAULT_ROLE_SENTINEL:
+            effective_role = self.default_role
+        else:
+            assert role is None or isinstance(role, UserRole)
+            effective_role = role
+
+        if effective_role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
+            pid = principal_id or "usr_test_admin"
+            eff_scopes = scopes or ("admin", "operator", "commerce:read", "commerce:write")
+        elif effective_role is None:
+            pid = principal_id or "agent_01"
+            eff_scopes = scopes or ("agent", "commerce:read", "commerce:write")
+        else:
+            pid = principal_id or "usr_test_buyer"
+            eff_scopes = scopes or ("commerce:read", "commerce:write")
+
+        role_key = effective_role.value if effective_role is not None else "none"
+        key = f"{tenant_id}:{pid}:{role_key}"
         if key not in self._tokens_by_tenant:
-            self._tokens_by_tenant[key] = self.create_token(tenant_id=tenant_id, role=role)
+            self._tokens_by_tenant[key] = self.create_token(
+                tenant_id=tenant_id,
+                principal_id=pid,
+                role=effective_role,
+                scopes=eff_scopes,
+            )
         return self._tokens_by_tenant[key]
 
     @property
@@ -1351,16 +1671,50 @@ class ApiTestClient:
         # Auto-inject default authentication unless explicitly disabled or already provided
         if (
             auth
+            and self._auth_mode != "unauthenticated"
             and "authorization" not in hdrs
             and "x-api-key" not in hdrs
-            and path not in ("/api/v1/health", "/openapi.json")
+            and path not in ("/api/v1/health", "/openapi.json", "/api/v1/webhooks/payments")
         ):
             target_tenant = (
                 hdrs.get("x-tenant-id")
                 or self.app._extract_protocol_tenant(path, json_body)
                 or self.default_tenant
             )
-            token = self.get_or_create_token(tenant_id=target_tenant, role=self.default_role)
+            if self._auth_mode == "admin":
+                token = self.get_or_create_token(
+                    tenant_id=target_tenant,
+                    role=UserRole.ADMIN,
+                    principal_id=self._active_principal or "usr_test_admin",
+                    scopes=("admin", "operator", "commerce:read", "commerce:write"),
+                )
+            elif self._auth_mode == "agent":
+                token = self.get_or_create_token(
+                    tenant_id=target_tenant,
+                    role=None,
+                    principal_id=self._active_principal or "agent_01",
+                    scopes=("agent", "commerce:read", "commerce:write"),
+                )
+            else:
+                effective_role = self._active_role or self.default_role
+                if effective_role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
+                    effective_pid = self._active_principal or "usr_test_admin"
+                    effective_scopes: tuple[str, ...] = (
+                        "admin",
+                        "operator",
+                        "commerce:read",
+                        "commerce:write",
+                    )
+                else:
+                    effective_pid = self._active_principal or "usr_test_buyer"
+                    effective_scopes = ("commerce:read", "commerce:write")
+
+                token = self.get_or_create_token(
+                    tenant_id=target_tenant,
+                    role=effective_role,
+                    principal_id=effective_pid,
+                    scopes=effective_scopes,
+                )
             hdrs["authorization"] = f"Bearer {token}"
 
         return self.app.handle_request(method, path, hdrs, json_body)
@@ -1392,3 +1746,57 @@ class ApiTestClient:
         auth: bool = True,
     ) -> ApiResponse:
         return self.request("POST", path, headers=headers, json_body=json_body, auth=auth)
+
+    def post_webhook(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        tenant_id: str = "tenant_01",
+        secret: str | None = None,
+        timestamp: int | None = None,
+        custom_signature: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> ApiResponse:
+        """Submit a signed provider payment webhook event (§61)."""
+        full_payload = dict(payload)
+        if "event_type" not in full_payload:
+            full_payload["event_type"] = event_type
+        if "tenant_id" not in full_payload:
+            full_payload["tenant_id"] = tenant_id
+
+        ts_int = timestamp if timestamp is not None else int(datetime.now(UTC).timestamp())
+        raw_json = json.dumps(full_payload, separators=(",", ":"), sort_keys=True)
+        canonical = f"{ts_int}.{raw_json}"
+
+        effective_secret = (
+            secret
+            if secret is not None
+            else getattr(self.app, "webhook_secret", "whsec_test_secret_32bytes_minimum_length")
+        )
+
+        hdrs: dict[str, str] = {
+            "x-tenant-id": tenant_id,
+            "x-webhook-timestamp": str(ts_int),
+        }
+
+        if custom_signature == "__OMIT__":
+            pass  # omit signature header for testing missing header
+        elif custom_signature is not None:
+            hdrs["x-webhook-signature"] = custom_signature
+        else:
+            hdrs["x-webhook-signature"] = hmac.new(
+                effective_secret.encode("utf-8"),
+                canonical.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+
+        if headers:
+            hdrs.update(headers)
+
+        return self.request(
+            "POST",
+            "/api/v1/webhooks/payments",
+            headers=hdrs,
+            json_body=full_payload,
+            auth=False,
+        )

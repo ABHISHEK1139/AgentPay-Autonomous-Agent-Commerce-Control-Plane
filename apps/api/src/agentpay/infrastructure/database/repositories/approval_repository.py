@@ -1,0 +1,114 @@
+"""SQLAlchemy implementation of ApprovalRepository port (§20, §49, §50)."""
+
+from __future__ import annotations
+
+from datetime import UTC
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session, sessionmaker
+
+from agentpay.application.ports.approval_port import ApprovalRepository
+from agentpay.domain.approval import (
+    Approval,
+    ApprovalBinding,
+    ApprovalStatus,
+)
+from agentpay.domain.errors import CrossTenantAccessError
+from agentpay.domain.money import Money
+from agentpay.infrastructure.database.models.approval import ApprovalModel
+from agentpay.infrastructure.database.repositories.base import BaseSqlAlchemyRepository
+
+
+class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository):
+    """SQLAlchemy-backed repository for Approval entities with exact 7-field binding."""
+
+    def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
+        super().__init__(session_or_factory)
+
+    def get(self, tenant_id: str, approval_id: str) -> Approval | None:
+        with self._session() as session:
+            stmt = select(ApprovalModel).where(
+                ApprovalModel.tenant_id == tenant_id,
+                ApprovalModel.approval_id == approval_id,
+            )
+            model = session.scalar(stmt)
+            if model is None:
+                return None
+            return self._to_domain(model)
+
+    def save(self, tenant_id: str, approval: Approval) -> None:
+        if approval.tenant_id != tenant_id:
+            raise CrossTenantAccessError(
+                f"Approval tenant '{approval.tenant_id}' does not match context '{tenant_id}'"
+            )
+
+        with self._session() as session:
+            model = session.get(ApprovalModel, approval.approval_id)
+            if model is None:
+                model = ApprovalModel(
+                    approval_id=approval.approval_id,
+                    tenant_id=approval.tenant_id,
+                    action_id=approval.binding.action_id,
+                    amount_minor=approval.binding.amount.minor_units,
+                    currency=approval.binding.currency,
+                    merchant_id=approval.binding.merchant_id,
+                    resource_id=approval.binding.resource_id,
+                    action_version=approval.binding.action_version,
+                    status=approval.status.value,
+                    requested_at=approval.requested_at,
+                    approver_id=approval.approver_id,
+                    decided_at=approval.decided_at,
+                    reason=approval.reason,
+                )
+                session.add(model)
+            else:
+                if model.tenant_id != tenant_id:
+                    raise CrossTenantAccessError(
+                        f"Existing approval tenant '{model.tenant_id}' does not match partition '{tenant_id}'"
+                    )
+                model.status = approval.status.value
+                model.approver_id = approval.approver_id
+                model.decided_at = approval.decided_at
+                model.reason = approval.reason
+            session.commit()
+
+    def list_for_action(self, tenant_id: str, action_id: str) -> list[Approval]:
+        with self._session() as session:
+            stmt = (
+                select(ApprovalModel)
+                .where(
+                    ApprovalModel.tenant_id == tenant_id,
+                    ApprovalModel.action_id == action_id,
+                )
+                .order_by(ApprovalModel.requested_at)
+            )
+            models = session.scalars(stmt).all()
+            return [self._to_domain(m) for m in models]
+
+    def _to_domain(self, model: ApprovalModel) -> Approval:
+        req_at = model.requested_at
+        if req_at.tzinfo is None:
+            req_at = req_at.replace(tzinfo=UTC)
+        dec_at = model.decided_at
+        if dec_at is not None and dec_at.tzinfo is None:
+            dec_at = dec_at.replace(tzinfo=UTC)
+
+        binding = ApprovalBinding(
+            action_id=model.action_id,
+            amount=Money(model.amount_minor, model.currency),
+            merchant_id=model.merchant_id,
+            resource_id=model.resource_id,
+            currency=model.currency,
+            action_version=model.action_version,
+            tenant_id=model.tenant_id,
+        )
+        return Approval(
+            approval_id=model.approval_id,
+            tenant_id=model.tenant_id,
+            binding=binding,
+            status=ApprovalStatus(model.status),
+            requested_at=req_at,
+            approver_id=model.approver_id,
+            decided_at=dec_at,
+            reason=model.reason,
+        )

@@ -13,36 +13,42 @@
 
 # 0. Working in This Repository
 
-## 0.1 Current State — Full Slice on In-Memory Adapters, No Real Infrastructure
+## 0.1 Current State — Full Slice on In-Memory & SQLite Adapters, No Live External Daemons
 
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (81 files), `ruff check` (clean), `mypy --strict`
-  (78 files, clean), `pytest` (**491 passed, 0 failed, 0 skipped**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (121 files), `ruff check` (clean), `mypy --strict`
+  (109 files, clean), `pytest` (**566 passed, 0 failed, 0 skipped**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
 - **Auxiliary suites, all green:** 3 node web tests (`node --test tests/web.test.mjs`, a forwarder
-  to `apps/web/tests/`), 42/42 protocol adversarial probes, 4/4 concurrency probes
+  to `apps/web/tests/`), 42/42 protocol adversarial probes, 4/4 concurrency probes, 5/5 test-client
+  privilege probes, 6/6 currency/money probes, 6/6 webhook replay/concurrency probes
   (`tests/adversarial/`), and a working audit-chain verifier CLI
   (`scripts/verify_audit_chain.py --help`).
-- **Backend confirmed present:** 12 domain modules (`Money`, `ActionRequest`, identity, policy,
-  approval with exact 7-field binding, SHA-256 chained audit ledger with redaction, commerce,
-  evidence conflicts, payments, decision, safety budgets); application ports, services
-  (`AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`), and the
-  `PurchaseOrchestrator`; an in-process API app (`AgentPayApiApp`, `/api/v1/*`) exercised through
-  an in-process test client — no sockets, no framework in `src`.
-- **Adapters confirmed present:** tenant-partitioned, lock-guarded in-memory repositories;
-  `MockPaymentProvider`; `MockDecisionEngine`; protocol adapters ACP/AP2/UAP/x402; atomic
-  single-use approval consumption; idempotency store that raises on payload mismatch; in-process
-  emergency-pause flag returning `EMERGENCY_PAUSE_ACTIVE` on mutating paths.
+- **Backend confirmed present:** 14 domain modules (`Money` + ISO 4217 `currencies` exponent table,
+  `ActionRequest`, identity, policy, approval with exact 7-field binding, SHA-256 chained audit
+  ledger with redaction, commerce, evidence conflicts, payments, decision, safety budgets, tool
+  registry); application ports, services (`AgentAuthorizationService`, `ApprovalService`,
+  `PaymentReconciler` with webhook state-machine guards), and the `PurchaseOrchestrator`; an
+  in-process API app (`AgentPayApiApp`, `/api/v1/*`, including `POST /api/v1/webhooks/payments`
+  with HMAC-SHA256 verification and replay locking) exercised through a least-privilege in-process
+  test client (`ApiTestClient`, defaulting to `UserRole.BUYER`).
+- **Adapters confirmed present:** tenant-partitioned, lock-guarded in-memory repositories AND
+  SQLAlchemy 2.0 relational models/repositories (`infrastructure/database/`, verified against
+  in-memory SQLite); `MockPaymentProvider`; `MockDecisionEngine`; protocol adapters
+  ACP/AP2/UAP/x402; atomic single-use approval consumption; idempotency store that raises on
+  payload mismatch; in-process emergency-pause flag returning `EMERGENCY_PAUSE_ACTIVE` on mutating
+  paths.
 - **Frontend confirmed present:** React/TypeScript control center (`apps/web/`) with all 8 demo
   scenarios of §112 in `scenarioData.ts`, approval context view, and kill-switch UI.
 - **Docs confirmed present:** ADRs, architecture, threat model, standards matrix, runbooks
-  (`docs/operations/`), `docs/security/autonomous-audit-report.md`.
-- **Still NOT real:** no Postgres/Redis (daemon down; **no DB driver, payment SDK, LLM SDK, or HTTP
-  server exists anywhere in `src`** — verified by import scan), no real payment provider, no real
-  model/JEV, no deployed service, no external security assessment or certification of any kind.
-- **Git exists now** (`master`, 6 commits through Sprint 12 work) but has **no remote**, so the CI
+  (`docs/operations/`, `docs/runbooks/`), `docs/security/autonomous-audit-report.md`.
+- **Still NOT real:** no live Postgres/Redis server (Docker daemon down; SQLAlchemy schema and
+  repositories are verified on in-memory SQLite, not a running PostgreSQL cluster), no real payment
+  provider SDK, no real model/JEV SDK, no deployed HTTP server, no external security assessment or
+  certification of any kind.
+- **Git exists now** (`master`, commits through Sprint 14 work) but has **no remote**, so the CI
   workflow (`.github/workflows/ci.yml`) has never executed. Local gates are the only evidence.
 - A test **enforces §10** for the domain layer (`apps/api/tests/unit/test_architecture_boundaries.py`)
   and the checker tests itself, so it cannot pass vacuously.
@@ -80,10 +86,13 @@ uv run pytest --hypothesis-show-statistics   # proves property tests really ran 
 Auxiliary verification suites (outside `pytest`; all verified green):
 
 ```powershell
-node --test tests/web.test.mjs                            # 3 web tests (forwards to apps/web/tests/)
-uv run python tests/adversarial/stress_test_protocols.py  # 42/42 adversarial probes
-uv run python tests/adversarial/stress_test_concurrency.py # 4/4 concurrency probes
-uv run python scripts/verify_audit_chain.py --help        # audit-chain verifier CLI
+node --test tests/web.test.mjs                                   # 3 web tests (forwards to apps/web/tests/)
+uv run python tests/adversarial/stress_test_protocols.py         # 42/42 adversarial probes
+uv run python tests/adversarial/stress_test_concurrency.py       # 4/4 concurrency probes
+uv run python tests/adversarial/stress_test_client_privilege.py  # 5/5 least-privilege client probes
+uv run python tests/adversarial/stress_test_money.py             # 6/6 ISO 4217 currency & rational FX probes
+uv run python tests/adversarial/stress_test_webhooks.py          # 6/6 HMAC webhook & replay probes
+uv run python scripts/verify_audit_chain.py --help               # audit-chain verifier CLI
 ```
 
 Facts a future agent would otherwise get wrong:
