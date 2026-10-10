@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from test_purchase_flow import setup_orchestrator
 
 from agentpay.api.app import AgentPayApiApp, ApiTestClient
@@ -186,3 +188,112 @@ def test_approval_flow_via_http() -> None:
     assert status_code == 200
     assert body["status"] == "APPROVED"
     assert body["approver_id"] == "manager_alice"
+
+
+def test_emergency_endpoints_accessible_without_tenant_header() -> None:
+    """Verify operator can query status, pause, and resume without X-Tenant-ID header (§21, §67)."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app)
+
+    # 1. Query status without tenant header
+    status, body = client.get("/api/v1/emergency/status", headers={"x-operator-id": "secops_01"})
+    assert status == 200
+    assert body["paused"] is False
+    assert body["emergency_paused"] is False
+
+    # 2. Pause without tenant header
+    status, body = client.post(
+        "/api/v1/emergency/pause",
+        json_body={"operator_id": "secops_01", "reason": "Sev 1 triage"},
+        headers={"x-operator-id": "secops_01"},
+    )
+    assert status == 200
+    assert body["status"] == "PAUSED"
+    assert body["paused"] is True
+    assert body["emergency_paused"] is True
+    assert app.is_emergency_paused is True
+
+    # 3. Resume without tenant header
+    status, body = client.post(
+        "/api/v1/emergency/resume",
+        json_body={"operator_id": "secops_01"},
+        headers={"x-operator-id": "secops_01"},
+    )
+    assert status == 200
+    assert body["status"] == "ACTIVE"
+    assert body["paused"] is False
+    assert body["emergency_paused"] is False
+    assert app.is_emergency_paused is False
+
+
+def test_verify_audit_chain_script_cli_execution(tmp_path: Any) -> None:
+    """Verify scripts/verify_audit_chain.py CLI returns 0 on valid export and 1 on tamper."""
+    import json
+    import subprocess
+
+    from agentpay.adapters.in_memory.audit_ledger import InMemoryAuditLedger
+    from agentpay.domain.audit import AuditEventType
+
+    ledger = InMemoryAuditLedger()
+    e1 = ledger.record_event(
+        event_type=AuditEventType.ACTION_REQUESTED,
+        action_id="act_01",
+        tenant_id="tenant_01",
+        actor="user_01",
+        data={"amount": 100},
+        agent_id="agent_01",
+    )
+    e2 = ledger.record_event(
+        event_type=AuditEventType.POLICY_EVALUATED,
+        action_id="act_01",
+        tenant_id="tenant_01",
+        actor="policy_engine",
+        data={"decision": "ALLOW"},
+        agent_id="agent_01",
+    )
+
+    valid_file = tmp_path / "valid_audit.jsonl"
+    lines = [
+        json.dumps(
+            {
+                "event_id": e.event_id,
+                "tenant_id": e.tenant_id,
+                "actor": e.actor,
+                "event_type": e.event_type.value,
+                "timestamp": e.timestamp.isoformat(),
+                "data": e.data,
+                "previous_event_hash": e.previous_event_hash,
+                "event_hash": e.event_hash,
+                "agent_id": e.agent_id,
+                "action_id": e.action_id,
+            }
+        )
+        for e in [e1, e2]
+    ]
+    valid_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Valid run
+    res_valid = subprocess.run(
+        ["uv", "run", "python", "scripts/verify_audit_chain.py", str(valid_file)],
+        capture_output=True,
+        text=True,
+    )
+    assert res_valid.returncode == 0
+    assert "SUCCESS" in res_valid.stdout
+
+    # Tampered run
+    tampered_file = tmp_path / "tampered_audit.jsonl"
+    lines_tampered = list(lines)
+    record = json.loads(lines_tampered[0])
+    record["data"] = {"amount": 999999}  # Tamper payload
+    lines_tampered[0] = json.dumps(record)
+    tampered_file.write_text("\n".join(lines_tampered) + "\n", encoding="utf-8")
+
+    res_tampered = subprocess.run(
+        ["uv", "run", "python", "scripts/verify_audit_chain.py", str(tampered_file)],
+        capture_output=True,
+        text=True,
+    )
+    assert res_tampered.returncode == 1
+    assert "FAILED" in res_tampered.stderr

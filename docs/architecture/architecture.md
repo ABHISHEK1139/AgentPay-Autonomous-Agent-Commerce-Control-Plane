@@ -1,74 +1,105 @@
 # AgentPay — Architecture
 
-Status: Sprint 0. Describes what exists now and the boundaries that must not move.
+> **Status**: Sprint 12 Complete — Full Autonomous Control Plane Verified  
+> **Governing Specifications**: `AGENTS.md` (§8, §10, §18, §21, §45, §67, §107, §108, §176)  
 
-## Layering
+---
 
-```text
-api  ──▶  application  ──▶  domain  ◀──  ports
-                                          ▲
-                              infrastructure / adapters
-```
+## 1. Layering & Architectural Flow
 
-Dependency direction is one-way. `agentpay.domain` imports nothing from any other layer and
-nothing from a framework. This is not a convention, it is a test:
-`apps/api/tests/unit/test_architecture_boundaries.py` walks the AST of every domain module and
-fails on any import of FastAPI, SQLAlchemy, Redis, HTTP clients, payment/AI SDKs, or an outer
-AgentPay layer.
-
-The current import restriction list lives in that test's `FORBIDDEN_IN_DOMAIN`. Adding a
-dependency to the domain layer means changing that list deliberately, in a reviewed diff.
-
-## What exists
+The architecture follows a strict **modular monolith** with clean hexagonal boundaries.
 
 ```text
-domain/errors.py           DomainError hierarchy, each with a stable machine-readable code
-domain/money.py            Money (integer minor units + currency), total_money
-domain/action_request.py   ActionRequest, ResourceRef, Intent, AuthorizationMode, ActionStatus
-domain/policy.py           PolicyDecision, PolicyReason, PolicyEvaluationResult, SpendingLimits,
-                           SpendingPolicyEngine
+┌─────────────────────────────────────────────────────────────┐
+│                       UI / CLIENTS                          │
+│     Web Control Center (apps/web)  •  External Agents       │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ HTTP / Protocols
+┌──────────────────────────────▼──────────────────────────────┐
+│                    API & PROTOCOL ADAPTERS                  │
+│   FastAPI / ASGI App  •  ACP  •  AP2  •  UAP  •  x402       │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Commands / DTOs
+┌──────────────────────────────▼──────────────────────────────┐
+│                      APPLICATION LAYER                      │
+│   PurchaseOrchestrator  •  ApprovalService  •  AuthService  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Domain Operations
+┌──────────────────────────────▼──────────────────────────────┐
+│                         DOMAIN CORE                         │
+│  ActionRequest • Money • Policy • Identity • Evidence       │
+│  Commerce • Payments • Audit Hash Ledger • Safety Loops     │
+└──────────────────────────────▲──────────────────────────────┘
+                               │ Implements Ports
+┌──────────────────────────────┴──────────────────────────────┐
+│                    PORTS & INFRASTRUCTURE                   │
+│   In-Memory Repositories  •  Mock PSP  •  Mock JEV Engine   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Everything is a frozen, slotted dataclass. There is no ORM, no framework, no I/O, and no clock in
-the domain package, which is why it is directly unit-testable.
+### 1.1 Dependency Direction
+Dependency direction is strictly inward:
+- **`agentpay.domain`** contains business rules and invariants. It imports zero frameworks, zero ORMs, zero HTTP clients, and zero payment/AI SDKs.
+- **Enforcement (§10)**: `apps/api/tests/unit/test_architecture_boundaries.py` walks the AST of every domain module and fails if any forbidden import is introduced (`FORBIDDEN_IN_DOMAIN`). 7 tests enforce this boundary.
+- **Application Layer**: Coordinates domain workflows (`execute_purchase`, `execute_approved_purchase`, `grant_approval`).
+- **Protocol Adapters**: Translate external agent protocols (ACP, AP2, UAP, x402) into the canonical `ActionRequest` without leaking external protocol constructs into the domain core.
+- **Infrastructure Layer**: Implements domain repository interfaces and external service ports.
 
-### Money
+---
 
-Integer minor units plus an explicit currency. Floats, `Decimal`, strings and `bool` are rejected
-in the constructor. Currency codes are validated for shape (three A–Z letters, normalised to upper
-case) rather than against a hard-coded table, so no currency is privileged in the domain core.
-Subtraction refuses to produce a negative amount rather than wrapping.
+## 2. Core Domain Components
 
-### ActionRequest
+| Module | Responsibility & Key Domain Entities | Governing Invariants |
+|---|---|---|
+| `domain/money.py` | `Money`, `total_money`. Integer minor units + ISO currency. | Never binary float or bool (§122). Subtraction refuses negative results. |
+| `domain/action_request.py` | `ActionRequest`, `ResourceRef`, `Intent`, `AuthorizationMode`, `ActionStatus`. | Canonical representation of all agent actions (§6). Timezone-aware UTC. |
+| `domain/identity.py` | `Tenant`, `User`, `Agent`, `AgentPermissions`, `AgentStatus`. | Agents cannot alter permissions. Non-active agents fail closed (§14, §15). |
+| `domain/policy.py` | `SpendingLimits`, `SpendingPolicyEngine`, `PolicyEvaluationResult`, `PolicyDecision`. | Pure deterministic function. No clock, no network, most restrictive rule wins (§18). |
+| `domain/commerce.py` | `Merchant`, `Product`, `ProductVariant`, `Inventory`, `MerchantStatus`. | Stock reservation state machine. Suspended merchants fail closed (§30, §37). |
+| `domain/evidence.py` | `EvidenceConflictDetector`, `EvidenceRecord`, `ConflictType`. | Pre-flight price and stock conflict detection. Fails closed before payment (§32, §33). |
+| `domain/decision.py` | `Decision`, `DecisionRecommendation`, `RiskLevel`. | Advisory AI (JEV / LLM). Strictly subordinate to deterministic policy engine (§2.2, §134). |
+| `domain/approval.py` | `ApprovalRecord`, `ApprovalBinding`, `ApprovalStatus`. | Cryptographic binding to action, amount, and merchant. Single-use consumption (§20). |
+| `domain/payments.py` | `PaymentAttempt`, `PaymentIntent`, `PaymentStatus`, `Order`, `PaymentReconciler`. | Strict idempotency keys. On timeout, query provider; never blindly retry (§41, §43). |
+| `domain/audit.py` | `AuditEvent`, `AuditHasher`, `SensitiveFieldRedactor`, `AuditEventType`. | SHA-256 hash chaining over canonical JSON. Full metadata preimage validation (§29, §45). |
+| `domain/safety.py` | `AgentLoopBudget`, `AgentLoopTracker`, `FinancialSafetyBudget`. | Halts recursive agent tool loops (max 5 calls, max depth 3) (§64, §65). |
 
-The canonical abstraction that every future domain normalises into. Validates that identity fields
-are present, that `requested_at` is timezone-aware, and that a requested amount does not exceed the
-stated intent budget. `authorization_mode` defaults to `SUPERVISED`: authority is requested
-explicitly and is never inferred from an absent field.
+---
 
-### Policy
+## 3. Protocol Adapters (§107, §108)
 
-`PolicyEvaluationResult` returns one of `ALLOW`, `DENY`, `REVIEW`, `NEEDS_INFORMATION` with a
-policy version and typed reasons — never a bare boolean. `SpendingPolicyEngine` is a pure function
-of its inputs: no clock, no randomness, no I/O, so the same inputs always produce the same result.
-When several rules fire, the most restrictive decision wins and all reasons are retained, because a
-DENY that cannot be explained is unauditable.
+Located in `apps/api/src/agentpay/adapters/protocols/`:
+- **`AcpAdapter` (Agent Commerce Protocol)**: Translates ACP checkout intents and cart structures into `ActionRequest`.
+- **`Ap2Adapter` (Agent Payment Protocol)**: Handles AP2 mandates, verifications, and execution bindings. Enforces mandate expiry.
+- **`UapAdapter` (Universal Agent Protocol)**: Translates UAP JSON-RPC 2.0 messages into domain actions. Rejects unsupported capabilities and malformed envelopes.
+- **`X402Adapter` (HTTP 402 Micropayments)**: Manages L402/x402 challenge-response headers, macaroons/tokens, and micropayment verification.
+- **Emergency Halt**: All 4 protocol adapters intercept requests when the kill switch is engaged, returning HTTP 503 `EMERGENCY_PAUSE_ACTIVE` (§21, §67).
 
-## Deliberately absent
+---
 
-No HTTP layer, no persistence, no payment provider, no AI integration. Each is a separate sprint.
-Adding them means adding ports and adapters, not editing domain logic.
+## 4. Control Center Frontend (`apps/web/`)
 
-## Extension points and their seams
+Built as an interactive, inspectable operator dashboard:
+- **10-Step Pipeline Visualizer**: Renders the complete agent decision lifecycle:
+  `USER INTENT → AGENT IDENTITY → PRODUCT DISCOVERY → EVIDENCE → RECOMMENDATION → JEV → POLICY → APPROVAL → PAYMENT → ORDER`
+- **Human Approval Review Screen (§66)**: Displays all 11 decision context fields (who, what, why, amount, merchant, evidence provenance, risk level, confidence score, etc.).
+- **Emergency Kill Switch Controls (§21, §67)**: One-click cluster pause and resume with operator attribution.
 
-| When you need | Add | Do not |
-| --- | --- | --- |
-| a new domain (procurement, travel) | a domain module + adapter behind a port | generalise `ActionRequest` into a base class hierarchy |
-| a payment provider | an adapter satisfying the payment port | import an SDK into the domain |
-| a model vendor | a model-gateway adapter | let a model set limits or policy |
-| a second policy rule | a rule returning typed `PolicyReason`s | let a rule return a boolean |
+---
 
-## Known architectural debt
+## 5. Deliberately Deferred & Operational Seams
 
-Recorded in `docs/engineering/technical-debt.md` (TD-001 …). The main one: the blueprint's §9
-monorepo layout is a target, and only the parts that exist today have been created.
+The following components are designed and architected, with concrete operational runbooks, but operate hermetically in-memory in the local environment because the local Docker daemon is not active:
+- **Persistent Database Daemon**: PostgreSQL schema definitions and WAL archiving procedures are specified (ADR-0001); test suites run against multi-tenant thread-safe in-memory repositories.
+- **Distributed Cache Daemon**: Redis AOF/RDB configuration is specified; in-memory thread-safe state trackers handle local execution.
+- **Live Merchant PSP Keys**: Payment provider operates against verified sandbox/mock gateways with the complete state machine and saga compensation lifecycle.
+
+---
+
+## 6. Extension Points & Seams
+
+| Scenario | Prescribed Approach | Prohibited Action |
+|---|---|---|
+| Adding new agent domain (travel, procurement) | Add domain entities & adapters behind ports | Do NOT generalize `ActionRequest` into a complex inheritance hierarchy. |
+| Connecting live payment gateway (Razorpay) | Implement payment adapter satisfying the payment port | Do NOT import payment SDKs into the domain layer. |
+| Connecting LLM / model provider | Add model gateway adapter satisfying decision port | Do NOT allow model outputs to override deterministic spending policy. |
+| Custom protocol support | Add new adapter in `adapters/protocols/` | Do NOT let protocol-specific DTOs leak into domain entities. |

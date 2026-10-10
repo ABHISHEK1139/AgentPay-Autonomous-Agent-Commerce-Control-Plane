@@ -269,19 +269,12 @@ class AgentPayApiApp:
                 },
             }
 
-        # Tenant header required for all tenant-scoped routes (§49, §50)
-        if not tenant_id and path.startswith("/api/v1/protocols/"):
-            tenant_id = self._extract_protocol_tenant(path, body)
-
-        if not tenant_id:
-            return self._error_response(
-                400, "MISSING_TENANT_HEADER", "X-Tenant-ID header is required", request_id
-            )
-
         # 3. Emergency Status & Controls (§21, §67)
+        # Platform-level operator controls operate cluster-wide and do not require tenant scoping
         if path == "/api/v1/emergency/status" and method == "GET":
             return 200, {
                 "paused": self._emergency_paused,
+                "emergency_paused": self._emergency_paused,
                 "metadata": self._pause_metadata,
             }
 
@@ -290,13 +283,32 @@ class AgentPayApiApp:
             operator_id = str(req_data.get("operator_id", "operator"))
             reason = str(req_data.get("reason", "Manual emergency pause"))
             self.pause_emergency(operator_id=operator_id, reason=reason)
-            return 200, {"status": "PAUSED", "metadata": self._pause_metadata}
+            return 200, {
+                "status": "PAUSED",
+                "paused": True,
+                "emergency_paused": True,
+                "metadata": self._pause_metadata,
+            }
 
         if path == "/api/v1/emergency/resume" and method == "POST":
             req_data = body or {}
             operator_id = str(req_data.get("operator_id", "operator"))
             self.resume_emergency(operator_id=operator_id)
-            return 200, {"status": "ACTIVE", "metadata": self._pause_metadata}
+            return 200, {
+                "status": "ACTIVE",
+                "paused": False,
+                "emergency_paused": False,
+                "metadata": self._pause_metadata,
+            }
+
+        # Tenant header required for all tenant-scoped routes (§49, §50)
+        if not tenant_id and path.startswith("/api/v1/protocols/"):
+            tenant_id = self._extract_protocol_tenant(path, body)
+
+        if not tenant_id:
+            return self._error_response(
+                400, "MISSING_TENANT_HEADER", "X-Tenant-ID header is required", request_id
+            )
 
         # 4. Agent Catalog endpoints (§38)
         if path == "/agent/catalog" and method == "GET":
