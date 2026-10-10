@@ -249,7 +249,7 @@ To guarantee operational readiness, the platform team conducts scheduled disaste
 |---|---|---|
 | **Monthly** | **Audit Hash Tamper Simulation**: Synthetic injection of corrupted bit into audit table. | Monitoring triggers Sev 1 alert; automated verification script isolates corrupted row; recovery from WORM replica completes in < 10 min. |
 | **Quarterly** | **Payment Gateway Outage & Replay**: Simulated 30-minute gateway blackout during peak agent checkout. | Zero double charges; 100% of indeterminate transactions resolved via `PaymentReconciler`; saga compensations release 100% of held inventory. |
-| **Bi-Annual** | **Full Region Failover (PITR)**: Complete loss of primary cloud region. | Standby cluster restored in secondary region with RPO < 5 min and RTO < 15 min; all 381 automated tests and web tests pass on restored instance. |
+| **Bi-Annual** | **Full Region Failover (PITR)**: Complete loss of primary cloud region. | Standby cluster restored in secondary region with RPO < 5 min and RTO < 15 min; all 383 automated tests and web tests pass on restored instance. |
 
 ### 5.2 Game-Day Attestation Log
 

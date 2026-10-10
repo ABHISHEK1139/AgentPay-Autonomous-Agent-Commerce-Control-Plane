@@ -5,7 +5,7 @@ Things a future engineer will otherwise discover the hard way.
 ## Operational & Environment Limitations
 
 - **Hermetic In-Memory Execution**: The local development machine does not have a running Docker daemon
-  (`docker info` fails). All 381 automated backend tests and 3 web dashboard tests run against thread-safe
+  (`docker info` fails). All 383 automated backend tests and 3 web dashboard tests run against thread-safe
   in-memory repository adapters and sandbox payment providers. Production PostgreSQL and Redis connection
   pools are defined in configuration but run hermetically in local test runs.
 - **Task Runner Tools**: `make` and `just` are not installed on this machine (TD-003). All operations
