@@ -14,6 +14,7 @@ import threading
 from agentpay.application.ports.identity_port import (
     AgentPermissionsRepository,
     AgentRepository,
+    CredentialRepository,
     TenantRepository,
 )
 from agentpay.domain.errors import (
@@ -25,6 +26,7 @@ from agentpay.domain.identity import (
     Agent,
     AgentPermissions,
     AgentStatus,
+    Credential,
     Tenant,
 )
 
@@ -215,3 +217,60 @@ class InMemoryAgentPermissionsRepository(AgentPermissionsRepository):
         """Reset repository state for testing."""
         with self._lock:
             self._permissions.clear()
+
+
+class InMemoryCredentialRepository(CredentialRepository):
+    """Thread-safe, multi-tenant partitioned repository for Credentials (§14)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._credentials: dict[str, dict[str, Credential]] = {}
+        self._by_hash: dict[str, Credential] = {}
+
+    def get(self, tenant_id: str, credential_id: str) -> Credential | None:
+        with self._lock:
+            tenant_partition = self._credentials.get(tenant_id)
+            if tenant_partition is None:
+                return None
+            return tenant_partition.get(credential_id)
+
+    def get_by_secret_hash(self, secret_hash: str) -> Credential | None:
+        with self._lock:
+            return self._by_hash.get(secret_hash)
+
+    def save(self, tenant_id: str, credential: Credential) -> None:
+        if credential.tenant_id != tenant_id:
+            raise CrossTenantAccessError(
+                f"Credential tenant_id '{credential.tenant_id}' does not match partition '{tenant_id}'"
+            )
+        with self._lock:
+            if tenant_id not in self._credentials:
+                self._credentials[tenant_id] = {}
+            self._credentials[tenant_id][credential.credential_id] = credential
+            self._by_hash[credential.secret_hash] = credential
+
+    def revoke(self, tenant_id: str, credential_id: str) -> None:
+        with self._lock:
+            cred = self.get(tenant_id, credential_id)
+            if cred is not None:
+                from agentpay.domain.identity import CredentialStatus
+
+                revoked = Credential(
+                    credential_id=cred.credential_id,
+                    tenant_id=cred.tenant_id,
+                    principal_id=cred.principal_id,
+                    credential_type=cred.credential_type,
+                    secret_hash=cred.secret_hash,
+                    expires_at=cred.expires_at,
+                    status=CredentialStatus.REVOKED,
+                    role=cred.role,
+                    scopes=cred.scopes,
+                )
+                self._credentials[tenant_id][credential_id] = revoked
+                self._by_hash[cred.secret_hash] = revoked
+
+    def clear(self) -> None:
+        """Reset repository state for testing."""
+        with self._lock:
+            self._credentials.clear()
+            self._by_hash.clear()

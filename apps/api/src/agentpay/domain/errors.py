@@ -111,6 +111,84 @@ class MissingCapabilityError(IdentityError):
     code = "MISSING_CAPABILITY"
 
 
+# Authentication & Token Errors (§14)
+class AuthenticationError(IdentityError):
+    """Raised when a caller cannot be authenticated (§14)."""
+
+    code = "AUTHENTICATION_FAILED"
+
+
+class MissingTokenError(AuthenticationError):
+    code = "MISSING_TOKEN"
+
+
+class InvalidTokenError(AuthenticationError):
+    code = "INVALID_TOKEN"
+
+
+class TokenExpiredError(AuthenticationError):
+    code = "TOKEN_EXPIRED"
+
+
+class TokenRevokedError(AuthenticationError):
+    code = "TOKEN_REVOKED"
+
+
+class TokenAudienceError(AuthenticationError):
+    code = "TOKEN_AUDIENCE_INVALID"
+
+
+class TokenLifetimeTooLongError(AuthenticationError):
+    """Raised when a requested token lifetime exceeds the policy maximum (§14)."""
+
+    code = "TOKEN_LIFETIME_TOO_LONG"
+
+
+class AuthorizationError(IdentityError):
+    """Raised when an authenticated principal lacks authority for a request (§16)."""
+
+    code = "AUTHORIZATION_DENIED"
+
+
+class MissingScopeError(AuthorizationError):
+    code = "MISSING_SCOPE"
+
+
+class AgentIdentityMismatchError(AuthorizationError):
+    """Raised when an agent token tries to act as a different agent (§15)."""
+
+    code = "AGENT_IDENTITY_MISMATCH"
+
+
+class RateLimitExceededError(DomainError):
+    """Raised when a caller exceeds its configured request budget (§62)."""
+
+    code = "RATE_LIMIT_EXCEEDED"
+
+
+# Tool Registry Errors (§26, §27)
+class ToolRegistryError(DomainError):
+    code = "TOOL_REGISTRY_ERROR"
+
+
+class UnknownToolError(ToolRegistryError):
+    """Raised when a caller invokes a tool that is not in the fixed registry (§26)."""
+
+    code = "UNKNOWN_TOOL"
+
+
+class ToolPermissionDeniedError(ToolRegistryError):
+    """Raised when a tool is invoked without its required permission (§26)."""
+
+    code = "TOOL_PERMISSION_DENIED"
+
+
+class ToolCallerNotAllowedError(ToolRegistryError):
+    """Raised when a caller type is not permitted to invoke a tool (§26)."""
+
+    code = "TOOL_CALLER_NOT_ALLOWED"
+
+
 # Commerce Errors
 class InvalidCommerceError(DomainError):
     code = "INVALID_COMMERCE"
@@ -186,3 +264,24 @@ class LoopBudgetExceededError(SafetyError):
 
 class FinancialSafetyBudgetExceededError(SafetyError):
     code = "FINANCIAL_SAFETY_BUDGET_EXCEEDED"
+
+
+# Additional Credential Errors (§14, §15, §67)
+class InvalidCredentialError(AuthenticationError):
+    code = "INVALID_CREDENTIAL"
+
+
+class CredentialExpiredError(AuthenticationError):
+    code = "CREDENTIAL_EXPIRED"
+
+
+class CredentialRevokedError(AuthenticationError):
+    code = "CREDENTIAL_REVOKED"
+
+
+class UnauthorizedOperatorError(AuthenticationError):
+    code = "UNAUTHORIZED_OPERATOR"
+
+
+class UnauthorizedToolAccessError(ToolRegistryError):
+    code = "UNAUTHORIZED_TOOL_ACCESS"

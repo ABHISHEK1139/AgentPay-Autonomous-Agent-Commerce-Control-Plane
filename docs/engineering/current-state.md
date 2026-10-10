@@ -8,21 +8,26 @@ mypy 2.4.0, pytest 9.1.1.
 | Component | State | Scope & Verification |
 | --- | --- | --- |
 | `pyproject.toml`, `uv.lock` | locked | Dependencies locked, pure standard-library runtime |
-| Monorepo layout (§9) | initialized | `apps/api`, `apps/worker`, `apps/web`, `packages/*`, `adapters/*`, `security/*` |
+| Monorepo layout (§9) | verified | `apps/api`, `apps/web`, `apps/worker`, `packages/*`, `scripts/`, `security/`, `tests/`, `docs/*`. |
 | Version Control | active | Git initialized, provenance tracked |
 | Domain: `Money` | implemented | 32 unit & property-based tests (§122, §123) |
 | Domain: `ActionRequest` | implemented | Canonical lifecycle abstraction (§6, §7) |
-| Domain: `Identity & Tenancy` | implemented | Tenant, User, Agent, AgentPermissions (§14, §15, §16, §49) |
+| Domain: `Identity & Tenancy` | implemented | Tenant, User, Agent, AgentPermissions, Credential, TokenClaims (§14, §15, §16, §49) |
 | Domain: `Commerce & Evidence` | implemented | Merchant, Product, Variant, Inventory, Conflict Detector (§30, §32) |
-| Domain: `Decision & Approval` | implemented | JEV Decision models, ApprovalBinding, state machine (§18, §20) |
+| Domain: `Decision & Approval` | implemented | JEV Decision models with prompt/tool/policy metadata (§29, §118), ApprovalBinding, state machine (§18, §20) |
 | Domain: `Payments & Orders` | implemented | PaymentAttempt, Order, Idempotency, Saga compensation (§39, §41, §42) |
 | Domain: `Audit Ledger` | implemented | SHA-256 hash chaining, sensitive field redaction (§29, §45) |
-| Domain: `Safety & Protection` | implemented | Loop tracker, tool call budget, financial safety budget (§64, §65) |
-| Application Layer | implemented | `AgentAuthorizationService`, `ApprovalService`, `PurchaseOrchestrator` |
-| Protocol Adapters | implemented | ACP, AP2, UAP, x402 adapters mapping to `ActionRequest` (§107, §108) |
+| Domain: `Safety & Protection` | implemented | Loop tracker, tool call budget, financial safety budget, sliding window RateLimiter (§52, §62, §64, §65) |
+| Domain: `Tool Registry` | implemented | Fixed tool registry, ToolSpec/ToolDefinition, capability gating, risk classification (§26, §27) |
+| Application Layer | implemented | `AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`, `PurchaseOrchestrator` |
+| Protocol Adapters | implemented | ACP, AP2, UAP, x402 adapters mapping to canonical `ActionRequest` (§107, §108) |
+| Developer SDK | implemented | Thin typed Python client (`from agentpay import AgentPay`, §109) |
 | Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67) |
 | Ports & Adapters | implemented | In-memory repositories & mock payment/decision adapters |
-| HTTP API & Emergency Controls | implemented | Standard error envelopes (§13), OpenAPI 3.1, Kill switch (§21, §67) |
+| HTTP API & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.1, Kill switch (§21, §67) |
+| Operational Runbooks | implemented | All 9 named runbooks in `docs/runbooks/` (§133) |
+| Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-006 (§87) |
+| Security Assurance | implemented | OWASP ASVS v4.0 verification matrix, YAML index, exceptions in `security/asvs/` (§53) |
 | Failure Engineering (§112) | verified | Chaos suite: price drift, inventory depletion, timeout reconciliation, saga |
 | Red-Team Security & 14 Vectors (§177) | verified | Exhaustive adversarial threat harness, crypto tamper suite, concurrency stress suite |
 | Architecture Boundary Guard | verified | 7 tests enforce domain purity (§10) with zero external imports |
@@ -30,11 +35,14 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .   67 files already formatted
+uv run ruff format --check .   75 files already formatted
 uv run ruff check .            All checks passed!
-uv run mypy                    Success: no issues found in 64 source files
-uv run pytest                  383 passed
-node --test tests/web.test.mjs 3 passed in 99ms
+uv run mypy                    Success: no issues found in 72 source files
+uv run pytest                  443 passed in 8.87s
+node --test tests/web.test.mjs 3 passed in 344ms
+uv run python tests/adversarial/stress_test_protocols.py    42/42 passed
+uv run python tests/adversarial/stress_test_concurrency.py  4/4 passed
+uv run python scripts/verify_audit_chain.py --help         Verified working
 ```
 
 All property-based tests completed their full budgets.

@@ -13,6 +13,7 @@ from agentpay.domain.identity import (
     Agent,
     AgentPermissions,
     AgentStatus,
+    Credential,
     Tenant,
 )
 
@@ -87,4 +88,28 @@ class AgentPermissionsRepository(Protocol):
 
         Must raise CrossTenantAccessError if permissions.tenant_id != tenant_id.
         """
+        ...
+
+
+@runtime_checkable
+class CredentialRepository(Protocol):
+    """Port for authentication credential persistence and lookup (§14)."""
+
+    def get(self, tenant_id: str, credential_id: str) -> Credential | None:
+        """Retrieve a credential within a tenant partition."""
+        ...
+
+    def get_by_secret_hash(self, secret_hash: str) -> Credential | None:
+        """Lookup a credential globally by secret hash to identify caller and tenant."""
+        ...
+
+    def save(self, tenant_id: str, credential: Credential) -> None:
+        """Persist or update a credential within a tenant partition.
+
+        Must raise CrossTenantAccessError if credential.tenant_id != tenant_id.
+        """
+        ...
+
+    def revoke(self, tenant_id: str, credential_id: str) -> None:
+        """Revoke a credential within a tenant partition."""
         ...

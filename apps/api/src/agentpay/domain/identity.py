@@ -8,6 +8,7 @@ Following Clean Architecture (§8, §10):
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -464,3 +465,108 @@ class AgentPermissions:
                 raise PrivilegeEscalationAttemptError(
                     f"Cannot widen allowed_categories: added {sorted(added_cats)}"
                 )
+
+
+# ===========================================================================
+# Authentication & Credential Models (§14, §15, §67)
+# ===========================================================================
+class CredentialType(StrEnum):
+    """Supported authentication credential types (§14)."""
+
+    API_KEY = "API_KEY"
+    BEARER_TOKEN = "BEARER_TOKEN"
+    HMAC_SIGNATURE = "HMAC_SIGNATURE"
+
+
+class CredentialStatus(StrEnum):
+    """Lifecycle status of a credential (§14)."""
+
+    ACTIVE = "ACTIVE"
+    REVOKED = "REVOKED"
+    EXPIRED = "EXPIRED"
+
+
+@dataclass(frozen=True, slots=True)
+class Credential:
+    """An authentication credential bound to a specific tenant and principal (§14).
+
+    Validates callers before granting access to tenant resources.
+    The secret is stored as a SHA-256 hash; raw plaintext secrets are never stored.
+    """
+
+    credential_id: str
+    tenant_id: str
+    principal_id: str  # user_id or agent_id
+    credential_type: CredentialType
+    secret_hash: str
+    expires_at: datetime
+    status: CredentialStatus = CredentialStatus.ACTIVE
+    role: UserRole | None = None
+    scopes: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        identifiers: tuple[tuple[str, object], ...] = (
+            ("credential_id", self.credential_id),
+            ("tenant_id", self.tenant_id),
+            ("principal_id", self.principal_id),
+            ("secret_hash", self.secret_hash),
+        )
+        for field_name, value in identifiers:
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidIdentityError(f"{field_name} must be a non-empty string")
+
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise InvalidIdentityError("expires_at must be timezone-aware (UTC)")
+
+        ctype_val: object = self.credential_type
+        if isinstance(ctype_val, str) and not isinstance(ctype_val, CredentialType):
+            try:
+                object.__setattr__(self, "credential_type", CredentialType(ctype_val))
+            except ValueError as err:
+                raise InvalidIdentityError(f"invalid credential_type: {ctype_val!r}") from err
+        elif not isinstance(ctype_val, CredentialType):
+            raise InvalidIdentityError(f"credential_type must be CredentialType, got {ctype_val!r}")
+
+        cstat_val: object = self.status
+        if isinstance(cstat_val, str) and not isinstance(cstat_val, CredentialStatus):
+            try:
+                object.__setattr__(self, "status", CredentialStatus(cstat_val))
+            except ValueError as err:
+                raise InvalidIdentityError(f"invalid credential status: {cstat_val!r}") from err
+        elif not isinstance(cstat_val, CredentialStatus):
+            raise InvalidIdentityError(f"status must be CredentialStatus, got {cstat_val!r}")
+
+        scopes_val: object = self.scopes
+        if isinstance(scopes_val, list):
+            object.__setattr__(self, "scopes", tuple(scopes_val))
+        elif not isinstance(scopes_val, tuple):
+            raise InvalidIdentityError(f"scopes must be a tuple, got {type(scopes_val).__name__}")
+
+    @property
+    def is_active(self) -> bool:
+        return self.status is CredentialStatus.ACTIVE
+
+    def is_expired(self, at: datetime | None = None) -> bool:
+        if self.status is CredentialStatus.EXPIRED:
+            return True
+        if at is None:
+            at = datetime.now(UTC)
+        elif at.tzinfo is None:
+            raise InvalidIdentityError("comparison timestamp must be timezone-aware")
+        return at > self.expires_at
+
+    def verify_secret(self, plaintext: str) -> bool:
+        """Verify whether a plaintext secret matches this credential's stored hash."""
+        computed = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        return computed == self.secret_hash
+
+    @staticmethod
+    def hash_secret(plaintext: str) -> str:
+        """Compute the deterministic SHA-256 hash of a plaintext secret."""
+        return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+    def has_role(self, required_role: UserRole) -> bool:
+        return self.role == required_role
+
+    def is_operator_or_admin(self) -> bool:
+        return self.role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR)

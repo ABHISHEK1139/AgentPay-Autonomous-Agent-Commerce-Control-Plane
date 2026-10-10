@@ -13,33 +13,48 @@
 
 # 0. Working in This Repository
 
-## 0.1 Current State — Sprint 0 Done, Nothing Else Built
+## 0.1 Current State — Full Slice on In-Memory Adapters, No Real Infrastructure
 
-Sprint 0 (repo, tooling, domain model, CI, ADRs, initial threat model) is **done**. This section is
-the map of what actually exists. Verified state:
+A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
+This section is the map of what actually exists:
 
-- **Sprint 0 complete and verified:** `uv.lock`, `pyproject.toml`, CI, `README.md`,
-  `docs/architecture/`, `docs/decisions/` (ADR-0001, ADR-0002), `docs/threat-model/`,
-  `docs/security/standards-matrix.md`, `docs/engineering/`, `docs/onboarding/developer.md`,
-  `SECURITY.md`, `CONTRIBUTING.md`, `.env.example`, `docker-compose.yml`.
-- **Domain layer implemented:** `Money`, `ActionRequest`/`ResourceRef`/`Intent`/`AuthorizationMode`/
-  `ActionStatus`, and `PolicyDecision`/`PolicyReason`/`PolicyEvaluationResult`/`SpendingLimits`/
-  `SpendingPolicyEngine` — under `apps/api/src/agentpay/domain/`.
-- **77 tests pass**, including 6 property-based tests that each run a full 100-example budget.
+- **Gates, all green:** `ruff format --check` (69 files), `ruff check` (clean), `mypy --strict`
+  (66 files, clean), `pytest` (**391 passed, 0 failed, 0 skipped**). Tool versions are locked:
+  ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
+- **Auxiliary suites, all green:** 3 node web tests (`node --test tests/web.test.mjs`, a forwarder
+  to `apps/web/tests/`), 42/42 protocol adversarial probes, 4/4 concurrency probes
+  (`tests/adversarial/`), and a working audit-chain verifier CLI
+  (`scripts/verify_audit_chain.py --help`).
+- **Backend confirmed present:** 12 domain modules (`Money`, `ActionRequest`, identity, policy,
+  approval with exact 7-field binding, SHA-256 chained audit ledger with redaction, commerce,
+  evidence conflicts, payments, decision, safety budgets); application ports, services
+  (`AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`), and the
+  `PurchaseOrchestrator`; an in-process API app (`AgentPayApiApp`, `/api/v1/*`) exercised through
+  an in-process test client — no sockets, no framework in `src`.
+- **Adapters confirmed present:** tenant-partitioned, lock-guarded in-memory repositories;
+  `MockPaymentProvider`; `MockDecisionEngine`; protocol adapters ACP/AP2/UAP/x402; atomic
+  single-use approval consumption; idempotency store that raises on payload mismatch; in-process
+  emergency-pause flag returning `EMERGENCY_PAUSE_ACTIVE` on mutating paths.
+- **Frontend confirmed present:** React/TypeScript control center (`apps/web/`) with all 8 demo
+  scenarios of §112 in `scenarioData.ts`, approval context view, and kill-switch UI.
+- **Docs confirmed present:** ADRs, architecture, threat model, standards matrix, runbooks
+  (`docs/operations/`), `docs/security/autonomous-audit-report.md`.
+- **Still NOT real:** no Postgres/Redis (daemon down; **no DB driver, payment SDK, LLM SDK, or HTTP
+  server exists anywhere in `src`** — verified by import scan), no real payment provider, no real
+  model/JEV, no deployed service, no external security assessment or certification of any kind.
+- **Git exists now** (`master`, 6 commits through Sprint 12 work) but has **no remote**, so the CI
+  workflow (`.github/workflows/ci.yml`) has never executed. Local gates are the only evidence.
 - A test **enforces §10** for the domain layer (`apps/api/tests/unit/test_architecture_boundaries.py`)
   and the checker tests itself, so it cannot pass vacuously.
-- **Still nothing else:** no HTTP API, database, migrations, Redis, authentication, authorization,
-  approval engine, payment provider, AI/decision integration, web frontend, or audit persistence.
-- **Still not a git repository** — no history, branch, or remote (TD-005).
 
 Consequences, which are the mistakes most likely to be made here:
 
 - **Never report something as done, passing, tested, or verified when no such artifact exists.**
-  There is no test suite for anything that is not written yet. If a component does not exist,
-  "verification" means the blueprint matches, plus a stated plan — nothing more.
+  "Verification" means a command in §0.2 was run on this machine — not that a document says so.
+- **A passing suite of mocks and in-memory adapters proves logic, not operations.** Anything touching
+  a real database, provider, model, or network is untested by definition until those exist.
 - **Run the gates instead of reasoning about them.** Every claim about this code should come from a
   command in §0.2, not from reading the source and assuming.
-- Section 75 Sprint 1 (Identity & Tenant) is the next unstarted sprint.
 
 ## 0.2 Verified Commands
 
@@ -60,6 +75,15 @@ Focused runs — do not run the whole suite when you only need one file:
 uv run pytest apps/api/tests/unit/test_policy.py
 uv run pytest -k daily
 uv run pytest --hypothesis-show-statistics   # proves property tests really ran their budget
+```
+
+Auxiliary verification suites (outside `pytest`; all verified green):
+
+```powershell
+node --test tests/web.test.mjs                            # 3 web tests (forwards to apps/web/tests/)
+uv run python tests/adversarial/stress_test_protocols.py  # 42/42 adversarial probes
+uv run python tests/adversarial/stress_test_concurrency.py # 4/4 concurrency probes
+uv run python scripts/verify_audit_chain.py --help        # audit-chain verifier CLI
 ```
 
 Facts a future agent would otherwise get wrong:

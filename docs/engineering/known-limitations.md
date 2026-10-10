@@ -5,9 +5,10 @@ Things a future engineer will otherwise discover the hard way.
 ## Operational & Environment Limitations
 
 - **Hermetic In-Memory Execution**: The local development machine does not have a running Docker daemon
-  (`docker info` fails). All 383 automated backend tests and 3 web dashboard tests run against thread-safe
-  in-memory repository adapters and sandbox payment providers. Production PostgreSQL and Redis connection
-  pools are defined in configuration but run hermetically in local test runs.
+  (`docker info` fails). All 443 automated backend tests and 3 web dashboard tests run against thread-safe
+  in-memory repository adapters and the mock payment provider. Postgres and Redis are declared in
+  `docker-compose.yml` / `.env.example`, but no database driver, pool, or migration code exists in
+  `src` — persistence is in-memory only.
 - **Task Runner Tools**: `make` and `just` are not installed on this machine (TD-003). All operations
   are executed directly via `uv run` and `node --test`.
 
@@ -20,10 +21,11 @@ Things a future engineer will otherwise discover the hard way.
 - **Single-Item Atomic Purchase Slice**: While the data model supports carts and multi-item orders, the primary
   hardened orchestrator (`PurchaseOrchestrator`) specializes in atomic single-variant purchase actions with
   pre-flight conflict detection.
-- **Provider Sandbox Mode**: The payment subsystem uses a verified Mock / Sandbox payment provider implementing
-  the complete payment state machine (`CREATED`, `AUTHORIZED`, `CAPTURED`, `FAILED`, `UNKNOWN`, `REFUNDED`),
-  idempotency checking, and saga compensation. Direct production gateway keys (live Razorpay production)
-  are not active in local test environments.
+- **Mock Payment Provider Only**: The payment subsystem uses a mock provider (`MockPaymentProvider`,
+  labelled `mock_razorpay`) implementing the payment state machine (`CREATED`, `AUTHORIZED`,
+  `CAPTURED`, `FAILED`, `UNKNOWN`, `REFUNDED`), idempotency checking, and saga compensation. There is
+  no sandbox or live gateway integration — no payment SDK exists anywhere in `src`. Direct production
+  gateway keys are not active anywhere.
 
 ## AI & Intelligence Boundaries
 

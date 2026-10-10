@@ -149,3 +149,100 @@ Execute full test validation across the entire repository:
 ### Release Gates
 - [ ] All 4 CI gates pass cleanly with exit code 0.
 - [ ] Web dashboard tests pass with 0 failures.
+
+
+## Follow-up — 2026-10-10T06:40:03Z
+
+# Teamwork Project — AgentPay Blueprint Gaps Closure & Production Hardening
+
+> **Status:** Launched
+> **Goal:** Close critical architectural gaps identified in §§1–183: §14 Authentication & Credential Binding, §26/§27 Fixed Tool Registry with Risk Tiers, §62 Rate Limiting, §47 Observability Trace IDs, §29/§118 Decision Metadata, §133 Operational Runbooks, and §53 ASVS Mapping.
+> **Requested team:** Full team (Lead Orchestrator with teamwork_preview)
+
+AgentPay is an agent action-control and transaction platform enabling AI agents to transact safely on behalf of humans while enforcing identity, deterministic spending policy, evidence verification, and human-in-the-loop approval (§1, §2). 
+
+This project implements the unbuilt architectural, security, and operational surfaces identified in the exhaustive blueprint audit of `AGENTS.md` §§1–183 to transform the current prototype slice into a cryptographically bound, authenticated, and rate-limited production platform.
+
+Working directory: c:\Users\ak612\OneDrive\Desktop\platfrom
+Integrity mode: development
+
+---
+
+## Requirements
+
+### R1. Authentication & Principal-to-Tenant Binding (§14, §15, §16, §67)
+Implement real authentication for the HTTP API and domain layer:
+- Define `Credential` domain model (API key, Bearer token, HMAC signature) bound to `tenant_id` and `principal_id` (user or agent) with status and expiration tracking.
+- Create `CredentialRepository` port and in-memory adapter.
+- Enforce authentication on all API routes: incoming callers must present valid credentials (`Authorization: Bearer <token>` or `X-API-Key: <key>`). Rejection with HTTP 401 `UNAUTHENTICATED` when credentials are missing or invalid.
+- Cryptographically verify that asserted `X-Tenant-ID` matches the authenticated credential's `tenant_id`; reject mismatches with HTTP 403 `CROSS_TENANT_ACCESS_DENIED`.
+- Enforce operator/administrator authentication on emergency kill switch routes (`/api/v1/emergency/*`), rejecting unauthorized callers (§67).
+
+### R2. Tool Registry & Risk Classification (§26, §27)
+Implement a fixed, permissioned tool registry:
+- Define `ToolRiskTier` (`READ_ONLY`, `FINANCIAL_MUTATING`, `ADMINISTRATIVE`, `SYSTEM`) and `ToolDefinition` (tool name, description, risk tier, required capability, enabled status).
+- Enforce tool execution gating in domain/application orchestrator: agents may only invoke tools that exist in the registry, are enabled, and match the agent's granted capabilities.
+- Unknown tools or tool calls exceeding agent privileges must fail closed with typed errors (`UnknownToolError`, `UnauthorizedToolAccessError`).
+
+### R3. API Rate Limiting (§52, §62)
+Implement defensive rate limiting to prevent denial-of-service and brute-force financial replay attacks:
+- Enforce per-tenant and per-agent request throttling (token bucket or sliding window) across all mutating financial endpoints.
+- When thresholds are exceeded, fail closed with HTTP 429 `RATE_LIMIT_EXCEEDED` and standard RFC error envelopes including retry guidance.
+
+### R4. Observability & Distributed Trace Correlation (§47)
+Implement end-to-end tracing and correlation:
+- Inject and propagate `trace_id` alongside `request_id` and `correlation_id` across the HTTP middleware, orchestrator, and domain audit events.
+- Surface `trace_id` in audit ledger preimages and API error/success responses to support end-to-end forensic traceability.
+
+### R5. Model Decision Metadata Enrichment (§29, §118)
+Enrich advisory AI decision metadata:
+- Add `prompt_version`, `tool_policy_version`, and `policy_version` to the `Decision` domain model.
+- Preserve backward compatibility while ensuring all JEV/model audit records capture exact model evaluation provenance without storing chain-of-thought text.
+
+### R6. Operational Runbooks & ASVS Security Documentation (§53, §87, §133)
+Deliver missing operational runbooks and engineering journals:
+- Author the missing named operational runbooks in `docs/runbooks/`:
+  - `01-agent-revocation-runbook.md`
+  - `02-emergency-kill-switch-runbook.md`
+  - `03-payment-timeout-reconciliation-runbook.md`
+  - `04-audit-chain-tamper-recovery-runbook.md`
+  - `05-merchant-suspension-runbook.md`
+  - `06-cross-tenant-incident-runbook.md`
+  - `07-rate-limit-abuse-mitigation-runbook.md`
+  - `08-key-rotation-and-credential-revocation-runbook.md`
+  - `09-disaster-recovery-failover-runbook.md`
+- Create `docs/engineering/experiments.md` (§87).
+- Create OWASP ASVS v4.0 verification mapping in `security/asvs/asvs-v4-mapping.md` (§53).
+
+---
+
+## Acceptance Criteria
+
+### Authentication & Authorization (§14, §15, §16, §67)
+- [ ] Requests without valid credentials receive HTTP 401 `UNAUTHENTICATED`.
+- [ ] Requests attempting to access Tenant B with a Tenant A credential receive HTTP 403 `CROSS_TENANT_ACCESS_DENIED`.
+- [ ] Emergency kill switch endpoints reject requests lacking operator/admin credentials.
+- [ ] Domain layer purity (§10) is preserved with zero framework imports in domain models.
+
+### Tool Security & Rate Limiting (§26, §27, §62)
+- [ ] Fixed `ToolRegistry` rejects unregistered tool names and unpermitted capability calls.
+- [ ] High-volume bursting on checkout/mandate endpoints triggers HTTP 429 `RATE_LIMIT_EXCEEDED`.
+
+### Observability & Traceability (§47, §118)
+- [ ] Every emitted `AuditEvent` and API response includes a verifiable `trace_id`.
+- [ ] `Decision` objects capture `model_version`, `prompt_version`, `tool_policy_version`, and `policy_version`.
+
+### Documentation & Runbooks (§53, §87, §133)
+- [ ] All 9 named operational runbooks exist in `docs/runbooks/`.
+- [ ] `experiments.md` and ASVS v4.0 verification matrix are documented and committed.
+
+### Quality & Verification Gates
+- [ ] `uv run ruff format --check .` passes with 0 violations.
+- [ ] `uv run ruff check .` passes with 0 lint errors.
+- [ ] `uv run mypy` passes cleanly across all source files.
+- [ ] `uv run pytest` passes 100% of tests (all existing tests + new authentication, tool registry, and rate-limiting test suites).
+
+
+## Follow-up — 2026-10-10T11:26:20Z
+
+Server restarted. Please resume work on the remaining deliverables: R2 (Tool Registry integration and unit tests), R3 (Rate Limiting integration in API endpoints and unit tests), R4 (trace_id correlation across app and audit events), and R6 (the 9 named operational runbooks in docs/runbooks/ and ASVS mapping). All gates currently green with 424 passed tests. Continue and finish the plan.

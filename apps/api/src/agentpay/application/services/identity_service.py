@@ -31,6 +31,11 @@ from agentpay.domain.identity import (
     AgentPermissions,
     AgentStatus,
 )
+from agentpay.domain.tool_registry import (
+    ToolDefinition,
+    ToolRegistry,
+    build_default_tool_registry,
+)
 
 # Default mapping from ActionRequest action/domain to required capability
 DEFAULT_CAPABILITY_ACTION_MAP: Final[dict[str, str]] = {
@@ -66,11 +71,29 @@ class AgentAuthorizationService:
         agent_repo: AgentRepository | None = None,
         permissions_repo: AgentPermissionsRepository | None = None,
         capability_action_map: dict[str, str] | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._tenant_repo = tenant_repo
         self._agent_repo = agent_repo
         self._permissions_repo = permissions_repo
         self._capability_map = capability_action_map or DEFAULT_CAPABILITY_ACTION_MAP
+        self._tool_registry = (
+            tool_registry if tool_registry is not None else build_default_tool_registry()
+        )
+
+    def authorize_tool_call(self, agent: Agent, tool_name: str) -> ToolDefinition:
+        """Validate agent lifecycle status and authorize invoking a registered tool (§26, §27)."""
+        self.validate_agent_active(agent)
+        tool = self._tool_registry.authorize(tool_name, agent)
+        if isinstance(tool, ToolDefinition):
+            return tool
+        return ToolDefinition(
+            name=tool.name,
+            description=tool.description,
+            risk_tier=tool.risk_tier,
+            required_capability=tool.required_permission,
+            rate_limit_per_minute=tool.rate_limit_per_minute,
+        )
 
     def validate_agent_active(self, agent: Agent, now: datetime | None = None) -> None:
         """Validate that an agent is in ACTIVE status and not expired (§15).

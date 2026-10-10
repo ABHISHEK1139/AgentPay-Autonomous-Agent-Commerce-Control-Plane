@@ -37,10 +37,10 @@ Run from the repository root. These are the exact commands CI runs.
 
 ```powershell
 uv sync                             # create/update .venv from uv.lock
-uv run ruff format --check .        # format verification (67 files formatted)
+uv run ruff format --check .        # format verification (75 files formatted)
 uv run ruff check .                 # lint (clean)
-uv run mypy                         # strict type check (64 source files clean)
-uv run pytest                       # 383 unit, property, chaos & adversarial tests pass
+uv run mypy                         # strict type check (72 source files clean)
+uv run pytest                       # 443 unit, property, chaos & adversarial tests pass
 node --test tests/web.test.mjs      # 3 web control center suites pass
 ```
 

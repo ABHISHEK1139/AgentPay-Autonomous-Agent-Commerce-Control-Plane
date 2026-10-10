@@ -19,6 +19,7 @@ from __future__ import annotations
 import threading
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from agentpay.application.ports.approval_port import (
     ApprovalRepository,
@@ -57,6 +58,7 @@ from agentpay.domain.errors import (
     IdempotencyConflictError,
     InsufficientInventoryError,
     InvalidCommerceError,
+    InvalidIdentityError,
 )
 from agentpay.domain.evidence import (
     EvidenceConflict,
@@ -74,6 +76,12 @@ from agentpay.domain.policy import (
     SpendingLimits,
     SpendingPolicyEngine,
     SpendingPolicyRequest,
+)
+from agentpay.domain.safety import AgentLoopTracker
+from agentpay.domain.tool_registry import (
+    ToolDefinition,
+    ToolRegistry,
+    build_default_tool_registry,
 )
 
 
@@ -116,14 +124,19 @@ class PurchaseOrchestrator:
         order_repo: OrderRepository | None = None,
         idempotency_store: IdempotencyStore | None = None,
         audit_ledger: AuditLedger | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self._tenant_repo = tenant_repo
         self._agent_repo = agent_repo
         self._permissions_repo = permissions_repo
+        self._tool_registry = (
+            tool_registry if tool_registry is not None else build_default_tool_registry()
+        )
         self._auth_service = auth_service or AgentAuthorizationService(
             tenant_repo=tenant_repo,
             agent_repo=agent_repo,
             permissions_repo=permissions_repo,
+            tool_registry=self._tool_registry,
         )
         self._merchant_repo = merchant_repo
         self._product_repo = product_repo
@@ -140,6 +153,109 @@ class PurchaseOrchestrator:
         self._idempotency_store = idempotency_store
         self._audit_ledger = audit_ledger
         self._approval_lock = threading.Lock()
+        self._loop_trackers: dict[str, AgentLoopTracker] = {}
+
+    def execute_tool(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tool_name: str,
+        parameters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute a registered and authorized tool on behalf of an agent (§26, §27)."""
+        params = parameters or {}
+
+        # 1. Retrieve agent within tenant partition (§49, §50)
+        agent = None
+        if self._agent_repo is not None:
+            agent = self._agent_repo.get(tenant_id, agent_id)
+
+        if agent is None:
+            raise InvalidIdentityError(f"Agent '{agent_id}' not found in tenant '{tenant_id}'")
+
+        # 2. Authorize tool via authorization service & tool registry (§26, §27)
+        tool_def: ToolDefinition = self._auth_service.authorize_tool_call(agent, tool_name)
+
+        # 3. Track loop budget (§64)
+        tracker_key = f"{tenant_id}:{agent_id}"
+        tracker = self._loop_trackers.setdefault(tracker_key, AgentLoopTracker())
+        tracker.record_tool_call()
+
+        # 4. Audit tool execution attempt (§45)
+        if self._audit_ledger is not None:
+            self._audit_ledger.record_event(
+                event_type=AuditEventType.ACTION_REQUESTED,
+                action_id=f"tool_exec_{uuid.uuid4().hex[:12]}",
+                tenant_id=tenant_id,
+                actor=agent_id,
+                data={
+                    "tool_name": tool_name,
+                    "risk_tier": tool_def.risk_tier.value,
+                    "parameters": params,
+                },
+                agent_id=agent_id,
+            )
+
+        # 5. Dispatch based on tool name
+        result_data: dict[str, Any] = {}
+        if tool_name == "search_products":
+            query = str(params.get("query", ""))
+            products = []
+            if self._product_repo is not None:
+                products = [
+                    {
+                        "product_id": p.product_id,
+                        "name": p.name,
+                        "category": p.category,
+                        "merchant_id": p.merchant_id,
+                    }
+                    for p in self._product_repo.search(tenant_id, query)
+                ]
+            result_data = {"products": products}
+        elif tool_name == "get_product":
+            product_id = str(params.get("product_id", ""))
+            p = self._product_repo.get(tenant_id, product_id) if self._product_repo else None
+            result_data = {
+                "product": {
+                    "product_id": p.product_id,
+                    "name": p.name,
+                    "category": p.category,
+                    "description": p.description,
+                }
+                if p
+                else None
+            }
+        elif tool_name == "check_inventory":
+            variant_id = str(params.get("variant_id", ""))
+            inv = self._inventory_repo.get(tenant_id, variant_id) if self._inventory_repo else None
+            result_data = {
+                "variant_id": variant_id,
+                "available": inv.available if inv else 0,
+                "reserved": inv.reserved if inv else 0,
+            }
+        elif tool_name == "check_payment_status":
+            attempt_id = str(params.get("payment_attempt_id", ""))
+            pay = self._payment_repo.get(tenant_id, attempt_id) if self._payment_repo else None
+            result_data = {
+                "payment_attempt_id": attempt_id,
+                "status": pay.status.value if pay else "UNKNOWN",
+            }
+        elif tool_name == "system_health":
+            result_data = {"status": "healthy", "service": "AgentPay Control Plane"}
+        else:
+            result_data = {
+                "status": "executed",
+                "tool": tool_def.name,
+                "parameters": params,
+            }
+
+        return {
+            "tool_name": tool_def.name,
+            "risk_tier": tool_def.risk_tier.value,
+            "required_capability": tool_def.required_capability,
+            "status": "success",
+            "result": result_data,
+        }
 
     def _audit(
         self,

@@ -175,7 +175,8 @@ PHASE 5: Operational Resumption (Health Checks + Unpause)
 ```
 
 ### Phase 1: Environment Freeze
-1. Immediately engage the emergency kill switch across the target cluster:
+1. Immediately engage the emergency kill switch on the target deployment (in-process pause; there
+   is no multi-instance propagation):
    ```bash
    curl -X POST "http://localhost:8000/api/v1/emergency/pause" \
      -H "X-Operator-ID: dr_operator_01" \
@@ -205,14 +206,18 @@ PHASE 5: Operational Resumption (Health Checks + Unpause)
 3. If verification fails, stop immediately. Compare against the external immutable WORM object storage stream to locate the corrupted transaction range.
 
 ### Phase 4: Payment Gateway & Saga Reconciliation (§43)
-1. Initialize the `PaymentReconciler` service.
-2. Query the payment provider (Razorpay / Sandbox PSP) for all orders in status `PENDING`, `AUTHORIZED`, or `UNKNOWN` created within the disaster window:
+1. Initialize the `PaymentReconciler` service
+   (`agentpay.application.services.reconciliation_service`) with the provider and the payment
+   repository. It performs read-only provider queries for UNKNOWN attempts — never a re-charge.
+2. Query the mock provider for every locally UNKNOWN attempt created within the disaster window
+   (no live gateway is integrated, so reconciliation runs against the mock provider):
    ```python
-   reconciler = PaymentReconciler(payment_provider=payment_provider)
-   unreconciled_orders = order_repo.find_indeterminate_orders(since=disaster_window_start)
-   for order in unreconciled_orders:
-       status = reconciler.reconcile(tenant_id=order.tenant_id, payment_intent_id=order.payment_intent_id)
-       print(f"Reconciled order {order.order_id}: Provider status = {status}")
+   reconciler = PaymentReconciler(payment_provider=payment_provider, payment_repo=payment_repo)
+   for attempt_id in indeterminate_attempt_ids:
+       attempt = reconciler.reconcile_unknown_payment(
+           tenant_id=tenant_id, attempt_id=attempt_id
+       )
+       print(f"Reconciled attempt {attempt.attempt_id}: status = {attempt.status.value}")
    ```
 3. **Execute Saga Compensations**:
    - For charges captured at provider without completed order: Issue refund or create completed order.
@@ -241,15 +246,20 @@ PHASE 5: Operational Resumption (Health Checks + Unpause)
 
 ## 5. Disaster Recovery Game-Day Drills
 
-To guarantee operational readiness, the platform team conducts scheduled disaster simulations.
+> **Status: planned, never executed.** There is no production topology, no standby cluster, and no
+> WORM replica — the scenarios below are success criteria for future drills, not records of drills
+> that happened. Do not cite this section as evidence of tested recovery.
+
+Once a production topology exists, the platform team will conduct scheduled disaster simulations
+against the criteria below.
 
 ### 5.1 Drill Schedule & Scenarios
 
 | Drill Cadence | Scenario Description | Success Criteria |
 |---|---|---|
 | **Monthly** | **Audit Hash Tamper Simulation**: Synthetic injection of corrupted bit into audit table. | Monitoring triggers Sev 1 alert; automated verification script isolates corrupted row; recovery from WORM replica completes in < 10 min. |
-| **Quarterly** | **Payment Gateway Outage & Replay**: Simulated 30-minute gateway blackout during peak agent checkout. | Zero double charges; 100% of indeterminate transactions resolved via `PaymentReconciler`; saga compensations release 100% of held inventory. |
-| **Bi-Annual** | **Full Region Failover (PITR)**: Complete loss of primary cloud region. | Standby cluster restored in secondary region with RPO < 5 min and RTO < 15 min; all 383 automated tests and web tests pass on restored instance. |
+| **Quarterly** | **Payment Gateway Outage & Replay**: Simulated 30-minute gateway blackout during peak agent checkout. | Zero double charges; 100% of indeterminate transactions resolved via `PaymentReconciler.reconcile_unknown_payment` (read-only provider query, never a re-charge); saga compensations release 100% of held inventory. |
+| **Bi-Annual** | **Full Region Failover (PITR)**: Complete loss of primary cloud region. | Standby cluster restored in secondary region with RPO < 5 min and RTO < 15 min; all 391 automated tests and web tests pass on restored instance. |
 
 ### 5.2 Game-Day Attestation Log
 

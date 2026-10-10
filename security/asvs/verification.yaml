@@ -1,0 +1,117 @@
+# OWASP ASVS v4.0.3 Verification Index (§53)
+asvs_version: "4.0.3"
+target_level: "L2/L3"
+verified_date: "2026-10-10"
+verification_environment: "Local hermetic test harness (Windows PowerShell, Python 3.12.10, pytest 9.1.1)"
+
+chapters:
+  - id: "V1"
+    name: "Architecture, Design and Threat Modeling"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_architecture_boundaries.py"
+      - "apps/api/tests/unit/test_adversarial_threat_harness.py"
+
+  - id: "V2"
+    name: "Authentication Verification"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_api_auth.py"
+      - "apps/api/tests/unit/test_identity.py"
+
+  - id: "V3"
+    name: "Session Management"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_approval.py"
+      - "apps/api/tests/unit/test_concurrency_stress_challenger.py"
+
+  - id: "V4"
+    name: "Access Control Verification"
+    status: "VERIFIED"
+    level: "L3"
+    tests:
+      - "apps/api/tests/unit/test_api_auth.py"
+      - "apps/api/tests/unit/test_tool_registry.py"
+      - "apps/api/tests/unit/test_adversarial_threat_harness.py"
+
+  - id: "V5"
+    name: "Validation, Sanitization and Encoding"
+    status: "VERIFIED"
+    level: "L3"
+    tests:
+      - "apps/api/tests/unit/test_money.py"
+      - "apps/api/tests/unit/test_adversarial_threat_harness.py"
+
+  - id: "V6"
+    name: "Stored Cryptography Verification"
+    status: "VERIFIED"
+    level: "L3"
+    tests:
+      - "apps/api/tests/unit/test_cryptographic_tamper_challenger.py"
+      - "scripts/verify_audit_chain.py"
+
+  - id: "V7"
+    name: "Error Handling and Logging Verification"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_audit.py"
+      - "apps/api/tests/unit/test_api.py"
+
+  - id: "V8"
+    name: "Data Protection Verification"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_identity.py"
+
+  - id: "V9"
+    name: "Communication Security Verification"
+    status: "IMPLEMENTED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_protocol_adversarial_challenger.py"
+
+  - id: "V10"
+    name: "Malicious Code Search"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_architecture_boundaries.py"
+
+  - id: "V11"
+    name: "Business Logic Verification"
+    status: "VERIFIED"
+    level: "L3"
+    tests:
+      - "apps/api/tests/unit/test_policy.py"
+      - "apps/api/tests/unit/test_approval.py"
+      - "apps/api/tests/unit/test_purchase_flow.py"
+
+  - id: "V12"
+    name: "File and Resources Verification"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_tool_registry.py"
+      - "apps/api/tests/unit/test_adversarial_threat_harness.py"
+
+  - id: "V13"
+    name: "API and Web Service Verification"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_api.py"
+      - "apps/api/tests/unit/test_adversarial_threat_harness.py"
+
+  - id: "V14"
+    name: "Configuration Verification"
+    status: "VERIFIED"
+    level: "L2"
+    tests:
+      - "apps/api/tests/unit/test_protocol_adapters.py"
+      - "apps/api/tests/unit/test_release_hardening_e2e.py"

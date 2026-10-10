@@ -58,8 +58,9 @@ Dependency direction is strictly inward:
 | `domain/commerce.py` | `Merchant`, `Product`, `ProductVariant`, `Inventory`, `MerchantStatus`. | Stock reservation state machine. Suspended merchants fail closed (§30, §37). |
 | `domain/evidence.py` | `EvidenceConflictDetector`, `EvidenceRecord`, `ConflictType`. | Pre-flight price and stock conflict detection. Fails closed before payment (§32, §33). |
 | `domain/decision.py` | `Decision`, `DecisionRecommendation`, `RiskLevel`. | Advisory AI (JEV / LLM). Strictly subordinate to deterministic policy engine (§2.2, §134). |
-| `domain/approval.py` | `ApprovalRecord`, `ApprovalBinding`, `ApprovalStatus`. | Cryptographic binding to action, amount, and merchant. Single-use consumption (§20). |
-| `domain/payments.py` | `PaymentAttempt`, `PaymentIntent`, `PaymentStatus`, `Order`, `PaymentReconciler`. | Strict idempotency keys. On timeout, query provider; never blindly retry (§41, §43). |
+| `domain/approval.py` | `Approval`, `ApprovalBinding`, `ApprovalStatus`, `ApprovalTier`, `ApprovalPolicy`. | Exact 7-field binding to action, amount, merchant, resource, currency, version, tenant. Single-use consumption (§20). |
+| `domain/payments.py` | `PaymentAttempt`, `PaymentStatus`, `Order`, `OrderStatus`, `Refund`, `IdempotencyRecord`. | Strict idempotency keys. On timeout, query provider; never blindly retry (§41, §43). |
+| `application/services/reconciliation_service.py` | `PaymentReconciler`. | Read-only provider query for UNKNOWN attempts; persists outcome; never creates, captures, or refunds (§43). |
 | `domain/audit.py` | `AuditEvent`, `AuditHasher`, `SensitiveFieldRedactor`, `AuditEventType`. | SHA-256 hash chaining over canonical JSON. Full metadata preimage validation (§29, §45). |
 | `domain/safety.py` | `AgentLoopBudget`, `AgentLoopTracker`, `FinancialSafetyBudget`. | Halts recursive agent tool loops (max 5 calls, max depth 3) (§64, §65). |
 

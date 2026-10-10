@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 
 from agentpay.domain.errors import (
     FinancialSafetyBudgetExceededError,
     LoopBudgetExceededError,
+    RateLimitExceededError,
 )
 from agentpay.domain.money import Money
 
@@ -110,3 +114,66 @@ class FinancialSafetyTracker:
 
         self._cumulative_spend = new_total
         self._transaction_count += 1
+
+
+# ===========================================================================
+# Rate Limiting Engine (§52, §62)
+# ===========================================================================
+@dataclass(frozen=True, slots=True)
+class RateLimitConfig:
+    """Configuration for rate limiting an identity, tenant, or action scope (§62)."""
+
+    requests_per_window: int = 60
+    window_seconds: float = 60.0
+
+    def __post_init__(self) -> None:
+        if self.requests_per_window <= 0:
+            raise ValueError("requests_per_window must be positive")
+        if self.window_seconds <= 0.0:
+            raise ValueError("window_seconds must be positive")
+
+
+class InMemoryRateLimiter:
+    """Sliding-window rate limiter per tenant / agent / caller scope (§52, §62).
+
+    Thread-safe implementation that tracks timestamps of requests within a sliding window.
+    """
+
+    def __init__(self, default_config: RateLimitConfig | None = None) -> None:
+        self._lock = threading.Lock()
+        self._default_config = default_config or RateLimitConfig()
+        self._custom_configs: dict[str, RateLimitConfig] = {}
+        self._history: dict[str, list[float]] = defaultdict(list)
+
+    def set_config(self, key: str, config: RateLimitConfig) -> None:
+        """Assign custom rate limit configuration for a specific tenant or agent scope."""
+        with self._lock:
+            self._custom_configs[key] = config
+
+    def check(self, key: str, at: float | None = None) -> None:
+        """Check if request is permitted under rate limit.
+
+        Raises:
+            RateLimitExceededError: If the maximum request threshold is breached.
+        """
+        now = at if at is not None else time.monotonic()
+        with self._lock:
+            config = self._custom_configs.get(key, self._default_config)
+            cutoff = now - config.window_seconds
+            valid_history = [t for t in self._history[key] if t > cutoff]
+            if len(valid_history) >= config.requests_per_window:
+                retry_after = round(max(0.1, valid_history[0] + config.window_seconds - now), 2)
+                raise RateLimitExceededError(
+                    f"Rate limit of {config.requests_per_window} requests per {config.window_seconds}s "
+                    f"exceeded for '{key}'. Retry after {retry_after}s"
+                )
+            valid_history.append(now)
+            self._history[key] = valid_history
+
+    def reset(self, key: str | None = None) -> None:
+        """Reset rate limiter history for a specific key, or globally if key is None."""
+        with self._lock:
+            if key is None:
+                self._history.clear()
+            else:
+                self._history.pop(key, None)

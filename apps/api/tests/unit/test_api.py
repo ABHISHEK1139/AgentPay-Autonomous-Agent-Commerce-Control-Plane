@@ -297,3 +297,28 @@ def test_verify_audit_chain_script_cli_execution(tmp_path: Any) -> None:
     )
     assert res_tampered.returncode == 1
     assert "FAILED" in res_tampered.stderr
+
+
+def test_error_envelope_includes_trace_id_correlation() -> None:
+    """Error envelopes must contain trace_id for forensic correlation (§13, §47)."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app)
+
+    # 1. Custom trace ID propagated into error response
+    status, body = client.get(
+        "/agent/catalog",
+        headers={"x-trace-id": "trace_custom_12345"},
+        auth=False,
+    )
+    assert status == 401
+    assert "error" in body
+    assert body["error"]["trace_id"] == "trace_custom_12345"
+    assert "request_id" in body["error"]
+
+    # 2. Auto-generated trace ID when none is provided
+    status2, body2 = client.get("/agent/catalog", auth=False)
+    assert status2 == 401
+    assert "error" in body2
+    assert body2["error"]["trace_id"] is not None
+    assert body2["error"]["trace_id"].startswith("trace_")

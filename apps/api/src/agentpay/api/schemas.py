@@ -20,6 +20,7 @@ class ApiErrorDetail:
     message: str
     request_id: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
+    trace_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

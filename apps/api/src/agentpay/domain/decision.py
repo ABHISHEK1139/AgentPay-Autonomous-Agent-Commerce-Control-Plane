@@ -97,6 +97,9 @@ class Decision:
     factors: tuple[DecisionFactor, ...] = field(default_factory=tuple)
     model_provider: str = "mock"
     model_version: str = "v1"
+    prompt_version: str | None = None
+    tool_policy_version: str | None = None
+    policy_version: str | None = None
 
     def __post_init__(self) -> None:
         strings: tuple[tuple[str, object], ...] = (

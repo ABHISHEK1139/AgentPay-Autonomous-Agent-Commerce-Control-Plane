@@ -12,7 +12,6 @@ Validates the complete vertical slice across all components:
 """
 
 from datetime import UTC, datetime
-from typing import Any
 
 from agentpay.adapters.in_memory.approval_repository import InMemoryApprovalRepository
 from agentpay.adapters.in_memory.audit_ledger import InMemoryAuditLedger
@@ -35,7 +34,7 @@ from agentpay.adapters.in_memory.payment_repository import (
 )
 from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
-from agentpay.api.app import AgentPayApiApp
+from agentpay.api.app import AgentPayApiApp, ApiTestClient
 from agentpay.application.services.approval_service import ApprovalService
 from agentpay.application.services.identity_service import AgentAuthorizationService
 from agentpay.application.use_cases.purchase_flow import PurchaseOrchestrator
@@ -177,22 +176,10 @@ def build_hardened_system() -> tuple[AgentPayApiApp, InMemoryAuditLedger]:
     return app, audit_ledger
 
 
-class SimpleApiClient:
-    """Helper client invoking ASGI application handles directly."""
+class SimpleApiClient(ApiTestClient):
+    """Helper client invoking ASGI application handles directly with automated test auth."""
 
-    def __init__(self, app: AgentPayApiApp) -> None:
-        self.app = app
-
-    def post(
-        self,
-        path: str,
-        json_body: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> tuple[int, dict[str, Any]]:
-        status, body = self.app.handle_request(
-            method="POST", path=path, headers=headers or {}, body=json_body
-        )
-        return status, body or {}
+    pass
 
 
 def test_e2e_autonomous_acp_purchase_and_audit_chain() -> None:

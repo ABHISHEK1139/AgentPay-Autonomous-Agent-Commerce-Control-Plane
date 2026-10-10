@@ -15,21 +15,21 @@ AgentPay is a high-assurance autonomous commerce control plane. Because autonomo
 
 | Role | Responsibility | Authority Limits |
 |---|---|---|
-| **Incident Commander (IC)** | Owns incident lifecycle, communications, and triage pace. Declares severity. | Authorized to order cluster-wide emergency pause (`POST /api/v1/emergency/pause`). |
+| **Incident Commander (IC)** | Owns incident lifecycle, communications, and triage pace. Declares severity. | Authorized to order the process-global emergency pause (`POST /api/v1/emergency/pause`). The pause is an in-process flag — there is no multi-instance propagation. |
 | **Security Operations Lead (SecOps)** | Investigates adversarial exploits, prompt injections, privilege escalations, and tamper alarms. | Authorized to quarantine or revoke agents (`AgentStatus.QUARANTINED`, `REVOKED`) and isolate tenant partitions. |
 | **Engineering / SRE Lead** | Diagnoses system faults, database bottlenecks, saga compensation failures, and provider timeouts. | Authorized to deploy fixes, execute payment reconciliations (`PaymentReconciler`), and trigger recovery pipelines. |
 
 ### 1.2 Decision Hierarchy for Emergency Interventions
 
 1. **Life & Financial Safety First**: Any detected price manipulation, unauthorized limit expansion, or uncontained loop anomaly triggers immediate containment.
-2. **Narrowest Viable Blast Radius**: If the anomaly is isolated to a single agent or tenant, prefer Agent Quarantine or Tenant Isolation before activating cluster-wide halts.
+2. **Narrowest Viable Blast Radius**: If the anomaly is isolated to a single agent or tenant, prefer Agent Quarantine or Tenant Isolation before engaging the global pause.
 3. **Fail-Closed Default (§2.4)**: If the integrity of identity, spending limits, inventory, or payment status is unknown, operations must fail closed. Never assume a transaction succeeded without cryptographic or provider confirmation.
 
 ---
 
 ## 2. Emergency Kill Switch Operation (§21, §67)
 
-The AgentPay emergency kill switch halts all mutating and financial operations cluster-wide or per-tenant, while preserving non-mutating read access and inspection.
+The AgentPay emergency kill switch halts all mutating and financial operations process-wide, while preserving non-mutating read access and inspection. The pause is global: there is no per-tenant pause switch. Per-tenant containment means quarantining or suspending the affected agent (`AgentStatus.QUARANTINED`, `SUSPENDED`, `REVOKED`).
 
 ### 2.1 Kill Switch Control Plane Endpoints
 
@@ -219,22 +219,28 @@ To allow continuous diagnostics, monitoring, and operator review while payments 
 1. **Enforce Non-Negotiable Invariant**:
    **NEVER BLINDLY RETRY A CHARGE (§43, §0.4).** Repeating a charge without querying provider state risks severe double-debiting.
 2. **Execute Payment Reconciliation (`PaymentReconciler`)**:
-   Query provider endpoint with the deterministic `idempotency_key`:
+   Query the provider for the authoritative status of the UNKNOWN attempt — never re-charge.
+   Real API (`agentpay.application.services.reconciliation_service`):
    ```python
-   reconciler = PaymentReconciler(payment_provider=payment_provider)
-   status = reconciler.reconcile(tenant_id=tenant_id, payment_intent_id=payment_intent_id)
+   reconciler = PaymentReconciler(payment_provider=payment_provider, payment_repo=payment_repo)
+   attempt = reconciler.reconcile_unknown_payment(tenant_id=tenant_id, attempt_id=attempt_id)
    ```
 3. **Execute Saga Compensation**:
-   - If payment provider reports `CAPTURED` but local order creation failed: Issue automated saga refund:
+   - If the provider reports `CAPTURED` but local order creation failed: issue a saga refund with
+     the real port signature:
      ```python
-     payment_provider.refund(payment_intent_id=payment_intent_id, amount=amount)
+     payment_provider.refund(
+         tenant_id=tenant_id, attempt_id=attempt_id, amount=amount, reason="saga compensation"
+     )
      ```
-   - If payment provider reports `FAILED` or `NOT_FOUND`: Mark local payment attempt as `FAILED` and release reserved inventory:
+   - If the provider reports `FAILED` or the attempt is unknown: mark the local payment attempt as
+     `FAILED` and release reserved inventory with the real repository signature:
      ```python
-     inv_repo.release(tenant_id=tenant_id, variant_id=variant_id, quantity=qty)
+     inv_repo.release(tenant_id=tenant_id, variant_id=variant_id, qty=qty)
      ```
 4. **Notify Buyer & Update Ledger**:
-   Emit `AuditEventType.PAYMENT_RECONCILED` with complete provider payload.
+   Emit the audit event matching the reconciled outcome — `PAYMENT_CAPTURED`, `PAYMENT_FAILED`,
+   or `PAYMENT_UNKNOWN` (there is no `PAYMENT_RECONCILED` event type).
 
 ---
 
