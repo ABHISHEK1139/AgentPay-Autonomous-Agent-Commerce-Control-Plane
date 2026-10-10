@@ -1,9 +1,13 @@
-# OWASP ASVS v4.0 Verification Mapping Matrix (§53, §108, §144)
+# OWASP ASVS Verification Mapping Matrix (§53, §108, §144)
 
-> **Document Status**: Production Security Baseline  
-> **Governing Specifications**: `AGENTS.md` (§52 API Baseline, §53 Application Baseline, §108/§144 Honesty Rules)  
-> **Target Standard**: OWASP Application Security Verification Standard (ASVS) v4.0.3 (and ASVS 5.0 alignment)  
-> **Target Assurance Level**: Level 2 (Standard Enterprise / Defensible) & Level 3 (Advanced / Financial Controls)  
+> **Document Status**: Draft mapping, self-assessed
+> **Governing Specifications**: `AGENTS.md` (§52 API Baseline, §53 Application Baseline, §108/§144 Honesty Rules)
+> **Target Standard**: OWASP Application Security Verification Standard (ASVS) **5.0** — the version
+> mandated by blueprint §53. **Known gap:** the chapter structure below still follows the **v4.0.3**
+> layout (V1–V14); the v5.0 chapter numbering and requirement IDs have **not** been reconciled.
+> Until that is done, treat every clause ID here as **v4.0.3**, not v5.0. Do not cite this document
+> as v5.0 conformance evidence.
+> **Target Assurance Level**: Level 2 (Standard Enterprise / Defensible) & Level 3 (Advanced / Financial Controls)
 > **Last Verified**: Sprint 13 Hardening (2026-10-10)  
 
 ---

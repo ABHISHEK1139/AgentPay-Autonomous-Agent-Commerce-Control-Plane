@@ -5,7 +5,7 @@ Things a future engineer will otherwise discover the hard way.
 ## Operational & Environment Limitations
 
 - **Hermetic In-Memory Execution**: The local development machine does not have a running Docker daemon
-  (`docker info` fails). All 443 automated backend tests and 3 web dashboard tests run against thread-safe
+  (`docker info` fails). All 491 automated backend tests and 3 web dashboard tests run against thread-safe
   in-memory repository adapters and the mock payment provider. Postgres and Redis are declared in
   `docker-compose.yml` / `.env.example`, but no database driver, pool, or migration code exists in
   `src` — persistence is in-memory only.
@@ -40,3 +40,35 @@ Things a future engineer will otherwise discover the hard way.
 - **CI Scanning Tools (TD-004)**: Static type checking (`mypy`), linting (`ruff`), and internal adversarial
   harnesses run on every commit. Third-party commercial SAST, container vulnerability scanners, and external
   penetration testing have not been conducted.
+
+## Still Unbuilt (verified absent by import scan on 2026-10-10)
+
+These blueprint requirements have **no implementation**. Recorded so they are not assumed present.
+
+| § | Requirement | Status |
+| --- | --- | --- |
+| 47 | Observability: OpenTelemetry traces, metrics, `trace_id` propagation | **Partial** — `trace_id` exists in the API/error envelope and audit payloads; no metrics, spans, or exporter |
+| 60 | SSRF protection (scheme/host allowlists, private-range blocking) | **Absent** — no outbound HTTP fetch exists yet, so there is nothing to guard |
+| 61 | Payment webhooks with signature verification and replay protection | **Absent** — no webhook endpoint |
+| 62 | Abuse detection / security events (§63 credential stuffing, tool loops, scraping) | **Partial** — rate limiting and loop budgets exist; no abuse detection or `SecurityEvent` emission |
+| 102, 103 | Retries with backoff, circuit breakers | **Absent** — no retry or breaker logic outside the mock provider |
+| 104, 105, 106 | Background workers, event bus, transactional outbox | **Absent** — `apps/worker` is a README |
+| 117 | Versioned model evaluation dataset | **Absent** |
+| 121 | Accessibility: keyboard navigation, ARIA roles, screen-reader support | **Absent** — 0 `aria-*`, 0 `role=`, 0 keyboard handlers across `apps/web/src` |
+| 130, 57 | SBOM generation, build provenance, SLSA evidence | **Absent** |
+| 49 | PostgreSQL persistence and migrations | **Absent** — in-memory only |
+| 23 | Model gateway: timeout, retry, fallback, token budget | **Absent** — `MockDecisionEngine` only |
+
+### Testing trap worth knowing
+
+`ApiTestClient.request()` defaults to `auth=True` and **silently injects an ADMIN bearer token** when no
+credential header is present. Any negative test that intends to prove "unauthenticated is rejected" must
+pass `auth=False`, or it will silently pass as an authenticated admin. `test_api_auth.py` does this
+correctly; new tests must too.
+
+## Can this platform move real money yet?
+
+**No.** What exists is verified domain logic on in-memory adapters. Missing before any real
+financial exposure: durable persistence, a real payment provider integration with idempotency at
+the provider boundary, webhook verification, external security assessment, and a DR exercise that has
+actually been performed.
