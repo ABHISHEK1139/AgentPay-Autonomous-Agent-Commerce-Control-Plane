@@ -36,7 +36,10 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16 gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-black text-white text-base shadow-sm">
+            <div
+              className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-black text-white text-base shadow-sm"
+              aria-hidden="true"
+            >
               AP
             </div>
             <div>
@@ -56,13 +59,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Live vs Demo Mode Toggle */}
             <button
               onClick={onToggleDemoMode}
-              className="text-xs px-2.5 py-1 rounded-lg border border-slate-700 hover:border-slate-600 bg-slate-800/80 text-slate-300 font-mono transition-colors flex items-center gap-1.5"
+              className="text-xs px-2.5 py-1 rounded-lg border border-slate-700 hover:border-slate-600 bg-slate-800/80 text-slate-300 font-mono transition-colors flex items-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
               title="Toggle between deterministic offline demo simulation and live ASGI backend"
+              aria-label={`Toggle simulation mode, currently ${isDemoMode ? "Demo Simulation" : "Live ASGI"}`}
             >
               <span
                 className={`w-2 h-2 rounded-full ${
                   isDemoMode ? "bg-amber-400" : "bg-emerald-400 animate-pulse"
                 }`}
+                aria-hidden="true"
               ></span>
               <span>{isDemoMode ? "Mode: Demo Simulation" : "Mode: Live ASGI"}</span>
             </button>
@@ -73,12 +78,20 @@ export const Navbar: React.FC<NavbarProps> = ({
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex space-x-1 overflow-x-auto py-2 border-t border-slate-800/80 scrollbar-none">
+        <nav
+          role="tablist"
+          aria-label="Control Center Dashboard Sections"
+          className="flex space-x-1 overflow-x-auto py-2 border-t border-slate-800/80 scrollbar-none"
+        >
           {tabs.map((tab) => (
             <button
               key={tab.id}
+              id={`tab-${tab.id}`}
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              aria-controls={`panel-${tab.id}`}
               onClick={() => onTabChange(tab.id)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all focus:outline-none focus:ring-2 focus:ring-blue-400 ${
                 activeTab === tab.id
                   ? "bg-blue-600 text-white shadow-sm"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/60"
@@ -87,7 +100,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               {tab.label}
             </button>
           ))}
-        </div>
+        </nav>
       </div>
     </header>
   );

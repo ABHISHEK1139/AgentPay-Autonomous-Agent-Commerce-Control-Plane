@@ -90,3 +90,51 @@ test("Emergency Kill Switch state transitions per §21 and §67", async () => {
   state = await apiService.triggerEmergencyResume("sec_admin");
   assert.equal(state.isPaused, false);
 });
+
+test("Frontend ARIA and keyboard accessibility contracts per §121", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const url = await import("node:url");
+
+  const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
+  const srcDir = path.resolve(__dirname, "../src");
+
+  // 1. Modal dialog ARIA & Escape key handling
+  const modalContent = fs.readFileSync(path.join(srcDir, "components/ui/Modal.tsx"), "utf-8");
+  assert.ok(modalContent.includes('role={role}'), "Modal must specify dialog role");
+  assert.ok(modalContent.includes('aria-modal="true"'), "Modal must set aria-modal='true'");
+  assert.ok(modalContent.includes('aria-labelledby="modal-title"'), "Modal must set aria-labelledby");
+  assert.ok(modalContent.includes('key === "Escape"'), "Modal must handle Escape key for keyboard dismissal");
+  assert.ok(modalContent.includes('aria-label="Close dialog"'), "Close button must have accessible label");
+
+  // 2. Emergency Banner Alert ARIA
+  const bannerContent = fs.readFileSync(path.join(srcDir, "features/emergency/EmergencyBanner.tsx"), "utf-8");
+  assert.ok(bannerContent.includes('role="alert"'), "EmergencyBanner must have role='alert'");
+  assert.ok(bannerContent.includes('aria-live="assertive"'), "EmergencyBanner must have aria-live='assertive'");
+  assert.ok(bannerContent.includes('aria-atomic="true"'), "EmergencyBanner must have aria-atomic='true'");
+
+  // 3. Kill Switch button state and dialog popup ARIA
+  const killBtnContent = fs.readFileSync(path.join(srcDir, "features/emergency/KillSwitchButton.tsx"), "utf-8");
+  assert.ok(killBtnContent.includes('aria-pressed='), "KillSwitchButton must indicate pressed state");
+  assert.ok(killBtnContent.includes('aria-haspopup="dialog"'), "KillSwitchButton must declare popup dialog");
+  assert.ok(killBtnContent.includes('aria-label='), "KillSwitchButton must provide accessible label");
+
+  // 4. Navigation Tablist and Tab ARIA
+  const navContent = fs.readFileSync(path.join(srcDir, "components/layout/Navbar.tsx"), "utf-8");
+  assert.ok(navContent.includes('role="tablist"'), "Navbar must provide role='tablist'");
+  assert.ok(navContent.includes('role="tab"'), "Navbar items must have role='tab'");
+  assert.ok(navContent.includes('aria-selected='), "Navbar tabs must track aria-selected");
+  assert.ok(navContent.includes('aria-controls='), "Navbar tabs must bind aria-controls");
+
+  // 5. Main Content Tabpanel ARIA
+  const appContent = fs.readFileSync(path.join(srcDir, "app/App.tsx"), "utf-8");
+  assert.ok(appContent.includes('role="tabpanel"'), "App active area must have role='tabpanel'");
+  assert.ok(appContent.includes('aria-labelledby='), "App active area must bind aria-labelledby");
+
+  // 6. Approval Queue Region and List ARIA
+  const approvalListContent = fs.readFileSync(path.join(srcDir, "features/approval/ApprovalList.tsx"), "utf-8");
+  assert.ok(approvalListContent.includes('role="region"'), "ApprovalList must define landmark region");
+  assert.ok(approvalListContent.includes('role="list"'), "ApprovalList must declare role='list'");
+  assert.ok(approvalListContent.includes('role="listitem"'), "Approval items must declare role='listitem'");
+});
+

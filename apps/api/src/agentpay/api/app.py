@@ -792,6 +792,16 @@ class AgentPayApiApp:
                 "version": "1.0.0-mvp",
             }
 
+        # 1b. Observability Metrics (§47)
+        if path == "/api/v1/metrics" and method == "GET":
+            from agentpay.infrastructure.observability import get_meter
+
+            meter = get_meter()
+            return 200, {
+                "metrics": meter.collect(),
+                "prometheus": meter.to_prometheus(),
+            }
+
         # 2. OpenAPI Specification
         if path == "/openapi.json" and method == "GET":
             return 200, {

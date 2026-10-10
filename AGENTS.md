@@ -18,19 +18,23 @@
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (121 files), `ruff check` (clean), `mypy --strict`
-  (109 files, clean), `pytest` (**566 passed, 0 failed, 0 skipped**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (154 files), `ruff check` (clean), `mypy --strict`
+  (136 files, clean), `pytest` (**675 passed, 0 failed, 0 skipped**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
-- **Auxiliary suites, all green:** 3 node web tests (`node --test tests/web.test.mjs`, a forwarder
-  to `apps/web/tests/`), 42/42 protocol adversarial probes, 4/4 concurrency probes, 5/5 test-client
-  privilege probes, 6/6 currency/money probes, 6/6 webhook replay/concurrency probes
-  (`tests/adversarial/`), and a working audit-chain verifier CLI
-  (`scripts/verify_audit_chain.py --help`).
-- **Backend confirmed present:** 14 domain modules (`Money` + ISO 4217 `currencies` exponent table,
+- **Auxiliary suites, all green:** 4 node web tests (`node --test tests/web.test.mjs`, including §121
+  ARIA accessibility and keyboard contracts), 42/42 protocol adversarial probes, 4/4 concurrency probes,
+  5/5 test-client privilege probes, 6/6 currency/money probes, 6/6 webhook replay/concurrency probes,
+  9/9 SSRF & circuit breaker probes, 6/6 model gateway resilience probes, audit-chain verifier CLI
+  (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
+  (`scripts/generate_sbom.py --verify`).
+- **Backend confirmed present:** 16 domain modules (`Money` + ISO 4217 `currencies` exponent table,
   `ActionRequest`, identity, policy, approval with exact 7-field binding, SHA-256 chained audit
   ledger with redaction, commerce, evidence conflicts, payments, decision, safety budgets, tool
-  registry); application ports, services (`AgentAuthorizationService`, `ApprovalService`,
-  `PaymentReconciler` with webhook state-machine guards), and the `PurchaseOrchestrator`; an
+  registry, `OutboxEvent`, `SecurityEvent`); application ports, services (`AgentAuthorizationService`,
+  `ApprovalService`, `PaymentReconciler` with webhook state-machine guards, `PurchaseOrchestrator`,
+  `EventBus`, `AbuseDetector`), background worker runtime (`OutboxDispatcher`, `BackgroundWorker`),
+  infrastructure resilience (`CircuitBreaker`, `RetryPolicy`), outbound SSRF filter, `ModelGateway`,
+  structured zero-dependency observability (`Tracer`, `Meter`, `GET /api/v1/metrics`), and an
   in-process API app (`AgentPayApiApp`, `/api/v1/*`, including `POST /api/v1/webhooks/payments`
   with HMAC-SHA256 verification and replay locking) exercised through a least-privilege in-process
   test client (`ApiTestClient`, defaulting to `UserRole.BUYER`).
@@ -41,7 +45,8 @@ This section is the map of what actually exists:
   payload mismatch; in-process emergency-pause flag returning `EMERGENCY_PAUSE_ACTIVE` on mutating
   paths.
 - **Frontend confirmed present:** React/TypeScript control center (`apps/web/`) with all 8 demo
-  scenarios of §112 in `scenarioData.ts`, approval context view, and kill-switch UI.
+  scenarios of §112 in `scenarioData.ts`, approval context view, kill-switch UI, and full ARIA
+  landmarks/roles and keyboard navigation (§121).
 - **Docs confirmed present:** ADRs, architecture, threat model, standards matrix, runbooks
   (`docs/operations/`, `docs/runbooks/`), `docs/security/autonomous-audit-report.md`.
 - **Still NOT real:** no live Postgres/Redis server (Docker daemon down; SQLAlchemy schema and
@@ -86,13 +91,16 @@ uv run pytest --hypothesis-show-statistics   # proves property tests really ran 
 Auxiliary verification suites (outside `pytest`; all verified green):
 
 ```powershell
-node --test tests/web.test.mjs                                   # 3 web tests (forwards to apps/web/tests/)
-uv run python tests/adversarial/stress_test_protocols.py         # 42/42 adversarial probes
-uv run python tests/adversarial/stress_test_concurrency.py       # 4/4 concurrency probes
-uv run python tests/adversarial/stress_test_client_privilege.py  # 5/5 least-privilege client probes
-uv run python tests/adversarial/stress_test_money.py             # 6/6 ISO 4217 currency & rational FX probes
-uv run python tests/adversarial/stress_test_webhooks.py          # 6/6 HMAC webhook & replay probes
-uv run python scripts/verify_audit_chain.py --help               # audit-chain verifier CLI
+node --test tests/web.test.mjs                                           # 4 web tests (forwards to apps/web/tests/)
+uv run python tests/adversarial/stress_test_protocols.py                 # 42/42 adversarial probes
+uv run python tests/adversarial/stress_test_concurrency.py               # 4/4 concurrency probes
+uv run python tests/adversarial/stress_test_client_privilege.py          # 5/5 least-privilege client probes
+uv run python tests/adversarial/stress_test_money.py                     # 6/6 ISO 4217 currency & rational FX probes
+uv run python tests/adversarial/stress_test_webhooks.py                  # 6/6 HMAC webhook & replay probes
+uv run python tests/adversarial/stress_test_ssrf_resilience.py          # 9/9 SSRF & circuit breaker probes
+uv run python tests/adversarial/stress_test_model_gateway_resilience.py  # 6/6 model gateway resilience probes
+uv run python scripts/verify_audit_chain.py --help                       # audit-chain verifier CLI
+uv run python scripts/generate_sbom.py --verify                          # CycloneDX 1.5 SBOM & SLSA provenance CLI
 ```
 
 Facts a future agent would otherwise get wrong:

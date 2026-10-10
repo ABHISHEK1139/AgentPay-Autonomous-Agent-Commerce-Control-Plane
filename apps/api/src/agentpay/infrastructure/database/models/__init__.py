@@ -16,6 +16,7 @@ from agentpay.infrastructure.database.models.commerce import (
 from agentpay.infrastructure.database.models.credential import CredentialModel
 from agentpay.infrastructure.database.models.identity import AgentPermissionsModel
 from agentpay.infrastructure.database.models.order import OrderModel
+from agentpay.infrastructure.database.models.outbox import OutboxEventModel
 from agentpay.infrastructure.database.models.payment import PaymentAttemptModel
 from agentpay.infrastructure.database.models.payments import (
     IdempotencyRecordModel,
@@ -35,6 +36,7 @@ __all__ = [
     "InventoryModel",
     "MerchantModel",
     "OrderModel",
+    "OutboxEventModel",
     "PaymentAttemptModel",
     "ProductModel",
     "ProductVariantModel",

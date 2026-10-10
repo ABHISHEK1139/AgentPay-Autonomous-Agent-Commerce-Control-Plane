@@ -67,6 +67,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["apps/api/tests"]
+pythonpath = ["apps/api/src", "."]
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
 filterwarnings = ["error"]

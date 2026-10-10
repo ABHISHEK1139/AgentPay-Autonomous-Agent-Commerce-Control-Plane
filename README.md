@@ -21,12 +21,16 @@ governs your change (see its §0.5 index) before writing code.
 | Area | State |
 | --- | --- |
 | Tooling (uv, ruff, mypy, pytest, node, CI) | working, fully locked |
-| Domain model (`Money` + ISO 4217 `currencies`, `ActionRequest`, `Identity`, `Commerce`, `Evidence`, `Decision`, `Approval`, `Payments`, `Audit`, `Safety`, `Tools`) | implemented, unit + property tested |
-| Application Layer (`AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`, `PurchaseOrchestrator`) | implemented, hermetic orchestration |
+| Domain model (`Money` + ISO 4217 `currencies`, `ActionRequest`, `Identity`, `Commerce`, `Evidence`, `Decision`, `Approval`, `Payments`, `Audit`, `Safety`, `Tools`, `OutboxEvent`, `SecurityEvent`) | implemented, unit + property tested |
+| Application Layer (`AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`, `PurchaseOrchestrator`, `EventBus`, `AbuseDetector`) | implemented, hermetic orchestration |
+| Resilience & Security (`CircuitBreaker`, `RetryPolicy`, outbound SSRF filter, `ModelGateway`, rate limiting, token budget) | implemented and verified (§23, §60, §102, §103) |
+| Background Worker Runtime (`OutboxDispatcher`, `BackgroundWorker`, reconciliation & approval sweeps) | implemented and verified (§104, §105, §106) |
+| Observability (Zero-dependency `Tracer`, `Span`, `Meter`, and `GET /api/v1/metrics`) | implemented and verified (§47) |
+| Supply Chain (CycloneDX 1.5 JSON SBOM & SLSA 1.2 build provenance CLI) | implemented and verified (§57, §130) |
 | Protocol Adapters (ACP, AP2, UAP, x402) | implemented, pure domain mapping (§107, §108) |
-| Web Control Center (`apps/web/`) | implemented, 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67) |
+| Web Control Center (`apps/web/`) | implemented, 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67), ARIA accessibility (§121) |
 | Adapters (In-memory repos, SQLAlchemy 2.0 relational repos, mock PSP, mock JEV decision engine) | implemented, multi-tenant isolated |
-| HTTP API Layer (`/api/v1/...`, `/agent/...`, `POST /api/v1/webhooks/payments`, emergency pause/resume) | implemented, ASGI standard-library |
+| HTTP API Layer (`/api/v1/...`, `/agent/...`, `POST /api/v1/webhooks/payments`, `GET /api/v1/metrics`, emergency pause/resume) | implemented, ASGI standard-library |
 | Failure Engineering & Chaos Testing (§112) | implemented (price drift, timeout, decline saga, oversell) |
 | Red-Team Adversarial Corpus & 14 Vectors (§177) | implemented and verified (all 14 vectors defended) |
 | Dependency-boundary enforcement (§10) | enforced by 7 boundary tests (0 forbidden imports) |
@@ -37,11 +41,11 @@ Run from the repository root. These are the exact commands CI runs.
 
 ```powershell
 uv sync                             # create/update .venv from uv.lock
-uv run ruff format --check .        # format verification (121 files formatted)
+uv run ruff format --check .        # format verification (154 files formatted)
 uv run ruff check .                 # lint (clean)
-uv run mypy                         # strict type check (109 source files clean)
-uv run pytest                       # 566 unit, property, chaos, persistence & adversarial tests pass
-node --test tests/web.test.mjs      # 3 web control center suites pass
+uv run mypy                         # strict type check (136 source files clean)
+uv run pytest                       # 675 unit, property, chaos, persistence & adversarial tests pass
+node --test tests/web.test.mjs      # 4 web control center suites pass (incl. §121 accessibility)
 ```
 
 Gate order is `ruff format --check` → `ruff check` → `mypy` → `pytest` → `node --test tests/web.test.mjs`.

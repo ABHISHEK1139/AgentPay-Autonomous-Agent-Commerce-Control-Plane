@@ -43,23 +43,21 @@ Things a future engineer will otherwise discover the hard way.
   harnesses run on every commit. Third-party commercial SAST, container vulnerability scanners, and external
   penetration testing have not been conducted.
 
-## Still Unbuilt or Partial (verified on 2026-10-11)
-
-These blueprint requirements have **no or partial implementation**. Recorded so they are not assumed present.
+## Blueprint Status Matrix (Sprint 15 Verified on 2026-10-11)
 
 | § | Requirement | Status |
 | --- | --- | --- |
-| 47 | Observability: OpenTelemetry traces, metrics, `trace_id` propagation | **Partial** — `trace_id` exists in the API/error envelope and audit payloads; no metrics, spans, or exporter |
-| 60 | SSRF protection (scheme/host allowlists, private-range blocking) | **Absent** — no outbound HTTP fetch exists yet, so there is nothing to guard |
+| 47 | Observability: OpenTelemetry traces, metrics, `trace_id` propagation | **Implemented (Sprint 15)** — Zero-dependency OpenTelemetry-aligned `Tracer`, `Span`, `Meter`, `Counter`, `Histogram`, Prometheus exposition format, and mounted `GET /api/v1/metrics` |
+| 60 | SSRF protection (scheme/host allowlists, private-range blocking) | **Implemented (Sprint 15)** — `security/ssrf.py` with HTTPS scheme allowlists, host allowlists, DNS pre-flight anti-rebinding, and IP blocking for loopback, RFC 1918, IMDS `169.254.169.254`, link-local, and IPv4-mapped IPv6 |
 | 61 | Payment webhooks with signature verification and replay protection | **Implemented (Sprint 14)** — `POST /api/v1/webhooks/payments` enforces HMAC-SHA256 (`hmac.compare_digest`), 300s freshness window, mutex-guarded idempotency replay defense, and SAGA state-machine guards |
-| 62 | Abuse detection / security events (§63 credential stuffing, tool loops, scraping) | **Partial** — rate limiting and loop budgets exist; no abuse detection or `SecurityEvent` emission |
-| 102, 103 | Retries with backoff, circuit breakers | **Absent** — no retry or breaker logic outside the mock provider |
-| 104, 105, 106 | Background workers, event bus, transactional outbox | **Absent** — `apps/worker` is a README |
-| 117 | Versioned model evaluation dataset | **Absent** |
-| 121 | Accessibility: keyboard navigation, ARIA roles, screen-reader support | **Absent** — 0 `aria-*`, 0 `role=`, 0 keyboard handlers across `apps/web/src` |
-| 130, 57 | SBOM generation, build provenance, SLSA evidence | **Absent** |
-| 49 | PostgreSQL persistence and migrations | **Partial (Sprint 14)** — SQLAlchemy 2.0 models and tenant-scoped repositories implemented (`infrastructure/database/`) and verified against in-memory SQLite (`test_database_persistence.py`); live PostgreSQL daemon and Alembic migrations not yet exercised |
-| 23 | Model gateway: timeout, retry, fallback, token budget | **Absent** — `MockDecisionEngine` only |
+| 62, 63 | Abuse detection / security events (credential stuffing, tool loops, scraping) | **Implemented (Sprint 15)** — `SecurityEvent` domain model, `AbuseDetector` application service for credential stuffing, scraping bursts, tool-loop exhaustion, and spend velocity spikes, with automatic agent quarantine/suspension |
+| 102, 103 | Retries with backoff, circuit breakers | **Implemented (Sprint 15)** — `CircuitBreaker` (CLOSED/OPEN/HALF_OPEN state machine) and `RetryPolicy` strictly enforcing financial non-retryability |
+| 104, 105, 106 | Background workers, event bus, transactional outbox | **Implemented (Sprint 15)** — `OutboxEvent` domain model, `OutboxDispatcher`, `EventBus`, and `BackgroundWorker` runtime for outbox dispatch, stuck payment reconciliation, and expired approval sweeps |
+| 117 | Versioned model evaluation dataset | **Implemented (Sprint 15)** — Versioned benchmark dataset `tests/fixtures/evaluation/dataset_v1.json` with 10 labeled test cases covering all 4 decision outcomes |
+| 121 | Accessibility: keyboard navigation, ARIA roles, screen-reader support | **Implemented (Sprint 15)** — ARIA dialog roles, live regions, tablist/tabs/tabpanel bindings, accessible button labels, and keyboard Escape dismissal across `apps/web/src` |
+| 130, 57 | SBOM generation, build provenance, SLSA evidence | **Implemented (Sprint 15)** — `scripts/generate_sbom.py` generating CycloneDX 1.5 JSON SBOM (23 components) and SLSA 1.2 build provenance attestation, with `--verify` validation CLI |
+| 49 | PostgreSQL persistence and migrations | **Partial** — SQLAlchemy 2.0 models and tenant-scoped repositories implemented (`infrastructure/database/`) and verified against in-memory SQLite; live PostgreSQL daemon and Alembic migrations not yet exercised locally |
+| 23 | Model gateway: timeout, retry, fallback, token budget | **Implemented (Sprint 15)** — `ModelGateway` with `TokenBudgetTracker`, prompt-injection heuristics, and non-widening fail-closed fallback |
 
 ### Test Client Privilege Model (Hardened in Sprint 14)
 

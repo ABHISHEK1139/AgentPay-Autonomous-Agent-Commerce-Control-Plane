@@ -322,3 +322,67 @@ Establish the relational database persistence layer:
 - [ ] `uv run mypy` passes cleanly across all source files.
 - [ ] `uv run pytest` passes 100% of tests.
 - [ ] Auxiliary suites (`node --test tests/web.test.mjs`, protocol stress tests, concurrency stress tests) pass cleanly.
+
+
+## Follow-up — 2026-10-10T19:07:47Z
+
+Complete the remaining unbuilt and partial architectural, security, resilience, asynchronous worker/outbox, observability, frontend accessibility, and supply-chain provenance requirements from `AGENTS.md` for the AgentPay Autonomous Agent Commerce Control Plane.
+
+Working directory: c:\Users\ak612\OneDrive\Desktop\platfrom
+Integrity mode: development
+
+## Verification Resources & Environment Constraints
+- **Authoritative Specification**: `AGENTS.md` and `docs/engineering/known-limitations.md`.
+- **Controlled Environment**: Windows PowerShell 5.1 (`uv` 0.12.22, Python 3.12.10, Node v22.14.0). The local Docker daemon is not running (`docker info` fails); all automated tests must execute hermetically in-process using in-memory adapters and in-memory SQLite without making live external network connections.
+- **Architectural Boundary (§10)**: `apps/api/src/agentpay/domain/` must remain 100% pure Python with zero framework, ORM, HTTP, or SDK imports (enforced by `apps/api/tests/unit/test_architecture_boundaries.py`).
+- **Verification Gates**:
+  - `uv run ruff format --check .` (`extend-exclude = ["*.md"]` must remain intact)
+  - `uv run ruff check .`
+  - `uv run mypy`
+  - `uv run pytest`
+  - `node --test tests/web.test.mjs`
+
+---
+
+## Requirements
+
+### R1. Outbound SSRF Protection, Resilience Primitives & Model Gateway (§23, §60, §102, §103, §117)
+- **SSRF Protection (§60)**: Implement an outbound URL/target validator that enforces HTTPS scheme allowlists, host allowlists, and blocks loopback (`127.0.0.0/8`, `::1`), RFC 1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local/cloud metadata endpoints (`169.254.0.0/16`, `fe80::/10`), and multicast/unspecified addresses, rejecting unsafe targets before any request is dispatched.
+- **Retries & Circuit Breakers (§102, §103)**: Implement a bounded retry policy with exponential backoff and jitter (restricted to idempotent or read-only operations; never blindly retrying unverified payment charges) and a thread-safe state-machine Circuit Breaker (`CLOSED` → `OPEN` → `HALF_OPEN` → `CLOSED`) with configurable failure thresholds and recovery timeouts.
+- **Model Gateway & Versioned Evaluation Dataset (§23, §117)**: Implement a `ModelGateway` adapter implementing `DecisionEngine` that enforces token/cost budgets, request timeouts, circuit-breaker protection, and deterministic fail-closed fallback (`REVIEW`/`DENY` when the model fails or times out). Pair it with a versioned benchmark evaluation dataset and automated evaluator verifying advisory decision quality, prompt-injection resistance, and budget compliance (§117).
+
+### R2. Background Workers, Event Bus & Transactional Outbox (§104, §105, §106)
+- **Transactional Outbox (§106)**: Implement `OutboxEvent` domain/persistence models (both in-memory and SQLAlchemy 2.0 relational repositories) so state mutations and domain events are persisted atomically before asynchronous publication.
+- **Event Bus & Background Worker (§104, §105)**: Implement an in-process/pluggable `EventBus` subscriber registry and a functional worker runtime under `apps/worker/src/` (replacing the placeholder README-only state) capable of polling and dispatching pending outbox events with idempotency, sweeping expired approvals into `EXPIRED` state, and reconciling stuck `UNKNOWN` payment attempts via `PaymentReconciler`.
+
+### R3. Abuse Detection, Security Events & Structured Observability (§47, §62, §63)
+- **Security Events & Abuse Detection (§62, §63)**: Implement `SecurityEvent` and an `AbuseDetector` service that monitors and detects credential stuffing (repeated authentication failures), catalog scraping bursts, rapid tool-loop exhaustion, and anomalous spend velocity spikes — emitting tamper-evident `SecurityEvent` records to the audit ledger and automatically quarantining or suspending rogue agents when thresholds are breached.
+- **Observability Spans & Metrics (§47)**: Implement a zero-dependency OpenTelemetry-compatible telemetry collector (`Tracer` / `Meter`) that propagates `trace_id` and `span_id` across API, orchestrator, policy, payment, and webhook execution paths, and records queryable counters and latency histograms (e.g., policy decisions by outcome, payment attempts by status, webhook signature failures, circuit breaker transitions), exposed via an authenticated `/api/v1/metrics` or telemetry inspection endpoint.
+
+### R4. Frontend Accessibility (§121) & Supply-Chain SBOM / Provenance (§57, §130)
+- **Control Center Accessibility (§121)**: Upgrade the React/TypeScript Control Center (`apps/web/src/`) with semantic ARIA attributes (`role`, `aria-label`, `aria-live`, `aria-expanded`, `aria-pressed`), live status announcements for approval requests and emergency kill-switch state changes, and keyboard navigation handlers (`Enter`, `Space`, `Escape`, arrow/tab focus management). Expand `apps/web/tests/` (`node --test tests/web.test.mjs`) to programmatically verify accessibility contracts and scenario integrity.
+- **SBOM & Build Provenance (§57, §130)**: Implement a deterministic CLI tool (`scripts/generate_sbom.py`) and supporting verification tests that parse `pyproject.toml`, `uv.lock`, and `package.json` to emit a valid CycloneDX 1.5 JSON SBOM and a SLSA-aligned build provenance attestation containing SHA-256 artifact digests.
+
+---
+
+## Acceptance Criteria
+
+### Security, Resilience & Model Gateway (R1)
+- [x] Outbound SSRF guard rejects `http://`, `127.0.0.1`, `10.x.x.x`, `172.16.x.x`, `192.168.x.x`, `169.254.169.254`, and `[::1]` with a typed SSRF error, while permitting allowlisted `https://` hosts.
+- [x] Circuit breaker transitions cleanly across `CLOSED` → `OPEN` → `HALF_OPEN` → `CLOSED` under simulated failures and recovery probes, and thread-safety tests prove no race conditions under concurrent load.
+- [x] `ModelGateway` enforces token budgets and timeouts, trips the circuit breaker on repeated model failures, and returns a safe fail-closed advisory decision without ever widening policy authority.
+- [x] Versioned evaluation dataset (§117) runs in `pytest` and verifies 100% pass rate on canonical commerce, prompt-injection, and conflict scenarios.
+
+### Transactional Outbox, Event Bus & Workers (R2)
+- [x] Outbox events are persisted in both in-memory and SQLAlchemy (`infrastructure/database/`) repositories with tenant isolation (`tenant_id`).
+- [x] Background worker (`apps/worker/`) dispatches pending outbox events to registered `EventBus` handlers idempotently (duplicate delivery is a no-op), marks events processed, and handles failed deliveries with retry/backoff metadata.
+- [x] Worker reconciliation job transitions stuck `UNKNOWN` payments and expires stale `PENDING` approvals in automated unit/integration tests.
+
+### Abuse Detection & Observability (R3)
+- [x] Simulated credential stuffing, catalog scraping, and tool-loop abuse trigger `SecurityEvent` emission, append to the SHA-256 hash-chained audit ledger, and automatically transition the offending agent to `QUARANTINED` or `SUSPENDED`.
+- [x] Telemetry spans and metrics (`trace_id`, `span_id`, policy decision counters, payment status counters, webhook failure counters) are recorded during API/orchestrator execution and verified via tests.
+
+### Accessibility, SBOM & Repository Integrity (R4)
+- [x] `apps/web/src/` components include explicit ARIA roles/attributes (`aria-*`, `role=`) and keyboard interaction support, verified by automated assertions in `node --test tests/web.test.mjs`.
+- [x] `uv run python scripts/generate_sbom.py --help` and programmatic SBOM/provenance generation tests verify valid CycloneDX JSON and SHA-256 provenance digests from `uv.lock` and `package.json`.
+- [x] All 4 CI gates (`uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy`, `uv run pytest`) and all auxiliary/adversarial suites pass with 0 errors, and `AGENTS.md`, `README.md`, `docs/engineering/known-limitations.md`, `docs/engineering/current-state.md`, and `docs/security/autonomous-audit-report.md` are updated to match the exact measured counts.

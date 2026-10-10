@@ -7,6 +7,8 @@ mypy 2.4.0, pytest 9.1.1.
 
 | Component | State | Scope & Verification |
 | --- | --- | --- |
+| Component | State | Scope & Verification |
+| --- | --- | --- |
 | `pyproject.toml`, `uv.lock` | locked | Dependencies locked (including `sqlalchemy>=2.0.0`), zero forbidden imports in domain |
 | Monorepo layout (§9) | verified | `apps/api`, `apps/web`, `apps/worker`, `packages/*`, `scripts/`, `security/`, `tests/`, `docs/*`. |
 | Version Control | active | Git initialized, provenance tracked |
@@ -19,10 +21,16 @@ mypy 2.4.0, pytest 9.1.1.
 | Domain: `Audit Ledger` | implemented | SHA-256 hash chaining, sensitive field redaction (§29, §45) |
 | Domain: `Safety & Protection` | implemented | Loop tracker, tool call budget, financial safety budget, sliding window RateLimiter (§52, §62, §64, §65) |
 | Domain: `Tool Registry` | implemented | Fixed tool registry, ToolSpec/ToolDefinition, capability gating, risk classification (§26, §27) |
-| Application Layer | implemented | `AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler` (with webhook state-machine guards), `PurchaseOrchestrator` |
+| Domain: `Outbox & SecurityEvent` | implemented | `OutboxEvent` transactional lifecycle (§106), `SecurityEvent` abuse detection models (§62, §63) |
+| Application Layer | implemented | `AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`, `PurchaseOrchestrator`, `EventBus`, `AbuseDetector` |
+| Resilience & SSRF Filter | implemented | `CircuitBreaker` (3-state machine), `RetryPolicy` (financial non-retryability), Outbound SSRF validator (§60, §102, §103) |
+| AI Model Gateway & Evaluation | implemented | `ModelGateway` with `TokenBudgetTracker`, fail-closed fallback, and versioned evaluation dataset (`dataset_v1.json`, §23, §117) |
+| Background Worker Runtime | implemented | `OutboxDispatcher`, `BackgroundWorker` single-tick and loop execution in `apps/worker` and `apps/api/workers` (§104, §106) |
+| Observability Subsystem | implemented | Zero-dependency OpenTelemetry-aligned `Tracer`, `Span`, `Meter`, `Counter`, `Histogram`, and `GET /api/v1/metrics` (§47) |
+| Supply Chain & Provenance | implemented | CycloneDX 1.5 JSON SBOM & SLSA 1.2 build provenance attestation CLI generator (`scripts/generate_sbom.py`, §57, §130) |
 | Protocol Adapters | implemented | ACP, AP2, UAP, x402 adapters mapping to canonical `ActionRequest` (§107, §108) |
 | Developer SDK | implemented | Thin typed Python client (`from agentpay import AgentPay`, §109) |
-| Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67) |
+| Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
 | Ports & Adapters | implemented | Thread-safe in-memory repositories & mock payment/decision adapters |
 | Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), verified on in-memory SQLite (`test_database_persistence.py`) |
 | HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.1, HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), least-privilege `ApiTestClient` |
@@ -36,17 +44,20 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                    121 files already formatted
-uv run ruff check .                                             All checks passed!
-uv run mypy                                                     Success: no issues found in 109 source files
-uv run pytest                                                   566 passed in 5.03s
-node --test tests/web.test.mjs                                  3 passed in 344ms
-uv run python tests/adversarial/stress_test_protocols.py        42/42 passed
-uv run python tests/adversarial/stress_test_concurrency.py      4/4 passed
-uv run python tests/adversarial/stress_test_client_privilege.py 5/5 passed
-uv run python tests/adversarial/stress_test_money.py            6/6 passed
-uv run python tests/adversarial/stress_test_webhooks.py         6/6 passed
-uv run python scripts/verify_audit_chain.py --help              Verified working
+uv run ruff format --check .                                            154 files already formatted
+uv run ruff check .                                                     All checks passed!
+uv run mypy                                                             Success: no issues found in 136 source files
+uv run pytest                                                           675 passed in 7.31s
+node --test tests/web.test.mjs                                          4 passed in 121ms (incl. §121 accessibility)
+uv run python tests/adversarial/stress_test_protocols.py                42/42 passed
+uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
+uv run python tests/adversarial/stress_test_client_privilege.py          5/5 passed
+uv run python tests/adversarial/stress_test_money.py                    6/6 passed
+uv run python tests/adversarial/stress_test_webhooks.py                 6/6 passed
+uv run python tests/adversarial/stress_test_ssrf_resilience.py          9/9 passed
+uv run python tests/adversarial/stress_test_model_gateway_resilience.py  6/6 passed
+uv run python scripts/verify_audit_chain.py --help                      Verified working
+uv run python scripts/generate_sbom.py --verify                          Verified working (CycloneDX 1.5 + SLSA 1.2)
 ```
 
 All property-based tests completed their full budgets.

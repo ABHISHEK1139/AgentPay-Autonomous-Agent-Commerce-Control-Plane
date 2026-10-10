@@ -23,6 +23,8 @@ export const KillSwitchButton: React.FC<KillSwitchButtonProps> = ({
         size="md"
         className="font-black text-xs tracking-wider uppercase bg-amber-500 hover:bg-amber-600 border border-amber-600 shadow-md animate-pulse"
         onClick={onResume}
+        aria-pressed="true"
+        aria-label="Emergency pause active: Resume all transactions"
       >
         RESUME ALL TRANSACTIONS
       </Button>
@@ -36,6 +38,9 @@ export const KillSwitchButton: React.FC<KillSwitchButtonProps> = ({
         size="md"
         className="font-black text-xs tracking-wider uppercase shadow-lg shadow-rose-600/30 ring-2 ring-rose-400 hover:ring-rose-500 animate-pulse"
         onClick={() => setModalOpen(true)}
+        aria-pressed="false"
+        aria-haspopup="dialog"
+        aria-label="Trigger emergency kill switch: pause all agent transactions per section 21 and 67"
       >
         PAUSE ALL AGENT TRANSACTIONS (§67)
       </Button>

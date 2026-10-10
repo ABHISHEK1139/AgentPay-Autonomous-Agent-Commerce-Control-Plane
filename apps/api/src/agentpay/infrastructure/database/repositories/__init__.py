@@ -26,6 +26,9 @@ from agentpay.infrastructure.database.repositories.credential_repository import 
 from agentpay.infrastructure.database.repositories.order_repository import (
     SqlAlchemyOrderRepository,
 )
+from agentpay.infrastructure.database.repositories.outbox_repository import (
+    SqlAlchemyOutboxRepository,
+)
 from agentpay.infrastructure.database.repositories.payment_repository import (
     SqlAlchemyIdempotencyStore,
     SqlAlchemyPaymentRepository,
@@ -46,6 +49,7 @@ __all__ = [
     "SqlAlchemyInventoryRepository",
     "SqlAlchemyMerchantRepository",
     "SqlAlchemyOrderRepository",
+    "SqlAlchemyOutboxRepository",
     "SqlAlchemyPaymentRepository",
     "SqlAlchemyProductRepository",
     "SqlAlchemyTenantRepository",
