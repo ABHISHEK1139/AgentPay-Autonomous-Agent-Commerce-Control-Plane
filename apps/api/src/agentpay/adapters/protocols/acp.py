@@ -105,10 +105,10 @@ ACPResponse = AcpPurchaseResponse
 class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
     """Adapter translating ACP messages to and from AgentPay canonical models."""
 
-    def parse_payload(self, raw_data: dict[str, Any]) -> AcpPurchaseRequest:
+    def parse_payload(self, raw_data: Any) -> AcpPurchaseRequest:
         """Parse raw ACP dictionary payload into validated AcpPurchaseRequest."""
-        if not raw_data:
-            raise MalformedPayloadError("ACP payload cannot be empty")
+        if not isinstance(raw_data, dict) or not raw_data:
+            raise MalformedPayloadError("ACP payload must be a non-empty dictionary")
 
         version_raw = raw_data.get("acp_version", raw_data.get("version"))
         if not version_raw:
@@ -251,10 +251,35 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
         )
 
     def to_action_request(
-        self, request: AcpPurchaseRequest, tenant_id: str | None = None
+        self, request: Any, tenant_id: str | None = None
     ) -> tuple[ActionRequest, dict[str, Any]]:
         """Translate typed AcpPurchaseRequest into canonical ActionRequest and metadata."""
-        effective_tenant = request.buyer.tenant_id or (tenant_id or "")
+        if not isinstance(request, AcpPurchaseRequest):
+            if isinstance(request, dict):
+                request = self.parse_payload(request)
+            else:
+                raise MalformedPayloadError(
+                    f"Expected AcpPurchaseRequest or dictionary payload, got {type(request).__name__}"
+                )
+
+        effective_tenant = (
+            request.buyer.tenant_id
+            if request.buyer and getattr(request.buyer, "tenant_id", None)
+            else (tenant_id or "")
+        )
+        if (
+            not effective_tenant
+            or "\x00" in effective_tenant
+            or "\n" in effective_tenant
+            or "\r" in effective_tenant
+        ):
+            raise MalformedPayloadError(
+                f"Invalid tenant_id '{effective_tenant}': cannot be empty or contain control characters"
+            )
+
+        if not request.items:
+            raise MalformedPayloadError("ACP request must contain at least one cart item")
+
         first_item = request.items[0]
         currency = first_item.currency
 

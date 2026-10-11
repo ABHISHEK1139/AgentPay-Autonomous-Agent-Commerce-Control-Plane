@@ -20,10 +20,17 @@ it is recorded so nobody wastes time re-investigating it.
 | B-CODE-01 | MEDIUM | `assert` used as a production control; removed under `python -O` | **Fixed & Verified** |
 | B-WH-03 | MEDIUM | Hardcoded `"tenant_01"` fallback attributes webhooks to one tenant | **Fixed & Verified** |
 | B-WH-04 | MEDIUM | Replay keys are per-tenant, not per-event | **Fixed & Verified** |
-| B-DOC-01 | MEDIUM | `AGENTS.md` states stale gate counts (714/141 vs actual 728/167) | **Fixed & Verified** |
+| B-DOC-01 | MEDIUM | `AGENTS.md` states stale gate counts (714/141 vs actual 736/167) | **Fixed & Verified** |
 | B-OUT-01 | LOW (suspected) | Outbox `list_pending` has no claim/lease — duplicate delivery possible | Needs runtime proof |
 | B-SBOM-01 | LOW | Sprint 15 claimed SBOM; no SBOM/CycloneDX code exists | **Fixed & Verified** |
 | B-A11Y-01 | LOW | Frontend has ARIA attributes but zero keyboard handlers (§121) | **Fixed & Verified** |
+| B-PAUSE-01 | MEDIUM | Emergency pause `scope` is accepted but ignored — scoped pause halts all tenants | **Fixed & Verified** |
+| B-SRV-01 | LOW | No request body size limit in `server.py` — unbounded `Content-Length` read | **Fixed & Verified** |
+| B-OBS-01 | LOW | `/api/v1/security/sbom` and `/api/v1/metrics` served before auth — recon data unauthenticated | **Fixed & Verified** |
+| B-PAY-01 | MEDIUM | `capture_payment` resurrects terminal FAILED/DECLINED/REFUNDED/UNKNOWN to CAPTURED; `transition_to` unguarded | **Fixed & Verified** |
+| B-RED-01 | HIGH | Audit redaction is case-sensitive with a 6-key set — `CVV`, `CardNumber`, `PAN`, `cvc`, `expiry` leak into the immutable ledger | **Fixed & Verified** |
+| B-PROTO-01 | LOW | Malformed protocol input raises `AttributeError` → HTTP 500 instead of 400 | **Fixed & Verified** |
+| B-BUD-01 | LOW | Token budget over-release erases usage; `has_budget` disagrees with `acquire` | **Fixed & Verified** |
 
 ---
 
@@ -150,7 +157,7 @@ Verified by: `test_b_wh_04_cross_tenant_event_replay_defense` in `test_webhooks.
 ### Resolution (Fixed & Verified)
 
 All repository documentation has been synchronized with exact measured gate command outputs:
-- `pytest`: **728 passed** (0 failed, 0 skipped)
+- `pytest`: **736 passed** (0 failed, 0 skipped)
 - `mypy`: **167 source files** (0 issues)
 - `ruff format`: **175 files** clean
 - `web tests`: **5 passed**
@@ -248,6 +255,205 @@ a casual reader:
 
 ---
 
+## B-PAUSE-01 — Emergency pause `scope` is accepted but ignored
+
+**Severity: MEDIUM** · §21, §67 · **Status: Fixed & Verified**
+
+### Problem
+
+`pause_emergency(operator_id, reason, scope="ALL")` stores `scope` in pause metadata, and the
+pause endpoint accepts `"scope"` in its payload. But all five enforcement guards checked only the
+global boolean:
+
+```python
+# app.py:1096,1239,1298,1357,1416
+if self._emergency_paused:
+```
+
+No guard consulted the stored scope. An operator pausing with `scope="tenant_X"` halted **all**
+tenants, not just X. Per-tenant containment must use agent quarantine/suspension instead, but
+nothing in the pause path said so.
+
+### Resolution (Fixed & Verified)
+
+`AgentPayApiApp` now tracks active scopes via `self._emergency_paused_scopes: set[str]`.
+- Standardized global scopes (`"ALL"`, `"GLOBAL"`, `"CLUSTER"`, `"ALL_AUTONOMOUS_PAYMENTS"`) pause all tenants globally.
+- Scoped pauses (e.g. `scope="tenant_01"`) pause only the designated tenant while other tenants proceed unaffected.
+- Added `_is_emergency_paused_for(tenant_id)` predicate, called on all mutating endpoints (kill-switch, payments, orders, cart checkout, ACP/AP2/UAP/x402 protocol actions).
+- `resume_emergency()` clears specified scopes or all active scopes if global.
+
+Verified by: `test_b_pause_01_scoped_emergency_pause_isolation_and_global_fallback` in `apps/api/tests/unit/test_api_auth.py`.
+
+---
+
+## B-SRV-01 — No request body size limit
+
+**Severity: LOW** · §62 · **Status: Fixed & Verified**
+
+### Problem
+
+`server.py:91-95` read the full declared `Content-Length` into memory with no upper bound:
+
+```python
+content_length = int(self.headers.get("Content-Length", 0))
+if content_length > 0:
+    raw_bytes = self.rfile.read(content_length)
+```
+
+A client declaring gigabytes forced an unbounded allocation. Availability-only impact (no data
+exposure), and the in-process API path used by tests was unaffected.
+
+### Resolution (Fixed & Verified)
+
+`server.py` now enforces `MAX_REQUEST_BODY_BYTES = 1024 * 1024` (1 MiB):
+- Any request with `Content-Length > MAX_REQUEST_BODY_BYTES` is immediately rejected with HTTP 413 `PAYLOAD_TOO_LARGE` without reading the stream into memory.
+- Non-integer or negative `Content-Length` headers are rejected with HTTP 400 `INVALID_CONTENT_LENGTH`.
+
+Verified by: `test_b_srv_01_payload_too_large_413_and_invalid_content_length` in `apps/api/tests/unit/test_live_server_e2e.py`.
+
+---
+
+## B-OBS-01 — SBOM and metrics served before authentication
+
+**Severity: LOW** · §14, §47 · **Status: Fixed & Verified**
+
+### Problem
+
+`/api/v1/security/sbom` (`app.py:859`) and `/api/v1/metrics` (`app.py:849`) were dispatched **before**
+the authentication enforcement block (`app.py:902`). Both were reachable with no credential:
+
+- the SBOM names every dependency and version — targeted CVE selection;
+- the metrics expose operational counters.
+
+Publishing an SBOM is common practice and not a vulnerability by itself, but for a financial
+control plane these two endpoints together are free reconnaissance.
+
+### Resolution (Fixed & Verified)
+
+Recorded explicit architecture decision in `docs/decisions/ADR-0003-observability-sbom-access-control.md`:
+- `AgentPayApiApp` and `create_app()` accept `require_observability_auth` (default `False` for local dev/cluster monitoring; settable via `create_app(require_observability_auth=True)` or environment variable `AGENTPAY_REQUIRE_OBSERVABILITY_AUTH=true`).
+- When enabled, `/api/v1/metrics` and `/api/v1/security/sbom` enforce bearer token authentication and require `Role.OPERATOR` (HTTP 401 unauthenticated, HTTP 403 non-operator), failing closed against unprivileged callers.
+
+Verified by: `test_b_obs_01_observability_auth_gating_when_enabled` in `apps/api/tests/unit/test_api_auth.py`.
+
+---
+
+## B-PAY-01 — `capture_payment` resurrects terminal payments
+
+**Severity: MEDIUM (latent)** · §41, §125, §126 · **Status: Fixed & Verified**
+
+### Problem
+
+`PaymentAttempt.transition_to` enforced no transition table — any state could move to any state.
+On top of that, `capture_payment` in all three providers (mock, Razorpay, Stripe) only short-circuits
+already-`CAPTURED` attempts and otherwise forced `CAPTURED`:
+
+```python
+# razorpay_payment_provider.py:106-116 (stripe + mock identical)
+if attempt.status == PaymentStatus.CAPTURED:
+    return attempt
+updated = attempt.transition_to(PaymentStatus.CAPTURED)  # no from-state check
+```
+
+### Resolution (Fixed & Verified)
+
+1. Enforced a complete payment state machine transition table in `domain/payments.py`:
+   - `_ALLOWED_PAYMENT_TRANSITIONS` defines allowable status pairs.
+   - `PaymentAttempt.can_transition_to(target_status)` and `PaymentAttempt.transition_to(target_status)` enforce the state table; invalid transitions raise `InvalidPaymentError`.
+2. Provider `capture_payment` contract hardened across `MockPaymentProvider`, `RazorpayPaymentProvider`, and `StripePaymentProvider`:
+   - Enforced that only `PaymentStatus.AUTHORIZED` attempts (or idempotent already-`CAPTURED`) can be captured.
+   - Capturing terminal or non-authorized states (`FAILED`, `DECLINED`, `REFUNDED`, `UNKNOWN`) raises `InvalidPaymentError`.
+   - Added `auto_capture` parameter to `MockPaymentProvider` constructor matching real provider adapters.
+
+Verified by:
+- `test_payment_attempt_state_machine_transition_table_and_illegal_pairs` in `apps/api/tests/unit/test_payments.py`
+- `test_provider_capture_payment_requires_authorized_state` in `apps/api/tests/unit/test_payment_providers.py`
+
+---
+
+## B-RED-01 — Audit redaction misses real-world key variants
+
+**Severity: HIGH** · §40, §69 · **Status: Fixed & Verified**
+
+### Problem
+
+`SensitiveFieldRedactor` matched an exact 6-key lowercase set
+(`card_number`, `cvv`, `password`, `secret`, `token`, `api_key`). Real payment and provider
+payloads routinely use other casings and names, and every one of these survived redaction into the
+**immutable, hash-chained** audit ledger:
+
+```
+LEAK: CVV, CardNumber, cardNumber, PAN, pan, expiry, cvc, CVC,
+      authorization_code, fingerprint
+```
+
+(`CARD_NUMBER` and `Card_Number` leaked as well.) Both ledgers (in-memory and SQLAlchemy) call the
+redactor on append, so the enforcement point was correct — the matcher itself was deficient.
+
+### Resolution (Fixed & Verified)
+
+`SensitiveFieldRedactor` in `domain/audit.py` now normalizes field names prior to matching:
+- Normalization: strips spaces, underscores, and hyphens, and converts to lowercase (`k.strip().lower().replace("_", "").replace("-", "").replace(" ", "")`).
+- Expanded sensitive key set: covers `pan`, `cvc`, `cvv`, `expiry`, `expmonth`, `expyear`, `cardnumber`, `authorizationcode`, `fingerprint`, `clientsecret`, `password`, `secret`, `token`, `apikey`.
+- Recursion: dicts and lists containing dicts are recursively traversed and redacted while preserving the original casing of keys.
+
+Verified by: `test_sensitive_field_redactor_key_variants_and_nested_collections` in `apps/api/tests/unit/test_audit.py`.
+
+---
+
+## B-PROTO-01 — Malformed protocol input raises `AttributeError`
+
+**Severity: LOW** · §13, §107 · **Status: Fixed & Verified**
+
+### Problem
+
+`AcpAdapter.to_action_request` (and siblings) assumed a well-formed dict. `None`, `{}`, strings,
+lists, and tenant strings containing null bytes or newlines raised bare `AttributeError`,
+which the top-level shield converted to HTTP 500 `INTERNAL_ERROR` instead of 400/422. Fail-closed,
+but wrong status, noisy, and it treated hostile input as an internal error.
+
+### Resolution (Fixed & Verified)
+
+Added boundary input validation in `AcpAdapter`, `Ap2Adapter`, `UapAdapter`, and `X402Adapter`:
+- `parse_payload()` and `to_action_request()` validate that payloads are non-empty dictionaries and raise `MalformedPayloadError` on invalid structures.
+- Tenant identifiers containing control characters (`\x00`, `\n`, `\r`) or non-string types raise `MalformedPayloadError`.
+- API error mapping routes `MalformedPayloadError` to HTTP 422 `UNPROCESSABLE_ENTITY`.
+
+Verified by: `test_malformed_protocol_input_raises_malformed_payload_error` in `apps/api/tests/unit/test_protocol_adapters.py`.
+
+---
+
+## B-BUD-01 — Token budget accounting has two fail-open edges
+
+**Severity: LOW** · §23 · **Status: Fixed & Verified**
+
+### Problem
+
+`TokenBudgetTracker.release` floored usage at zero with `max(0, ...)`:
+
+```
+acquire(400) -> usage (400, 1)
+release(500) -> usage (0, 0)      # 400 actually-consumed units erased
+```
+
+Releasing more than was acquired silently erased genuinely-consumed budget, freeing spend that
+should be counted. Separately, `has_budget` ignored the cost estimate while `acquire` enforced
+it, so a check-then-act caller could observe `has_budget() == True` for a request `acquire()`
+would refuse:
+
+```
+cost at max (100/100): has_budget(est 100) -> True, acquire(100) -> False
+```
+
+### Resolution (Fixed & Verified)
+
+1. `TokenBudgetTracker.release()` now validates released amounts against consumed amounts and raises `BudgetOverReleaseError` if released tokens exceed consumed tokens, preserving accurate expenditure accounting.
+2. `TokenBudgetTracker.has_budget()` now accepts `estimated_cost: int = 1` and evaluates `self.consumed_tokens + estimated_cost <= self.budget_limit.max_tokens`, ensuring atomic alignment with `acquire()`.
+
+Verified by: `test_token_budget_tracker_prevents_over_release_and_enforces_cost_estimate` in `apps/api/tests/unit/test_model_gateway_resilience_challenger.py`.
+
+---
+
 ## Verification environment
 
 Windows, PowerShell 5.1, Python 3.12.10, uv 0.12.22, ruff 0.16.10, mypy 2.4.0, pytest 9.1.1.
@@ -255,4 +461,4 @@ Docker daemon is **not running**, so persistence tests use SQLite in-memory; Pos
 behaviour is unverified. No external security assessment has been performed.
 
 Gates at time of writing: `ruff format` 175 files clean, `ruff check` clean, `mypy` 167 files clean,
-`pytest` 728 passed / 0 skipped.
+`pytest` 736 passed / 0 skipped.

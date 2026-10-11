@@ -120,12 +120,12 @@ def test_stripe_webhook_signature_verification_and_anti_replay() -> None:
 def test_stripe_webhook_parsing_and_reconciliation() -> None:
     """Stripe webhook payloads normalize to canonical events and reconcile attempts (§43, §61)."""
     secret = "whsec_stripe_test_reconciler_secret"
-    provider = StripePaymentProvider(webhook_secret=secret)
+    provider = StripePaymentProvider(webhook_secret=secret, auto_capture=False)
     repo = InMemoryPaymentRepository()
     reconciler = PaymentReconciler(payment_provider=provider, payment_repo=repo)
 
     tenant_id = "tenant_01"
-    # Seed payment in UNKNOWN state
+    # Seed payment in UNKNOWN state (simulating gateway timeout from AUTHORIZED state)
     attempt = provider.create_payment(tenant_id, "intent_01", Money(50000, "INR"), "idem_rec_01")
     unknown_attempt = attempt.transition_to(PaymentStatus.UNKNOWN)
     repo.save(tenant_id, unknown_attempt)

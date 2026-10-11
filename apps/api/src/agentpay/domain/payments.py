@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 
 from agentpay.domain.errors import (
     InvalidPaymentError,
@@ -34,6 +34,61 @@ class PaymentStatus(StrEnum):
     UNKNOWN = "UNKNOWN"
     REFUNDED = "REFUNDED"
     PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED"
+
+
+_ALLOWED_PAYMENT_TRANSITIONS: Final[dict[PaymentStatus, frozenset[PaymentStatus]]] = {
+    PaymentStatus.CREATED: frozenset(
+        {
+            PaymentStatus.AUTHORIZED,
+            PaymentStatus.PENDING,
+            PaymentStatus.CAPTURED,
+            PaymentStatus.FAILED,
+            PaymentStatus.DECLINED,
+            PaymentStatus.UNKNOWN,
+        }
+    ),
+    PaymentStatus.PENDING: frozenset(
+        {
+            PaymentStatus.AUTHORIZED,
+            PaymentStatus.CAPTURED,
+            PaymentStatus.FAILED,
+            PaymentStatus.DECLINED,
+            PaymentStatus.UNKNOWN,
+        }
+    ),
+    PaymentStatus.AUTHORIZED: frozenset(
+        {
+            PaymentStatus.CAPTURED,
+            PaymentStatus.FAILED,
+            PaymentStatus.DECLINED,
+            PaymentStatus.REFUNDED,
+            PaymentStatus.UNKNOWN,
+        }
+    ),
+    PaymentStatus.CAPTURED: frozenset(
+        {
+            PaymentStatus.PARTIALLY_REFUNDED,
+            PaymentStatus.REFUNDED,
+        }
+    ),
+    PaymentStatus.PARTIALLY_REFUNDED: frozenset(
+        {
+            PaymentStatus.PARTIALLY_REFUNDED,
+            PaymentStatus.REFUNDED,
+        }
+    ),
+    PaymentStatus.UNKNOWN: frozenset(
+        {
+            PaymentStatus.AUTHORIZED,
+            PaymentStatus.CAPTURED,
+            PaymentStatus.FAILED,
+            PaymentStatus.DECLINED,
+        }
+    ),
+    PaymentStatus.FAILED: frozenset(),
+    PaymentStatus.DECLINED: frozenset(),
+    PaymentStatus.REFUNDED: frozenset(),
+}
 
 
 class OrderStatus(StrEnum):
@@ -90,6 +145,12 @@ class PaymentAttempt:
     def is_successful(self) -> bool:
         return self.status in (PaymentStatus.CAPTURED, PaymentStatus.AUTHORIZED)
 
+    def can_transition_to(self, new_status: PaymentStatus) -> bool:
+        """Predicate checking whether state transition is permitted by lifecycle state machine (§41, §125)."""
+        if new_status == self.status:
+            return True
+        return new_status in _ALLOWED_PAYMENT_TRANSITIONS.get(self.status, frozenset())
+
     def transition_to(
         self,
         new_status: PaymentStatus,
@@ -97,6 +158,10 @@ class PaymentAttempt:
         provider_payment_id: str | None = None,
         updated_at: datetime | None = None,
     ) -> PaymentAttempt:
+        if new_status != self.status and not self.can_transition_to(new_status):
+            raise InvalidPaymentError(
+                f"Illegal payment transition from {self.status.value} to {new_status.value}"
+            )
         now = updated_at or datetime.now(UTC)
         return PaymentAttempt(
             attempt_id=self.attempt_id,

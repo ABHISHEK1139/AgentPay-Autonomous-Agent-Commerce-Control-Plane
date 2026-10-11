@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import threading
 import uuid
 from collections.abc import Callable, Coroutine
@@ -83,6 +84,7 @@ Receive = Callable[[], Coroutine[Any, Any, dict[str, Any]]]
 Send = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 _current_trace_id: ContextVar[str | None] = ContextVar("_current_trace_id", default=None)
+MAX_REQUEST_BODY_BYTES: int = 1024 * 1024  # 1 MiB payload limit (§62, B-SRV-01)
 
 
 class ApiResponse(tuple[Any, ...]):
@@ -135,6 +137,7 @@ class AgentPayApiApp:
         webhook_secret: str = "whsec_test_secret_32bytes_minimum_length",
         reconciler: PaymentReconciler | None = None,
         idempotency_store: IdempotencyStore | None = None,
+        require_observability_auth: bool = False,
     ) -> None:
         self.orchestrator = orchestrator
         self.credential_repo: CredentialRepository = (
@@ -152,6 +155,13 @@ class AgentPayApiApp:
         self._read_tenant_capacity = read_tenant_capacity
         self._read_tenant_refill_rate = read_tenant_refill_rate
         self.webhook_secret: str = webhook_secret
+
+        env_req_obs = os.environ.get("AGENTPAY_REQUIRE_OBSERVABILITY_AUTH", "").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
+        self.require_observability_auth: bool = require_observability_auth or env_req_obs
 
         if idempotency_store is not None:
             self.idempotency_store = idempotency_store
@@ -178,6 +188,7 @@ class AgentPayApiApp:
 
         self._last_response_headers: dict[str, str] = {}
         self._emergency_paused: bool = False
+        self._paused_scopes: set[str] = set()
         self._pause_metadata: dict[str, Any] = {}
         self._webhook_lock: threading.Lock = threading.Lock()
         self._processed_webhook_events: set[str] = set()
@@ -287,30 +298,77 @@ class AgentPayApiApp:
 
     @property
     def is_emergency_paused(self) -> bool:
-        return self._emergency_paused
+        return (
+            self._emergency_paused or "ALL" in self._paused_scopes or len(self._paused_scopes) > 0
+        )
+
+    def is_emergency_paused_for(self, tenant_id: str = "") -> bool:
+        """Check if emergency pause is active for the platform or a specific tenant (§21, §67, B-PAUSE-01)."""
+        if self._emergency_paused or "ALL" in self._paused_scopes:
+            return True
+        if not tenant_id:
+            return False
+        clean = tenant_id.strip()
+        return clean in self._paused_scopes or f"tenant:{clean}" in self._paused_scopes
 
     def pause_emergency(self, operator_id: str, reason: str, scope: str = "ALL") -> None:
-        """Trigger emergency kill switch (§21, §67)."""
-        self._emergency_paused = True
+        """Trigger emergency kill switch (§21, §67, B-PAUSE-01)."""
+        norm_scope = scope.strip() if scope else "ALL"
+        upper_scope = norm_scope.upper()
+        if (
+            upper_scope == "ALL"
+            or upper_scope.startswith("ALL")
+            or upper_scope in ("GLOBAL", "CLUSTER")
+        ):
+            self._emergency_paused = True
+            self._paused_scopes.add("ALL")
+        else:
+            self._paused_scopes.add(norm_scope)
+            if norm_scope.startswith("tenant:"):
+                self._paused_scopes.add(norm_scope[len("tenant:") :])
+            else:
+                self._paused_scopes.add(f"tenant:{norm_scope}")
         self._pause_metadata = {
             "paused_by": operator_id,
             "reason": reason,
-            "scope": scope,
+            "scope": norm_scope,
             "paused_at": datetime.now(UTC).isoformat(),
+            "active_scopes": sorted(self._paused_scopes),
         }
 
-    def resume_emergency(self, operator_id: str) -> None:
-        """Resume normal autonomous operations."""
-        self._emergency_paused = False
+    def resume_emergency(self, operator_id: str, scope: str = "ALL") -> None:
+        """Resume normal autonomous operations (§21, §67, B-PAUSE-01)."""
+        norm_scope = scope.strip() if scope else "ALL"
+        upper_scope = norm_scope.upper()
+        if (
+            upper_scope == "ALL"
+            or upper_scope.startswith("ALL")
+            or upper_scope in ("GLOBAL", "CLUSTER")
+        ):
+            self._emergency_paused = False
+            self._paused_scopes.clear()
+        else:
+            self._paused_scopes.discard(norm_scope)
+            if norm_scope.startswith("tenant:"):
+                self._paused_scopes.discard(norm_scope[len("tenant:") :])
+            else:
+                self._paused_scopes.discard(f"tenant:{norm_scope}")
+            if not self._paused_scopes:
+                self._emergency_paused = False
         self._pause_metadata = {
             "resumed_by": operator_id,
             "resumed_at": datetime.now(UTC).isoformat(),
+            "scope": norm_scope,
+            "active_scopes": sorted(self._paused_scopes),
         }
 
     def get_emergency_status(self) -> dict[str, Any]:
         """Return current emergency kill switch status (§21, §67)."""
+        is_paused = self.is_emergency_paused
         return {
-            "paused": self._emergency_paused,
+            "paused": is_paused,
+            "emergency_paused": is_paused,
+            "scopes": sorted(self._paused_scopes),
             "metadata": dict(self._pause_metadata),
         }
 
@@ -554,6 +612,34 @@ class AgentPayApiApp:
             "x-trace-id": trace_id,
             "x-request-id": request_id,
         }
+
+        # Request body size boundary enforcement (§62, B-SRV-01)
+        if raw_body is not None and len(raw_body) > MAX_REQUEST_BODY_BYTES:
+            status_code, resp_data = self._error_response(
+                413,
+                "PAYLOAD_TOO_LARGE",
+                f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
+                request_id,
+                details={"max_bytes": MAX_REQUEST_BODY_BYTES, "received_bytes": len(raw_body)},
+            )
+            return ApiResponse(status_code, resp_data, self._last_response_headers)
+
+        content_length_str = hdrs.get("content-length", "")
+        if content_length_str:
+            try:
+                cl = int(content_length_str)
+                if cl > MAX_REQUEST_BODY_BYTES:
+                    status_code, resp_data = self._error_response(
+                        413,
+                        "PAYLOAD_TOO_LARGE",
+                        f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
+                        request_id,
+                        details={"max_bytes": MAX_REQUEST_BODY_BYTES, "declared_bytes": cl},
+                    )
+                    return ApiResponse(status_code, resp_data, self._last_response_headers)
+            except ValueError:
+                pass
+
         try:
             status_code, resp_data = self._dispatch(
                 method, path, hdrs, body, request_id, tenant_id, trace_id, raw_body=raw_body
@@ -845,8 +931,38 @@ class AgentPayApiApp:
                 "version": "1.0.0-mvp",
             }
 
-        # 1b. Observability Metrics (§47)
+        # 1b. Observability Metrics (§47, B-OBS-01)
         if path == "/api/v1/metrics" and method == "GET":
+            if self.require_observability_auth:
+                cred, auth_err = self._authenticate_request(headers, request_id)
+                if auth_err is not None or cred is None:
+                    return (
+                        auth_err
+                        if auth_err is not None
+                        else self._error_response(
+                            401,
+                            "UNAUTHENTICATED",
+                            "Authentication required for observability metrics",
+                            request_id,
+                        )
+                    )
+                if not cred.is_operator_or_admin():
+                    return self._error_response(
+                        403,
+                        "UNAUTHORIZED_OBSERVABILITY_ACCESS",
+                        "Metrics inspection requires AGENT_OPERATOR or ADMIN role",
+                        request_id,
+                        details={
+                            "principal_id": cred.principal_id,
+                            "role": cred.role.value if cred.role else None,
+                            "required_roles": ["ADMIN", "AGENT_OPERATOR"],
+                        },
+                    )
+            elif headers.get("authorization") or headers.get("x-api-key"):
+                _, auth_err = self._authenticate_request(headers, request_id)
+                if auth_err is not None:
+                    return auth_err
+
             from agentpay.infrastructure.observability import get_meter
 
             meter = get_meter()
@@ -855,8 +971,38 @@ class AgentPayApiApp:
                 "prometheus": meter.to_prometheus(),
             }
 
-        # 1c. Supply Chain Security SBOM & Provenance (§57, §130)
+        # 1c. Supply Chain Security SBOM & Provenance (§57, §130, B-OBS-01)
         if path == "/api/v1/security/sbom" and method == "GET":
+            if self.require_observability_auth:
+                cred, auth_err = self._authenticate_request(headers, request_id)
+                if auth_err is not None or cred is None:
+                    return (
+                        auth_err
+                        if auth_err is not None
+                        else self._error_response(
+                            401,
+                            "UNAUTHENTICATED",
+                            "Authentication required for SBOM and provenance access",
+                            request_id,
+                        )
+                    )
+                if not cred.is_operator_or_admin():
+                    return self._error_response(
+                        403,
+                        "UNAUTHORIZED_OBSERVABILITY_ACCESS",
+                        "SBOM metadata inspection requires AGENT_OPERATOR or ADMIN role",
+                        request_id,
+                        details={
+                            "principal_id": cred.principal_id,
+                            "role": cred.role.value if cred.role else None,
+                            "required_roles": ["ADMIN", "AGENT_OPERATOR"],
+                        },
+                    )
+            elif headers.get("authorization") or headers.get("x-api-key"):
+                _, auth_err = self._authenticate_request(headers, request_id)
+                if auth_err is not None:
+                    return auth_err
+
             from agentpay.security.sbom import get_sbom_metadata
 
             return 200, get_sbom_metadata()
@@ -910,7 +1056,7 @@ class AgentPayApiApp:
                 )
             )
 
-        # 3. Emergency Status & Controls (§21, §67)
+        # 3. Emergency Status & Controls (§21, §67, B-PAUSE-01)
         # Platform-level operator controls operate cluster-wide; require AGENT_OPERATOR or ADMIN role
         if path.startswith("/api/v1/emergency/"):
             if not cred.is_operator_or_admin():
@@ -928,8 +1074,9 @@ class AgentPayApiApp:
 
             if path == "/api/v1/emergency/status" and method == "GET":
                 return 200, {
-                    "paused": self._emergency_paused,
-                    "emergency_paused": self._emergency_paused,
+                    "paused": self.is_emergency_paused,
+                    "emergency_paused": self.is_emergency_paused,
+                    "scopes": sorted(self._paused_scopes),
                     "metadata": self._pause_metadata,
                 }
 
@@ -943,17 +1090,21 @@ class AgentPayApiApp:
                     "status": "PAUSED",
                     "paused": True,
                     "emergency_paused": True,
+                    "scopes": sorted(self._paused_scopes),
                     "metadata": self._pause_metadata,
                 }
 
             if path == "/api/v1/emergency/resume" and method == "POST":
                 req_data = body or {}
                 operator_id = str(req_data.get("operator_id") or cred.principal_id)
-                self.resume_emergency(operator_id=operator_id)
+                scope = str(req_data.get("scope", "ALL"))
+                self.resume_emergency(operator_id=operator_id, scope=scope)
+                is_still_paused = self.is_emergency_paused
                 return 200, {
-                    "status": "ACTIVE",
-                    "paused": False,
-                    "emergency_paused": False,
+                    "status": "PAUSED" if is_still_paused else "ACTIVE",
+                    "paused": is_still_paused,
+                    "emergency_paused": is_still_paused,
+                    "scopes": sorted(self._paused_scopes),
                     "metadata": self._pause_metadata,
                 }
 
@@ -1093,7 +1244,7 @@ class AgentPayApiApp:
 
         # 5. Autonomous Action Execution (POST /api/v1/actions or POST /agent/actions)
         if (path in ("/api/v1/actions", "/agent/actions")) and method == "POST":
-            if self._emergency_paused:
+            if self.is_emergency_paused_for(tenant_id):
                 return self._error_response(
                     503,
                     "EMERGENCY_PAUSE_ACTIVE",
@@ -1236,7 +1387,7 @@ class AgentPayApiApp:
             path in ("/api/v1/protocols/acp/checkout", "/api/v1/protocols/acp/actions")
             and method == "POST"
         ):
-            if self._emergency_paused:
+            if self.is_emergency_paused_for(tenant_id):
                 return self._error_response(
                     503,
                     "EMERGENCY_PAUSE_ACTIVE",
@@ -1295,7 +1446,7 @@ class AgentPayApiApp:
             path in ("/api/v1/protocols/ap2/mandates", "/api/v1/protocols/ap2/payments")
             and method == "POST"
         ):
-            if self._emergency_paused:
+            if self.is_emergency_paused_for(tenant_id):
                 return self._error_response(
                     503,
                     "EMERGENCY_PAUSE_ACTIVE",
@@ -1354,7 +1505,7 @@ class AgentPayApiApp:
             path in ("/api/v1/protocols/uap/rpc", "/api/v1/protocols/uap/messages")
             and method == "POST"
         ):
-            if self._emergency_paused:
+            if self.is_emergency_paused_for(tenant_id):
                 return self._error_response(
                     503,
                     "EMERGENCY_PAUSE_ACTIVE",
@@ -1413,7 +1564,7 @@ class AgentPayApiApp:
             path in ("/api/v1/protocols/x402/pay", "/api/v1/protocols/x402/challenge")
             and method == "POST"
         ):
-            if self._emergency_paused:
+            if self.is_emergency_paused_for(tenant_id):
                 return self._error_response(
                     503,
                     "EMERGENCY_PAUSE_ACTIVE",
@@ -1755,13 +1906,12 @@ class ApiTestClient:
     ) -> ApiResponse:
         hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
+        require_obs_auth = getattr(self.app, "require_observability_auth", False)
         is_public_path = path in (
             "/api/v1/health",
             "/openapi.json",
             "/api/v1/webhooks/payments",
-            "/api/v1/metrics",
-            "/api/v1/security/sbom",
-        )
+        ) or (not require_obs_auth and path in ("/api/v1/metrics", "/api/v1/security/sbom"))
 
         # Explicit authentication management (§14)
         if auth and not is_public_path:

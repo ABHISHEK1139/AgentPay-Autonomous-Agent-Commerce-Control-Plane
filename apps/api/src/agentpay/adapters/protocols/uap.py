@@ -108,10 +108,10 @@ UAPError = UapError
 class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
     """Adapter translating UAP RPC messages to and from AgentPay canonical models."""
 
-    def parse_payload(self, raw_data: dict[str, Any]) -> UapMessage:
+    def parse_payload(self, raw_data: Any) -> UapMessage:
         """Parse raw UAP dictionary payload into validated UapMessage."""
-        if not isinstance(raw_data, dict):
-            raise MalformedPayloadError("UAP payload must be a JSON object")
+        if not isinstance(raw_data, dict) or not raw_data:
+            raise MalformedPayloadError("UAP payload must be a non-empty JSON object")
 
         # Support JSON-RPC 2.0 or UAP version format
         version = str(
@@ -211,10 +211,31 @@ class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
         )
 
     def to_action_request(
-        self, request: UapMessage, tenant_id: str | None = None
+        self, request: Any, tenant_id: str | None = None
     ) -> tuple[ActionRequest, dict[str, Any]]:
         """Translate typed UapMessage into canonical ActionRequest and metadata."""
-        effective_tenant = request.header.tenant or (tenant_id or "")
+        if not isinstance(request, UapMessage):
+            if isinstance(request, dict):
+                request = self.parse_payload(request)
+            else:
+                raise MalformedPayloadError(
+                    f"Expected UapMessage or dictionary payload, got {type(request).__name__}"
+                )
+
+        effective_tenant = (
+            request.header.tenant
+            if request.header and getattr(request.header, "tenant", None)
+            else (tenant_id or "")
+        )
+        if (
+            not effective_tenant
+            or "\x00" in effective_tenant
+            or "\n" in effective_tenant
+            or "\r" in effective_tenant
+        ):
+            raise MalformedPayloadError(
+                f"Invalid tenant_id '{effective_tenant}': cannot be empty or contain control characters"
+            )
 
         parts = request.capability.split(".")
         if len(parts) != 2 or not parts[0] or not parts[1]:

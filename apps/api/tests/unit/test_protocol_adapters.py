@@ -815,3 +815,51 @@ def test_domain_layer_never_imports_protocol_adapters() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 assert "protocols" not in node.module
                 assert "adapters" not in node.module
+
+
+def test_malformed_protocol_input_raises_malformed_payload_error() -> None:
+    """Verifies B-PROTO-01: Malformed inputs raise MalformedPayloadError (HTTP 422), never bare AttributeError."""
+    adapters: list[Any] = [ACPAdapter(), AP2Adapter(), UAPAdapter(), X402Adapter()]
+
+    # 1. Non-dict or empty payloads passed to parse_payload raise MalformedPayloadError
+    bad_payloads: tuple[Any, ...] = (None, {}, "", "string", [1, 2, 3], 42)
+    for adapter in adapters:
+        for bad_payload in bad_payloads:
+            with pytest.raises(MalformedPayloadError):
+                adapter.parse_payload(bad_payload)
+
+    # 2. Non-request and non-dict inputs to to_action_request raise MalformedPayloadError
+    bad_inputs: tuple[Any, ...] = (None, "", "string", [1, 2], 123)
+    for adapter in adapters:
+        for bad_input in bad_inputs:
+            with pytest.raises(MalformedPayloadError):
+                adapter.to_action_request(bad_input)
+
+    # 3. Malformed tenant strings containing null bytes or newlines raise MalformedPayloadError
+    for adapter in adapters:
+        for bad_tenant in ("tenant\x00evil", "tenant\nevil", "tenant\revil", ""):
+            with pytest.raises(MalformedPayloadError):
+                adapter.to_action_request({}, tenant_id=bad_tenant)
+
+    # 4. HTTP API returns 422 on malformed body, never HTTP 500
+    orch, _, _, _, _, _, _, _, _, _, _ = setup_orchestrator("tenant_01")
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app).as_buyer()
+
+    endpoints = [
+        "/api/v1/protocols/acp/checkout",
+        "/api/v1/protocols/ap2/mandates",
+        "/api/v1/protocols/uap/rpc",
+        "/api/v1/protocols/x402/pay",
+    ]
+
+    for ep in endpoints:
+        # None body -> 422
+        status, body = client.post(ep, json_body=None, headers={"X-Tenant-ID": "tenant_01"})
+        assert status == 422, f"Expected 422 for {ep}, got {status}: {body}"
+        assert body["error"]["code"] == "MALFORMED_PAYLOAD"
+
+        # Empty dict body -> 422
+        status, body = client.post(ep, json_body={}, headers={"X-Tenant-ID": "tenant_01"})
+        assert status == 422, f"Expected 422 for {ep}, got {status}: {body}"
+        assert body["error"]["code"] == "MALFORMED_PAYLOAD"

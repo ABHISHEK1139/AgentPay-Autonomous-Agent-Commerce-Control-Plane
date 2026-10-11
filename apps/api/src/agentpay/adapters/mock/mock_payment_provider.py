@@ -30,9 +30,11 @@ class MockPaymentProvider(PaymentProvider):
         self,
         simulate_timeout: bool = False,
         simulate_decline: bool = False,
+        auto_capture: bool = True,
     ) -> None:
         self.simulate_timeout = simulate_timeout
         self.simulate_decline = simulate_decline
+        self.auto_capture = auto_capture
         self._lock = threading.Lock()
         # (tenant_id, attempt_id) -> PaymentAttempt
         self._attempts: dict[tuple[str, str], PaymentAttempt] = {}
@@ -64,8 +66,11 @@ class MockPaymentProvider(PaymentProvider):
             elif self.simulate_decline:
                 status = PaymentStatus.DECLINED
                 failure_reason = "Card declined or insufficient balance"
-            else:
+            elif self.auto_capture:
                 status = PaymentStatus.CAPTURED
+                failure_reason = None
+            else:
+                status = PaymentStatus.AUTHORIZED
                 failure_reason = None
 
             attempt = PaymentAttempt(
@@ -96,6 +101,12 @@ class MockPaymentProvider(PaymentProvider):
             attempt = self._attempts.get((tenant_id, attempt_id))
             if attempt is None:
                 raise InvalidPaymentError(f"Payment attempt '{attempt_id}' not found")
+            if attempt.status == PaymentStatus.CAPTURED:
+                return attempt
+            if attempt.status != PaymentStatus.AUTHORIZED:
+                raise InvalidPaymentError(
+                    f"Cannot capture payment '{attempt_id}' in non-authorizable status '{attempt.status.value}'"
+                )
             updated = attempt.transition_to(PaymentStatus.CAPTURED)
             self._attempts[(tenant_id, attempt_id)] = updated
             return updated

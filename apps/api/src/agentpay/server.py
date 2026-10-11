@@ -19,6 +19,8 @@ from agentpay.api.factory import create_app
 
 logger = logging.getLogger("agentpay.server")
 
+MAX_REQUEST_BODY_BYTES: int = 1024 * 1024  # 1 MiB payload limit (§62, B-SRV-01)
+
 
 def create_request_handler(
     app: AgentPayApiApp,
@@ -87,8 +89,40 @@ def create_request_handler(
             ):
                 return
 
-            # 3. Read request body if present
-            content_length = int(self.headers.get("Content-Length", 0))
+            # 3. Read request body if present (§62, B-SRV-01)
+            content_length_str = self.headers.get("Content-Length", "0")
+            try:
+                content_length = int(content_length_str)
+            except ValueError:
+                self.send_response(400)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                err_resp = {
+                    "error": {
+                        "code": "INVALID_CONTENT_LENGTH",
+                        "message": "Content-Length header must be a valid non-negative integer",
+                        "request_id": self.headers.get("x-request-id", "req_invalid_cl"),
+                    }
+                }
+                self.wfile.write(json.dumps(err_resp).encode("utf-8"))
+                return
+
+            if content_length > MAX_REQUEST_BODY_BYTES:
+                self.send_response(413)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                err_resp = {
+                    "error": {
+                        "code": "PAYLOAD_TOO_LARGE",
+                        "message": f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
+                        "request_id": self.headers.get("x-request-id", "req_payload_too_large"),
+                    }
+                }
+                self.wfile.write(json.dumps(err_resp).encode("utf-8"))
+                return
+
             json_body: dict[str, Any] | None = None
             raw_bytes: bytes | None = None
             if content_length > 0:

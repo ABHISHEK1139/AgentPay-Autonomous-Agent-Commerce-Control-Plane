@@ -46,6 +46,10 @@ class BudgetLimits:
     max_cost_minor_units: int = 50_000_00
 
 
+class BudgetOverReleaseError(ValueError):
+    """Raised when attempting to release more tokens or cost than currently reserved or tracked (§23)."""
+
+
 class TokenBudgetTracker:
     """Thread-safe budget tracking per tenant and agent (§23)."""
 
@@ -68,7 +72,13 @@ class TokenBudgetTracker:
             return self._limits[namespaced_key]
         return self._limits.get(raw_id, self._default_limits)
 
-    def has_budget(self, tenant_id: str, agent_id: str, estimated_tokens: int = 100) -> bool:
+    def has_budget(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        estimated_tokens: int = 100,
+        estimated_cost: int = 1,
+    ) -> bool:
         """Checks if both tenant and agent have remaining token and cost budget."""
         with self._lock:
             tenant_key = f"tenant:{tenant_id}"
@@ -80,14 +90,14 @@ class TokenBudgetTracker:
             t_cost = self._cost_usage.get(tenant_key, 0)
             if t_tokens + estimated_tokens > t_limits.max_tokens:
                 return False
-            if t_cost > t_limits.max_cost_minor_units:
+            if t_cost + estimated_cost > t_limits.max_cost_minor_units:
                 return False
 
             a_tokens = self._token_usage.get(agent_key, 0)
             a_cost = self._cost_usage.get(agent_key, 0)
             if a_tokens + estimated_tokens > a_limits.max_tokens:
                 return False
-            return a_cost <= a_limits.max_cost_minor_units
+            return a_cost + estimated_cost <= a_limits.max_cost_minor_units
 
     def acquire(
         self,
@@ -136,14 +146,26 @@ class TokenBudgetTracker:
             tenant_key = f"tenant:{tenant_id}"
             agent_key = f"agent:{tenant_id}:{agent_id}"
 
-            self._token_usage[tenant_key] = max(0, self._token_usage.get(tenant_key, 0) - tokens)
-            self._cost_usage[tenant_key] = max(
-                0, self._cost_usage.get(tenant_key, 0) - cost_minor_units
-            )
-            self._token_usage[agent_key] = max(0, self._token_usage.get(agent_key, 0) - tokens)
-            self._cost_usage[agent_key] = max(
-                0, self._cost_usage.get(agent_key, 0) - cost_minor_units
-            )
+            t_tokens = self._token_usage.get(tenant_key, 0)
+            t_cost = self._cost_usage.get(tenant_key, 0)
+            a_tokens = self._token_usage.get(agent_key, 0)
+            a_cost = self._cost_usage.get(agent_key, 0)
+
+            if tokens > t_tokens or tokens > a_tokens:
+                raise BudgetOverReleaseError(
+                    f"Cannot release {tokens} tokens: exceeds tracked usage "
+                    f"(tenant={t_tokens}, agent={a_tokens})"
+                )
+            if cost_minor_units > t_cost or cost_minor_units > a_cost:
+                raise BudgetOverReleaseError(
+                    f"Cannot release {cost_minor_units} cost units: exceeds tracked usage "
+                    f"(tenant={t_cost}, agent={a_cost})"
+                )
+
+            self._token_usage[tenant_key] = t_tokens - tokens
+            self._cost_usage[tenant_key] = t_cost - cost_minor_units
+            self._token_usage[agent_key] = a_tokens - tokens
+            self._cost_usage[agent_key] = a_cost - cost_minor_units
 
     def consume(
         self, tenant_id: str, agent_id: str, tokens: int, cost_minor_units: int = 0

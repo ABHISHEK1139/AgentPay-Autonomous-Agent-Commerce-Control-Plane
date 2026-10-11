@@ -173,7 +173,63 @@ class AuditHasher:
 
 
 _DEFAULT_SENSITIVE_KEYS: Final[frozenset[str]] = frozenset(
-    {"card_number", "cvv", "password", "secret", "token", "api_key"}
+    {
+        "card_number",
+        "cardnumber",
+        "card-number",
+        "pan",
+        "cvv",
+        "cvc",
+        "cid",
+        "cvn",
+        "security_code",
+        "password",
+        "secret",
+        "client_secret",
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "expiry",
+        "expiration",
+        "exp_month",
+        "exp_year",
+        "expiration_date",
+        "authorization_code",
+        "fingerprint",
+    }
+)
+
+_NORMALIZED_SENSITIVE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "cardnumber",
+        "cardnum",
+        "pan",
+        "cvv",
+        "cvc",
+        "cid",
+        "cvn",
+        "securitycode",
+        "password",
+        "passwd",
+        "secret",
+        "clientsecret",
+        "token",
+        "accesstoken",
+        "refreshtoken",
+        "authtoken",
+        "bearertoken",
+        "apikey",
+        "expiry",
+        "expiration",
+        "expmonth",
+        "expyear",
+        "expirationdate",
+        "expdate",
+        "authorizationcode",
+        "authcode",
+        "fingerprint",
+    }
 )
 
 
@@ -183,25 +239,64 @@ class SensitiveFieldRedactor:
     REDACTED: Final = "[REDACTED]"
 
     @staticmethod
+    def _normalize_key(key: str) -> str:
+        return key.lower().replace("-", "").replace("_", "").replace(" ", "")
+
+    @staticmethod
     def redact(
         data: dict[str, Any],
         sensitive_keys: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         """Return a new dict with sensitive key values replaced by '[REDACTED]'.
 
-        Handles nested dicts recursively. Does not mutate the input.
+        Handles nested dicts and lists recursively. Does not mutate the input.
+        Matches keys case-insensitively and across delimiter variants (hyphen, underscore, space).
         """
-        keys = sensitive_keys if sensitive_keys is not None else _DEFAULT_SENSITIVE_KEYS
-        return SensitiveFieldRedactor._redact_recursive(data, keys)
+        raw_keys = sensitive_keys if sensitive_keys is not None else _DEFAULT_SENSITIVE_KEYS
+        norm_keys = frozenset(SensitiveFieldRedactor._normalize_key(k) for k in raw_keys)
+        if sensitive_keys is None:
+            norm_keys = norm_keys | _NORMALIZED_SENSITIVE_KEYS
+        return SensitiveFieldRedactor._redact_recursive(data, raw_keys, norm_keys)
 
     @staticmethod
-    def _redact_recursive(data: dict[str, Any], sensitive_keys: frozenset[str]) -> dict[str, Any]:
+    def _redact_recursive(
+        data: dict[str, Any],
+        sensitive_keys: frozenset[str],
+        normalized_keys: frozenset[str],
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in data.items():
-            if key in sensitive_keys:
+            norm_k = SensitiveFieldRedactor._normalize_key(str(key))
+            if norm_k in normalized_keys or key in sensitive_keys:
                 result[key] = SensitiveFieldRedactor.REDACTED
             elif isinstance(value, dict):
-                result[key] = SensitiveFieldRedactor._redact_recursive(value, sensitive_keys)
+                result[key] = SensitiveFieldRedactor._redact_recursive(
+                    value, sensitive_keys, normalized_keys
+                )
+            elif isinstance(value, list):
+                result[key] = SensitiveFieldRedactor._redact_list(
+                    value, sensitive_keys, normalized_keys
+                )
             else:
                 result[key] = value
+        return result
+
+    @staticmethod
+    def _redact_list(
+        items: list[Any],
+        sensitive_keys: frozenset[str],
+        normalized_keys: frozenset[str],
+    ) -> list[Any]:
+        result: list[Any] = []
+        for item in items:
+            if isinstance(item, dict):
+                result.append(
+                    SensitiveFieldRedactor._redact_recursive(item, sensitive_keys, normalized_keys)
+                )
+            elif isinstance(item, list):
+                result.append(
+                    SensitiveFieldRedactor._redact_list(item, sensitive_keys, normalized_keys)
+                )
+            else:
+                result.append(item)
         return result

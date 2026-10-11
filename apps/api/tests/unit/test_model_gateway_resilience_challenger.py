@@ -9,6 +9,7 @@ import pytest
 
 from agentpay.adapters.model_gateway.model_gateway import (
     BudgetLimits,
+    BudgetOverReleaseError,
     DefaultModelProvider,
     ModelGateway,
     TokenBudgetTracker,
@@ -291,3 +292,41 @@ def test_model_gateway_per_tenant_circuit_breaker_isolation() -> None:
     cb_tenant1.trip("Tenant 1 failure")
     assert cb_tenant1.is_open is True
     assert cb_tenant2.is_open is False
+
+
+def test_token_budget_tracker_prevents_over_release_and_enforces_cost_estimate() -> None:
+    """Verifies B-BUD-01: TokenBudgetTracker raises on over-release and aligns has_budget with acquire."""
+    tracker = TokenBudgetTracker(
+        default_limits=BudgetLimits(max_tokens=1000, max_cost_minor_units=100)
+    )
+
+    # 1. Acquire 400 tokens and 50 cost units
+    assert tracker.acquire("t1", "a1", estimated_tokens=400, estimated_cost=50) is True
+    assert tracker.get_usage("t1") == (400, 50)
+
+    # 2. Releasing more tokens than acquired raises BudgetOverReleaseError and does NOT erase existing usage
+    with pytest.raises(BudgetOverReleaseError, match="exceeds tracked usage"):
+        tracker.release("t1", "a1", tokens=500, cost_minor_units=10)
+
+    # Usage is still intact at (400, 50)
+    assert tracker.get_usage("t1") == (400, 50)
+
+    # 3. Releasing more cost units than acquired raises BudgetOverReleaseError
+    with pytest.raises(BudgetOverReleaseError, match="exceeds tracked usage"):
+        tracker.release("t1", "a1", tokens=100, cost_minor_units=60)
+
+    assert tracker.get_usage("t1") == (400, 50)
+
+    # 4. Valid partial release succeeds
+    tracker.release("t1", "a1", tokens=200, cost_minor_units=25)
+    assert tracker.get_usage("t1") == (200, 25)
+
+    # 5. has_budget enforces estimated_cost matching acquire
+    # Limit is 100 cost units. Let's consume up to 100
+    tracker.consume("t2", "a2", tokens=100, cost_minor_units=100)
+    # When cost is at limit (100/100), asking for estimated_cost=1 must return False for both has_budget and acquire
+    assert tracker.has_budget("t2", "a2", estimated_tokens=50, estimated_cost=1) is False
+    assert tracker.acquire("t2", "a2", estimated_tokens=50, estimated_cost=1) is False
+
+    # But asking with estimated_cost=0 when tokens remain returns True
+    assert tracker.has_budget("t2", "a2", estimated_tokens=50, estimated_cost=0) is True

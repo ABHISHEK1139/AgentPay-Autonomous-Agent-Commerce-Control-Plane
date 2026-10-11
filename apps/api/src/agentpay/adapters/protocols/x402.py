@@ -104,10 +104,10 @@ X402SettlementProof = X402PaymentResponse
 class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]):
     """Adapter translating HTTP 402 micro-payment challenges to and from AgentPay."""
 
-    def parse_payload(self, raw_data: dict[str, Any]) -> X402ChallengeRequest:
+    def parse_payload(self, raw_data: Any) -> X402ChallengeRequest:
         """Parse raw x402 dictionary payload into validated X402ChallengeRequest."""
-        if not isinstance(raw_data, dict):
-            raise MalformedPayloadError("x402 payload must be a JSON object")
+        if not isinstance(raw_data, dict) or not raw_data:
+            raise MalformedPayloadError("x402 payload must be a non-empty JSON object")
 
         version = str(raw_data.get("x402_version", raw_data.get("version", "")))
         if not version or version not in SUPPORTED_X402_VERSIONS:
@@ -163,9 +163,17 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
         )
 
     def to_action_request(
-        self, request: X402ChallengeRequest, tenant_id: str | None = None
+        self, request: Any, tenant_id: str | None = None
     ) -> tuple[ActionRequest, dict[str, Any]]:
         """Translate typed X402ChallengeRequest into canonical ActionRequest and metadata."""
+        if not isinstance(request, X402ChallengeRequest):
+            if isinstance(request, dict):
+                request = self.parse_payload(request)
+            else:
+                raise MalformedPayloadError(
+                    f"Expected X402ChallengeRequest or dictionary payload, got {type(request).__name__}"
+                )
+
         if isinstance(request.amount_minor, bool) or not isinstance(request.amount_minor, int):
             raise MalformedPayloadError(
                 f"amount_minor must be an integer, got {type(request.amount_minor).__name__}"
@@ -174,6 +182,15 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
             raise MalformedPayloadError("amount_minor cannot be negative")
 
         effective_tenant = request.tenant_id or (tenant_id or "")
+        if (
+            not effective_tenant
+            or "\x00" in effective_tenant
+            or "\n" in effective_tenant
+            or "\r" in effective_tenant
+        ):
+            raise MalformedPayloadError(
+                f"Invalid tenant_id '{effective_tenant}': cannot be empty or contain control characters"
+            )
         amount = Money(minor_units=request.amount_minor, currency=request.currency)
 
         action_id = (

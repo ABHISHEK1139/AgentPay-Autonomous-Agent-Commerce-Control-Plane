@@ -229,3 +229,91 @@ def test_hypothesis_audit_chain_arbitrary_events(event_names: list[str]) -> None
 
     assert ledger.verify_chain(tenant) is True
     assert len(ledger.get_events(tenant)) == len(event_names)
+
+
+def test_sensitive_field_redactor_key_variants_and_nested_collections() -> None:
+    """Verifies B-RED-01: redactor handles casing, delimiters, and list collections."""
+    real_world_payload: dict[str, Any] = {
+        "status": "success",
+        "CVV": "999",
+        "CardNumber": "4111222233334444",
+        "cardNumber": "4111222233334444",
+        "CARD_NUMBER": "4111222233334444",
+        "Card-Number": "4111222233334444",
+        "PAN": "4111000000001234",
+        "pan": "4111000000001234",
+        "expiry": "12/28",
+        "exp_month": 12,
+        "exp_year": 2028,
+        "cvc": "123",
+        "CVC": "123",
+        "authorization_code": "auth_code_xyz",
+        "fingerprint": "fp_device_abc999",
+        "client_secret": "pi_123_secret_xyz",
+        "payment_method": {
+            "type": "card",
+            "SecurityCode": "321",
+            "Token": "tok_visa_4242",
+        },
+        "saved_cards": [
+            {
+                "card_id": "c_1",
+                "Pan": "5555444433332222",
+                "cvv": "456",
+                "brand": "Mastercard",
+            },
+            {
+                "card_id": "c_2",
+                "CardNumber": "378282246310005",
+                "CVC": "789",
+                "brand": "Amex",
+            },
+        ],
+        "metadata": {
+            "order_id": "ord_safe_100",
+            "items_count": 2,
+        },
+    }
+
+    redacted = SensitiveFieldRedactor.redact(real_world_payload)
+
+    # All casing and delimiter variants redacted
+    assert redacted["CVV"] == "[REDACTED]"
+    assert redacted["CardNumber"] == "[REDACTED]"
+    assert redacted["cardNumber"] == "[REDACTED]"
+    assert redacted["CARD_NUMBER"] == "[REDACTED]"
+    assert redacted["Card-Number"] == "[REDACTED]"
+    assert redacted["PAN"] == "[REDACTED]"
+    assert redacted["pan"] == "[REDACTED]"
+    assert redacted["expiry"] == "[REDACTED]"
+    assert redacted["exp_month"] == "[REDACTED]"
+    assert redacted["exp_year"] == "[REDACTED]"
+    assert redacted["cvc"] == "[REDACTED]"
+    assert redacted["CVC"] == "[REDACTED]"
+    assert redacted["authorization_code"] == "[REDACTED]"
+    assert redacted["fingerprint"] == "[REDACTED]"
+    assert redacted["client_secret"] == "[REDACTED]"
+
+    # Nested dict redacted
+    assert redacted["payment_method"]["type"] == "card"
+    assert redacted["payment_method"]["SecurityCode"] == "[REDACTED]"
+    assert redacted["payment_method"]["Token"] == "[REDACTED]"
+
+    # Nested list of dicts redacted
+    assert redacted["saved_cards"][0]["card_id"] == "c_1"
+    assert redacted["saved_cards"][0]["Pan"] == "[REDACTED]"
+    assert redacted["saved_cards"][0]["cvv"] == "[REDACTED]"
+    assert redacted["saved_cards"][0]["brand"] == "Mastercard"
+
+    assert redacted["saved_cards"][1]["card_id"] == "c_2"
+    assert redacted["saved_cards"][1]["CardNumber"] == "[REDACTED]"
+    assert redacted["saved_cards"][1]["CVC"] == "[REDACTED]"
+    assert redacted["saved_cards"][1]["brand"] == "Amex"
+
+    # Safe fields preserved
+    assert redacted["status"] == "success"
+    assert redacted["metadata"]["order_id"] == "ord_safe_100"
+    assert redacted["metadata"]["items_count"] == 2
+
+    # Original payload not mutated
+    assert real_world_payload["CVV"] == "999"

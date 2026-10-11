@@ -103,10 +103,10 @@ AP2Response = Ap2PaymentResponse
 class Ap2Adapter(BaseProtocolAdapter[Ap2PaymentRequest, Ap2PaymentResponse]):
     """Adapter translating AP2 messages to and from AgentPay canonical models."""
 
-    def parse_payload(self, raw_data: dict[str, Any]) -> Ap2PaymentRequest:
+    def parse_payload(self, raw_data: Any) -> Ap2PaymentRequest:
         """Parse raw AP2 dictionary payload into validated Ap2PaymentRequest."""
-        if not isinstance(raw_data, dict):
-            raise MalformedPayloadError("AP2 payload must be a JSON object")
+        if not isinstance(raw_data, dict) or not raw_data:
+            raise MalformedPayloadError("AP2 payload must be a non-empty JSON object")
 
         version = str(raw_data.get("ap2_version", raw_data.get("version", "")))
         if not version or version not in SUPPORTED_AP2_VERSIONS:
@@ -222,10 +222,32 @@ class Ap2Adapter(BaseProtocolAdapter[Ap2PaymentRequest, Ap2PaymentResponse]):
         )
 
     def to_action_request(
-        self, request: Ap2PaymentRequest, tenant_id: str | None = None
+        self, request: Any, tenant_id: str | None = None
     ) -> tuple[ActionRequest, dict[str, Any]]:
         """Translate typed Ap2PaymentRequest into canonical ActionRequest and metadata."""
-        effective_tenant = request.payer.tenant_id or (tenant_id or "")
+        if not isinstance(request, Ap2PaymentRequest):
+            if isinstance(request, dict):
+                request = self.parse_payload(request)
+            else:
+                raise MalformedPayloadError(
+                    f"Expected Ap2PaymentRequest or dictionary payload, got {type(request).__name__}"
+                )
+
+        effective_tenant = (
+            request.payer.tenant_id
+            if request.payer and getattr(request.payer, "tenant_id", None)
+            else (tenant_id or "")
+        )
+        if (
+            not effective_tenant
+            or "\x00" in effective_tenant
+            or "\n" in effective_tenant
+            or "\r" in effective_tenant
+        ):
+            raise MalformedPayloadError(
+                f"Invalid tenant_id '{effective_tenant}': cannot be empty or contain control characters"
+            )
+
         amount = Money(minor_units=request.amount_minor, currency=request.currency)
 
         budget_money = (

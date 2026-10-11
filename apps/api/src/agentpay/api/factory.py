@@ -266,6 +266,7 @@ def create_app(
     seed_demo_data: bool = True,
     tenant_id: str = "tenant_01",
     webhook_secret: str = "whsec_agentpay_default_secure_secret_32bytes",
+    require_observability_auth: bool = False,
 ) -> AgentPayApiApp:
     """Instantiate and wire a complete AgentPay application instance (§8, §13, §49).
 
@@ -371,5 +372,6 @@ def create_app(
         credential_repo=credential_repo,
         idempotency_store=idempotency_store,
         webhook_secret=webhook_secret,
+        require_observability_auth=require_observability_auth,
     )
     return app

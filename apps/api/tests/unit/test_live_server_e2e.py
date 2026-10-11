@@ -306,3 +306,44 @@ def test_live_server_unauthenticated_rejection_and_trace_id(
     assert err.request_id is not None
     assert err.trace_id is not None
     assert "Invalid authentication credentials" in err.message
+
+
+def test_live_server_request_body_size_limit_rejection(
+    live_server: tuple[str, int],
+) -> None:
+    """B-SRV-01: Server rejects oversized payloads with HTTP 413 PAYLOAD_TOO_LARGE (§62)."""
+    base_url, _ = live_server
+
+    # 1. Declared Content-Length > 1 MiB is rejected before reading stream
+    req = urllib.request.Request(
+        f"{base_url}/api/v1/actions",
+        data=b"dummy",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": "1048577",  # 1 byte over 1 MiB limit
+        },
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req, timeout=5)
+
+    assert exc_info.value.code == 413
+    resp_body = json.loads(exc_info.value.read().decode("utf-8"))
+    assert resp_body["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+    # 2. Non-integer Content-Length is rejected with HTTP 400
+    req_bad_cl = urllib.request.Request(
+        f"{base_url}/api/v1/actions",
+        data=b"{}",
+        headers={
+            "Content-Type": "application/json",
+            "Content-Length": "not_an_int",
+        },
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info_bad:
+        urllib.request.urlopen(req_bad_cl, timeout=5)
+
+    assert exc_info_bad.value.code == 400
+    resp_body_bad = json.loads(exc_info_bad.value.read().decode("utf-8"))
+    assert resp_body_bad["error"]["code"] == "INVALID_CONTENT_LENGTH"

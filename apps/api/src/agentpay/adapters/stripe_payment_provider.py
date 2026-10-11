@@ -109,6 +109,10 @@ class StripePaymentProvider(PaymentProvider):
                 raise InvalidPaymentError(f"Payment attempt '{attempt_id}' not found in Stripe")
             if attempt.status == PaymentStatus.CAPTURED:
                 return attempt
+            if attempt.status != PaymentStatus.AUTHORIZED:
+                raise InvalidPaymentError(
+                    f"Cannot capture payment '{attempt_id}' in non-authorizable status '{attempt.status.value}'"
+                )
             updated = attempt.transition_to(PaymentStatus.CAPTURED)
             self._attempts[(tenant_id, attempt_id)] = updated
             return updated
