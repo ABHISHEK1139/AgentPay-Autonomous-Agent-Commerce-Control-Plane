@@ -1,0 +1,13 @@
+[project]
+name = "agentpay-schemas"
+version = "0.1.0"
+description = "Canonical JSON and OpenAPI schemas for AgentPay action requests, events, and API envelopes"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentpay_schemas"]

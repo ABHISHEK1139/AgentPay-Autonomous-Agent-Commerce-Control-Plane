@@ -37,6 +37,9 @@ mypy 2.4.0, pytest 9.1.1.
 | Operational Runbooks | implemented | All 9 named runbooks in `docs/runbooks/` (§133) |
 | Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-006 (§87) |
 | Security Assurance | implemented | OWASP ASVS v4.0.3 verification matrix, YAML index, exceptions in `security/asvs/` (§53) |
+| CLI & Server Runtime | implemented | Zero-dependency multi-threaded HTTP server (`server.py`), CLI runner (`cli.py`), application factory (`create_app()`) |
+| Standalone Packages | implemented | `packages/sdk`, `packages/protocol-types`, `packages/schemas`, `packages/test-utils` per §9 |
+| Live Socket E2E Network Tests | implemented | Real TCP socket integration suite verifying server, SDK, and HMAC webhooks |
 | Failure Engineering (§112) | verified | Chaos suite: price drift, inventory depletion, timeout reconciliation, saga |
 | Red-Team Security & 14 Vectors (§177) | verified | Exhaustive adversarial threat harness, crypto tamper suite, concurrency stress suite |
 | Architecture Boundary Guard | verified | 7 tests enforce domain purity (§10) with zero external imports |
@@ -44,12 +47,12 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            162 files already formatted
+uv run ruff format --check .                                            174 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 141 source files
-uv run pytest                                                           714 passed
+uv run mypy                                                             Success: no issues found in 166 source files
+uv run pytest                                                           722 passed
 node --test tests/web.test.mjs                                          5 passed (incl. live API & §121 accessibility)
-uv run python tests/adversarial/stress_test_protocols.py                51/51 passed
+uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
 uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed

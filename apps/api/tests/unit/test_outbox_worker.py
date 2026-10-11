@@ -321,7 +321,7 @@ def test_standalone_agentpay_worker_runtime() -> None:
     if worker_src not in sys.path:
         sys.path.insert(0, worker_src)
 
-    from agentpay_worker.worker import (  # type: ignore[import-not-found]
+    from agentpay_worker.worker import (
         BackgroundWorker as StandaloneWorker,
     )
 

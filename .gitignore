@@ -19,3 +19,7 @@ htmlcov/
 .vscode/
 node_modules/
 .agents/
+*.db
+*.sqlite
+*.sqlite3
+agentpay.db

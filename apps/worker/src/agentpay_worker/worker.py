@@ -74,6 +74,9 @@ class BackgroundWorker:
         return stats
 
     def _reconcile_stuck_payments(self) -> int:
+        if self.payment_repo is None or self.payment_reconciler is None:
+            return 0
+
         reconciled = 0
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self.payment_timeout_seconds)
@@ -114,6 +117,9 @@ class BackgroundWorker:
         return reconciled
 
     def _expire_stale_approvals(self) -> int:
+        if self.approval_repo is None:
+            return 0
+
         expired_count = 0
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self.approval_ttl_seconds)
