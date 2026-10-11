@@ -93,11 +93,9 @@ def create_request_handler(
             content_length_str = self.headers.get("Content-Length", "0")
             try:
                 content_length = int(content_length_str)
+                if content_length < 0:
+                    raise ValueError("Negative Content-Length")
             except ValueError:
-                self.send_response(400)
-                self._send_cors_headers()
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
                 err_resp = {
                     "error": {
                         "code": "INVALID_CONTENT_LENGTH",
@@ -105,14 +103,19 @@ def create_request_handler(
                         "request_id": self.headers.get("x-request-id", "req_invalid_cl"),
                     }
                 }
-                self.wfile.write(json.dumps(err_resp).encode("utf-8"))
+                resp_bytes = json.dumps(err_resp).encode("utf-8")
+                self.send_response(400)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp_bytes)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(resp_bytes)
+                self.wfile.flush()
+                self.close_connection = True
                 return
 
             if content_length > MAX_REQUEST_BODY_BYTES:
-                self.send_response(413)
-                self._send_cors_headers()
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
                 err_resp = {
                     "error": {
                         "code": "PAYLOAD_TOO_LARGE",
@@ -120,7 +123,16 @@ def create_request_handler(
                         "request_id": self.headers.get("x-request-id", "req_payload_too_large"),
                     }
                 }
-                self.wfile.write(json.dumps(err_resp).encode("utf-8"))
+                resp_bytes = json.dumps(err_resp).encode("utf-8")
+                self.send_response(413)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(resp_bytes)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(resp_bytes)
+                self.wfile.flush()
+                self.close_connection = True
                 return
 
             json_body: dict[str, Any] | None = None
@@ -130,10 +142,6 @@ def create_request_handler(
                 try:
                     json_body = json.loads(raw_bytes.decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
-                    self.send_response(422)
-                    self._send_cors_headers()
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
                     err_resp = {
                         "error": {
                             "code": "INVALID_REQUEST_BODY",
@@ -141,7 +149,16 @@ def create_request_handler(
                             "request_id": self.headers.get("x-request-id", "req_invalid_json"),
                         }
                     }
-                    self.wfile.write(json.dumps(err_resp).encode("utf-8"))
+                    resp_bytes = json.dumps(err_resp).encode("utf-8")
+                    self.send_response(422)
+                    self._send_cors_headers()
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp_bytes)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(resp_bytes)
+                    self.wfile.flush()
+                    self.close_connection = True
                     return
 
             # 4. Convert headers to dictionary
@@ -164,6 +181,7 @@ def create_request_handler(
 
             self.end_headers()
             self.wfile.write(resp_bytes)
+            self.wfile.flush()
 
         def _try_serve_static(self, clean_path: str) -> bool:
             if static_dir is None:
