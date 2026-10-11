@@ -6,13 +6,13 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+">
-  <img src="https://img.shields.io/badge/mypy-strict%20(167%20files)-green.svg" alt="Mypy Strict">
-  <img src="https://img.shields.io/badge/ruff-formatted%20(175%20files)-green.svg" alt="Ruff">
-  <img src="https://img.shields.io/badge/pytest-748%20passed-brightgreen.svg" alt="Pytest 748 Passed">
-  <img src="https://img.shields.io/badge/node%20test-5%20passed-brightgreen.svg" alt="Node Test">
-  <img src="https://img.shields.io/badge/architecture-domain%20pure%20(AST%20enforced)-blue.svg" alt="Domain Purity">
-  <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License Apache 2.0">
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"></a>
+  <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/mypy-strict-brightgreen.svg" alt="Mypy Strict"></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/code_style-ruff-black.svg" alt="Ruff"></a>
+  <a href="https://docs.pytest.org/"><img src="https://img.shields.io/badge/tests-748_passed-brightgreen.svg" alt="Pytest 748 Passed"></a>
+  <a href="tests/web.test.mjs"><img src="https://img.shields.io/badge/web_tests-5_passed-brightgreen.svg" alt="Web Tests"></a>
+  <a href="docs/architecture/architecture.md"><img src="https://img.shields.io/badge/architecture-domain_pure-blue.svg" alt="Domain Purity"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue.svg" alt="License Apache 2.0"></a>
 </p>
 
 ---
