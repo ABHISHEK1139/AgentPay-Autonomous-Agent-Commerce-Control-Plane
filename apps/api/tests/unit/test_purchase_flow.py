@@ -62,6 +62,7 @@ from agentpay.domain.commerce import (
 from agentpay.domain.errors import (
     ApprovalBindingMismatchError,
     CrossTenantAccessError,
+    IdempotencyConflictError,
     PrivilegeEscalationAttemptError,
 )
 from agentpay.domain.identity import (
@@ -962,3 +963,168 @@ def test_b_drift_01_catalog_price_drift_approved_purchase_denied() -> None:
     assert "Evidence conflict" in (res.rejection_reason or "")
     assert res.order is None
     assert len(payment_provider._attempts) == 0
+
+
+def test_b_idem_01_execute_approved_purchase_idempotent_retry() -> None:
+    """B-IDEM-01: execute_approved_purchase supports idempotent retries without ApprovalAlreadyConsumedError (§20, §42)."""
+    (
+        orchestrator,
+        _,
+        _,
+        _,
+        _,
+        _,
+        variant_repo,
+        inventory_repo,
+        payment_provider,
+        _,
+        approval_repo,
+    ) = setup_orchestrator(tenant_id="tenant_01")
+
+    # Set up high tier variant requiring approval
+    variant_repo.save(
+        "tenant_01",
+        ProductVariant(
+            variant_id="var_high",
+            product_id="prod_01",
+            sku="SKU-PRO-01",
+            name="Pro Laptop High Tier",
+            price=Money(800000, "INR"),
+        ),
+    )
+    inventory_repo.save(
+        "tenant_01",
+        Inventory(
+            variant_id="var_high",
+            tenant_id="tenant_01",
+            available=5,
+            reserved=0,
+        ),
+    )
+
+    action = ActionRequest(
+        action_id="act_idem_app_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="laptop procurement"),
+        amount=Money(800000, "INR"),
+        authorization_mode=AuthorizationMode.SUPERVISED,
+    )
+
+    initial_result = orchestrator.execute_purchase(
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+    )
+    assert initial_result.status == ActionStatus.AWAITING_APPROVAL
+    assert initial_result.approval is not None
+    approval_id = initial_result.approval.approval_id
+
+    # Manager approves
+    approval_service = ApprovalService(approval_repo=approval_repo)
+    approval_service.grant_approval(
+        approval_id=approval_id,
+        approver_id="manager_dave",
+        tenant_id="tenant_01",
+    )
+
+    # First execution succeeds
+    res1 = orchestrator.execute_approved_purchase(
+        approval_id=approval_id,
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+        idempotency_key="idem_approved_retry_key",
+    )
+    assert res1.status == ActionStatus.COMPLETED
+    assert res1.order is not None
+    assert len(payment_provider._attempts) == 1
+
+    # Retry with same idempotency key must NOT raise ApprovalAlreadyConsumedError
+    res2 = orchestrator.execute_approved_purchase(
+        approval_id=approval_id,
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+        idempotency_key="idem_approved_retry_key",
+    )
+    assert res2.status == ActionStatus.COMPLETED
+    assert res2.order is not None
+    assert res2.order.order_id == res1.order.order_id
+    # Payment provider was not charged twice
+    assert len(payment_provider._attempts) == 1
+
+
+def test_b_idem_02_idempotency_currency_conflict() -> None:
+    """B-IDEM-02: Idempotency evaluation detects currency mismatch on replay (§42)."""
+    (
+        orchestrator,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+    ) = setup_orchestrator(tenant_id="tenant_01")
+
+    action_inr = ActionRequest(
+        action_id="act_curr_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="test currency idempotency"),
+        amount=Money(129900, "INR"),
+        authorization_mode=AuthorizationMode.AUTONOMOUS,
+    )
+
+    # First execution succeeds
+    res = orchestrator.execute_purchase(
+        action=action_inr,
+        tenant_id="tenant_01",
+        variant_id="var_01",
+        quantity=1,
+        idempotency_key="idem_curr_key_01",
+    )
+    assert res.status == ActionStatus.COMPLETED
+
+    # Second execution with same minor units (129900) but currency USD must raise IdempotencyConflictError
+    action_usd = ActionRequest(
+        action_id="act_curr_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="test currency idempotency"),
+        amount=Money(129900, "USD"),
+        authorization_mode=AuthorizationMode.AUTONOMOUS,
+    )
+
+    with pytest.raises(
+        IdempotencyConflictError, match="stored currency 'INR' != incoming currency 'USD'"
+    ):
+        orchestrator.execute_purchase(
+            action=action_usd,
+            tenant_id="tenant_01",
+            variant_id="var_01",
+            quantity=1,
+            idempotency_key="idem_curr_key_01",
+        )

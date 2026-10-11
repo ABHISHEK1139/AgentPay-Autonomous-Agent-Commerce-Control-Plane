@@ -14,6 +14,8 @@ from agentpay.adapters.in_memory.payment_repository import (
     InMemoryPaymentRepository,
 )
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
+from agentpay.adapters.razorpay_payment_provider import RazorpayPaymentProvider
+from agentpay.adapters.stripe_payment_provider import StripePaymentProvider
 from agentpay.domain.errors import (
     CrossTenantAccessError,
     InvalidPaymentError,
@@ -328,3 +330,58 @@ def test_provider_capture_payment_requires_authorized_state() -> None:
 
             with pytest.raises(InvalidPaymentError, match="non-authorizable status"):
                 provider.capture_payment("t1", bad_att_id)
+
+
+def test_b_ref_01_payment_providers_refund_validation_and_partial_states() -> None:
+    """B-REF-01: Payment providers reject invalid, negative, cross-currency, and excessive refunds (§44)."""
+    providers = [
+        MockPaymentProvider(),
+        StripePaymentProvider(auto_capture=False),
+        RazorpayPaymentProvider(auto_capture=False),
+    ]
+
+    for provider in providers:
+        tenant_id = "tenant_01"
+        att = provider.create_payment(
+            tenant_id,
+            "intent_ref_01",
+            Money(10000, "INR"),
+            f"idem_ref_{provider.__class__.__name__}",
+        )
+        if att.status != PaymentStatus.CAPTURED:
+            # Non-captured refund must be rejected
+            with pytest.raises(InvalidPaymentError, match="non-refundable status"):
+                provider.refund(tenant_id, att.attempt_id, Money(5000, "INR"), "Too early")
+            provider.capture_payment(tenant_id, att.attempt_id)
+
+        # 1. Zero or negative refund rejected
+        with pytest.raises(InvalidPaymentError, match="strictly positive"):
+            provider.refund(tenant_id, att.attempt_id, Money(0, "INR"), "Zero refund")
+
+        # 2. Cross-currency refund rejected
+        with pytest.raises(InvalidPaymentError, match="does not match payment currency"):
+            provider.refund(tenant_id, att.attempt_id, Money(1000, "USD"), "Wrong currency")
+
+        # 3. Excessive single refund rejected
+        with pytest.raises(InvalidPaymentError, match="exceeds remaining refundable balance"):
+            provider.refund(tenant_id, att.attempt_id, Money(20000, "INR"), "Too much")
+
+        # 4. First partial refund transitions to PARTIALLY_REFUNDED
+        ref1 = provider.refund(tenant_id, att.attempt_id, Money(4000, "INR"), "Partial refund 1")
+        assert ref1.amount == Money(4000, "INR")
+        att_p1 = provider.get_payment(tenant_id, att.attempt_id)
+        assert att_p1.status == PaymentStatus.PARTIALLY_REFUNDED
+
+        # 5. Over-refunding on second partial refund rejected
+        with pytest.raises(InvalidPaymentError, match="exceeds remaining refundable balance"):
+            provider.refund(tenant_id, att.attempt_id, Money(7000, "INR"), "Exceeds remaining 6000")
+
+        # 6. Second partial refund completing remaining balance transitions to REFUNDED
+        ref2 = provider.refund(tenant_id, att.attempt_id, Money(6000, "INR"), "Partial refund 2")
+        assert ref2.amount == Money(6000, "INR")
+        att_p2 = provider.get_payment(tenant_id, att.attempt_id)
+        assert att_p2.status == PaymentStatus.REFUNDED
+
+        # 7. Further refunds on terminal REFUNDED status rejected
+        with pytest.raises(InvalidPaymentError, match="non-refundable status"):
+            provider.refund(tenant_id, att.attempt_id, Money(100, "INR"), "Post-refund extra")

@@ -131,9 +131,37 @@ class RazorpayPaymentProvider(PaymentProvider):
             attempt = self._attempts.get((tenant_id, attempt_id))
             if attempt is None:
                 raise InvalidPaymentError(f"Payment attempt '{attempt_id}' not found in Razorpay")
-            if attempt.status != PaymentStatus.CAPTURED:
-                raise InvalidPaymentError("Cannot refund an uncaptured payment")
+            if attempt.status not in (PaymentStatus.CAPTURED, PaymentStatus.PARTIALLY_REFUNDED):
+                raise InvalidPaymentError(
+                    f"Cannot refund payment '{attempt_id}' in non-refundable status '{attempt.status.value}'"
+                )
 
+            if amount.minor_units <= 0:
+                raise InvalidPaymentError("Refund amount must be strictly positive")
+
+            if amount.currency != attempt.amount.currency:
+                raise InvalidPaymentError(
+                    f"Refund currency '{amount.currency}' does not match payment currency '{attempt.amount.currency}'"
+                )
+
+            already_refunded = sum(
+                r.amount.minor_units
+                for r in self._refunds.values()
+                if r.tenant_id == tenant_id and r.payment_attempt_id == attempt_id
+            )
+            remaining = attempt.amount.minor_units - already_refunded
+            if amount.minor_units > remaining:
+                raise InvalidPaymentError(
+                    f"Refund amount {amount.minor_units} exceeds remaining refundable balance {remaining}"
+                )
+
+            new_status = (
+                PaymentStatus.REFUNDED
+                if already_refunded + amount.minor_units == attempt.amount.minor_units
+                else PaymentStatus.PARTIALLY_REFUNDED
+            )
+
+            updated_attempt = attempt.transition_to(new_status)
             refund_id = f"rfnd_rzp_{uuid.uuid4().hex[:16]}"
             ref = Refund(
                 refund_id=refund_id,
@@ -143,7 +171,6 @@ class RazorpayPaymentProvider(PaymentProvider):
                 reason=reason,
             )
             self._refunds[(tenant_id, refund_id)] = ref
-            updated_attempt = attempt.transition_to(PaymentStatus.REFUNDED)
             self._attempts[(tenant_id, attempt_id)] = updated_attempt
             return ref
 

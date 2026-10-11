@@ -36,6 +36,9 @@ it is recorded so nobody wastes time re-investigating it.
 | B-REC-01 | MEDIUM | Webhook reconciliation relies on private attribute sniffing `hasattr(self._order_repo, "_orders")` | **Fixed & Verified** |
 | B-API-01 | MEDIUM | Non-dict JSON bodies on mutating endpoints raise bare `AttributeError` → HTTP 500 instead of HTTP 422 | **Fixed & Verified** |
 | B-API-02 | MEDIUM | Approved purchase execution lacked dedicated API endpoint and schema mapping | **Fixed & Verified** |
+| B-REF-01 | **CRITICAL** | Payment providers allowed unvalidated refunds (negative, cross-currency, excess) and premature full REFUNDED state | **Fixed & Verified** |
+| B-IDEM-01 | HIGH | Approved purchase execution consumed approval token before checking idempotency store; retries raised 409 | **Fixed & Verified** |
+| B-IDEM-02 | MEDIUM | Idempotency conflict check evaluated only minor units, ignoring currency on replay | **Fixed & Verified** |
 
 ---
 
@@ -569,6 +572,69 @@ Verified by: `test_b_api_02_execute_approved_purchase_via_api` in `apps/api/test
 
 ---
 
+## B-REF-01 — Payment providers allowed unvalidated refunds and premature full REFUNDED state
+
+**Severity: CRITICAL** · §41, §42 · **Status: Fixed & Verified**
+
+### Problem
+
+Payment adapters (`MockPaymentProvider`, `StripePaymentProvider`, `RazorpayPaymentProvider`) allowed unvalidated refunds:
+1. Zero or negative refund amounts were accepted.
+2. Cross-currency refunds were processed without error (e.g. charging INR 1,000 and refunding USD 500).
+3. Refund amounts exceeding the captured payment attempt balance were accepted without constraint.
+4. Non-refundable states (`PENDING`, `FAILED`, `DECLINED`) could be refunded.
+5. Any partial refund immediately transitioned the payment attempt to `REFUNDED` instead of `PARTIALLY_REFUNDED`, making subsequent partial refunds fail or corrupting the financial state machine (§41).
+
+### Resolution (Fixed & Verified)
+
+- In `MockPaymentProvider`, `StripePaymentProvider`, and `RazorpayPaymentProvider`:
+  - Enforced refund amounts must have positive minor units (`minor_units > 0`).
+  - Enforced currency equality (`refund_amount.currency == attempt.amount.currency`).
+  - Enforced refundable state check: attempt must be in `CAPTURED` or `PARTIALLY_REFUNDED`.
+  - Added cumulative refund tracking per payment attempt. Cumulative refunds cannot exceed captured minor units.
+  - Correctly transitioned status to `PARTIALLY_REFUNDED` if cumulative refund < original captured amount, and `REFUNDED` when fully refunded.
+- In `reconciliation_service.py`:
+  - Extended `RefundResult` mapping to support both `REFUNDED` and `PARTIALLY_REFUNDED` without crashing.
+
+Verified by: `test_b_ref_01_payment_providers_refund_validation_and_partial_states` in `apps/api/tests/unit/test_payments.py`.
+
+---
+
+## B-IDEM-01 — Approved purchase execution consumed approval token before checking idempotency store
+
+**Severity: HIGH** · §20, §42 · **Status: Fixed & Verified**
+
+### Problem
+
+In `PurchaseOrchestrator.execute_approved_purchase`, the single-use human approval was consumed via `atomic_consume` before querying the idempotency store. If a client retried a network request with the same `Idempotency-Key` after a successful purchase, `atomic_consume` failed with `ApprovalAlreadyConsumedError` (HTTP 409) rather than returning the cached idempotent purchase result.
+
+### Resolution (Fixed & Verified)
+
+- Moved the idempotency store check in `execute_approved_purchase` before state mutation and approval token consumption.
+- If an existing idempotency record is present for `idempotency_key`, the orchestrator verifies payload/amount/currency conflicts and immediately returns the cached `PurchaseExecutionResult` without consuming the approval again.
+
+Verified by: `test_b_idem_01_execute_approved_purchase_idempotent_retry` in `apps/api/tests/unit/test_purchase_flow.py`.
+
+---
+
+## B-IDEM-02 — Idempotency conflict check evaluated only minor units, ignoring currency on replay
+
+**Severity: MEDIUM** · §42, §122 · **Status: Fixed & Verified**
+
+### Problem
+
+In `PurchaseOrchestrator`, idempotency conflict checks in both `execute_purchase` and `execute_approved_purchase` compared only `amount_minor`. Furthermore, `IdempotencyRecord.result_data` omitted the currency code. Replaying an identical transaction ID or idempotency key with the same integer amount in a different currency (e.g. 100,000 INR vs 100,000 USD, a ~83x value difference) was erroneously treated as an idempotent match rather than raising an `IdempotencyConflictError`.
+
+### Resolution (Fixed & Verified)
+
+- Stored `"currency": action.amount.currency` in `result_data` when persisting `IdempotencyRecord`.
+- Added currency equality verification in idempotency replay checks across `execute_purchase` and `execute_approved_purchase`.
+- Replays with currency mismatches raise `IdempotencyConflictError` fail-closed (§2.4, §42).
+
+Verified by: `test_b_idem_02_idempotency_currency_conflict` in `apps/api/tests/unit/test_purchase_flow.py`.
+
+---
+
 ## Verification environment
 
 Windows, PowerShell 5.1, Python 3.12.10, uv 0.12.22, ruff 0.16.10, mypy 2.4.0, pytest 9.1.1.
@@ -576,4 +642,4 @@ Docker daemon is **not running**, so persistence tests use SQLite in-memory; Pos
 behaviour is unverified. No external security assessment has been performed.
 
 Gates at time of writing: `ruff format` 175 files clean, `ruff check` clean, `mypy` 167 files clean,
-`pytest` 745 passed / 0 skipped.
+`pytest` 748 passed / 0 skipped.

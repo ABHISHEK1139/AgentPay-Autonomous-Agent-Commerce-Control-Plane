@@ -298,7 +298,7 @@ class PurchaseOrchestrator:
         if self._idempotency_store is not None and idempotency_key is not None:
             existing = self._idempotency_store.get(tenant_id, idempotency_key)
             if existing is not None:
-                # Check for payload / amount conflict (§42)
+                # Check for payload / amount / currency conflict (§42, B-IDEM-02)
                 expected_amount_minor = existing.result_data.get("amount_minor")
                 if (
                     expected_amount_minor is not None
@@ -308,6 +308,16 @@ class PurchaseOrchestrator:
                     raise IdempotencyConflictError(
                         f"Idempotency key '{idempotency_key}' conflict: "
                         f"stored amount {expected_amount_minor} != incoming amount {action.amount.minor_units}"
+                    )
+                expected_currency = existing.result_data.get("currency")
+                if (
+                    expected_currency is not None
+                    and action.amount is not None
+                    and action.amount.currency != expected_currency
+                ):
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored currency '{expected_currency}' != incoming currency '{action.amount.currency}'"
                     )
                 stored_action_id = existing.result_data.get("action_id", existing.request_hash)
                 if stored_action_id and stored_action_id != action.action_id:
@@ -826,6 +836,7 @@ class PurchaseOrchestrator:
                                 "payment_id": payment_attempt.attempt_id,
                                 "status": "FAILED",
                                 "amount_minor": action.amount.minor_units,
+                                "currency": action.amount.currency,
                                 "action_id": action.action_id,
                             },
                         ),
@@ -864,6 +875,7 @@ class PurchaseOrchestrator:
                                 "payment_id": payment_attempt.attempt_id,
                                 "status": "FAILED",
                                 "amount_minor": action.amount.minor_units,
+                                "currency": action.amount.currency,
                                 "action_id": action.action_id,
                             },
                         ),
@@ -948,6 +960,7 @@ class PurchaseOrchestrator:
                         "payment_id": payment_attempt.attempt_id if payment_attempt else None,
                         "status": "COMPLETED",
                         "amount_minor": action.amount.minor_units,
+                        "currency": action.amount.currency,
                         "action_id": action.action_id,
                     },
                 ),
@@ -977,6 +990,61 @@ class PurchaseOrchestrator:
         """Execute a purchase that was previously approved by a human (§20)."""
         if self._approval_repo is None:
             raise InvalidCommerceError("Approval repository not configured")
+
+        # 0. Idempotency Check BEFORE state mutation (§42, B-IDEM-01, B-IDEM-02)
+        if idempotency_key is not None and self._idempotency_store is not None:
+            existing = self._idempotency_store.get(tenant_id, idempotency_key)
+            if existing is not None:
+                # Check for payload / amount / currency conflict (§42, B-IDEM-02)
+                expected_amount_minor = existing.result_data.get("amount_minor")
+                if (
+                    expected_amount_minor is not None
+                    and action.amount is not None
+                    and action.amount.minor_units != expected_amount_minor
+                ):
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored amount {expected_amount_minor} != incoming amount {action.amount.minor_units}"
+                    )
+                expected_currency = existing.result_data.get("currency")
+                if (
+                    expected_currency is not None
+                    and action.amount is not None
+                    and action.amount.currency != expected_currency
+                ):
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored currency '{expected_currency}' != incoming currency '{action.amount.currency}'"
+                    )
+                stored_action_id = existing.result_data.get("action_id", existing.request_hash)
+                if stored_action_id and stored_action_id != action.action_id:
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored action '{stored_action_id}' != incoming action '{action.action_id}'"
+                    )
+
+                cached_order = None
+                order_id = existing.result_data.get("order_id")
+                if order_id and self._order_repo is not None:
+                    cached_order = self._order_repo.get(tenant_id, order_id)
+                cached_payment = None
+                payment_id = existing.result_data.get("payment_id")
+                if payment_id and self._payment_repo is not None:
+                    cached_payment = self._payment_repo.get(tenant_id, payment_id)
+                status_raw = existing.result_data.get("status", "COMPLETED")
+                cached_status = (
+                    ActionStatus(status_raw)
+                    if status_raw in ActionStatus._value2member_map_
+                    else ActionStatus.COMPLETED
+                )
+                return PurchaseExecutionResult(
+                    action_id=action.action_id,
+                    tenant_id=tenant_id,
+                    status=cached_status,
+                    decision=PolicyDecision.ALLOW,
+                    order=cached_order,
+                    payment=cached_payment,
+                )
 
         # 1. Atomic check-and-consume or lock-guarded consumption to prevent TOCTOU race (§20, §177 Vector 10)
         with self._approval_lock:
@@ -1248,6 +1316,6 @@ class PurchaseOrchestrator:
             quantity=quantity,
             approval=consumed_approval,
             merchant_id=consumed_approval.binding.merchant_id,
-            idempotency_key=idempotency_key or f"idem_{action.action_id}",
+            idempotency_key=idempotency_key,
             trace_id=trace_id,
         )

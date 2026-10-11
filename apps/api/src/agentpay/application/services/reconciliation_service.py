@@ -288,9 +288,10 @@ class PaymentReconciler:
                     )
 
         elif event_type == "payment.refunded":
-            if (
-                attempt.status is not PaymentStatus.CAPTURED
-                and attempt.status is not PaymentStatus.REFUNDED
+            if attempt.status not in (
+                PaymentStatus.CAPTURED,
+                PaymentStatus.PARTIALLY_REFUNDED,
+                PaymentStatus.REFUNDED,
             ):
                 raise InvalidPaymentError(
                     f"Cannot refund payment '{attempt_id}' in status '{attempt.status.value}'; only CAPTURED payments can be refunded"
