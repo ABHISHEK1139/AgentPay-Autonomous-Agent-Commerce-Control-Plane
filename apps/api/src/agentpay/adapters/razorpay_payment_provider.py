@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -155,10 +156,18 @@ class RazorpayPaymentProvider(PaymentProvider):
         self,
         payload: bytes,
         signature: str,
+        timestamp: int | None = None,
+        tolerance_seconds: int = 300,
+        current_time: int | None = None,
     ) -> bool:
-        """Cryptographically verify Razorpay X-Razorpay-Signature header (§61)."""
+        """Cryptographically verify Razorpay X-Razorpay-Signature header with optional timestamp tolerance (§61)."""
         if not signature or not payload:
             return False
+
+        if timestamp is not None:
+            now = current_time if current_time is not None else int(time.time())
+            if abs(now - timestamp) > tolerance_seconds:
+                return False
 
         expected_sig = self.generate_webhook_signature(payload)
         return hmac.compare_digest(expected_sig, signature)
@@ -167,6 +176,9 @@ class RazorpayPaymentProvider(PaymentProvider):
         self,
         payload: bytes,
         signature: str,
+        timestamp: int | None = None,
+        tolerance_seconds: int = 300,
+        current_time: int | None = None,
     ) -> dict[str, Any]:
         """Verify signature and parse Razorpay webhook payload into canonical format (§61).
 
@@ -175,7 +187,13 @@ class RazorpayPaymentProvider(PaymentProvider):
         - payment.failed -> payment.failed
         - refund.processed -> payment.refunded
         """
-        if not self.verify_webhook_signature(payload, signature):
+        if not self.verify_webhook_signature(
+            payload,
+            signature,
+            timestamp=timestamp,
+            tolerance_seconds=tolerance_seconds,
+            current_time=current_time,
+        ):
             raise RazorpayWebhookSignatureError("Invalid Razorpay webhook signature")
 
         try:

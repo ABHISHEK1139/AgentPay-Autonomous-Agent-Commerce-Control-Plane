@@ -152,3 +152,18 @@ def test_mismatched_provider_answer_is_rejected() -> None:
     reconciler, _, _ = build(authoritative=make_attempt(attempt_id="pay_other"))
     with pytest.raises(InvalidPaymentError):
         reconciler.reconcile_unknown_payment("tenant_01", "pay_01")
+
+
+def test_reconcile_timeout_delegates_to_reconcile_unknown_payment() -> None:
+    """reconcile_timeout(attempt) must extract tenant and attempt id and delegate to reconcile_unknown_payment (§43, §104)."""
+    attempt = make_attempt(status=PaymentStatus.UNKNOWN)
+    reconciler, provider, repo = build(
+        stored=attempt, authoritative=make_attempt(status=PaymentStatus.CAPTURED)
+    )
+    result = reconciler.reconcile_timeout(attempt)
+    assert result.status is PaymentStatus.CAPTURED
+    assert len(provider.get_calls) == 1
+    assert provider.get_calls[0] == ("tenant_01", "pay_01")
+    persisted = repo.get("tenant_01", "pay_01")
+    assert persisted is not None
+    assert persisted.status is PaymentStatus.CAPTURED

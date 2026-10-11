@@ -140,18 +140,18 @@ class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
             principal = str(raw_data.get("principal", raw_data.get("principal_id", "")))
             recipient = "urn:agentpay:service:control_plane"
 
-        if not sender:
+        if not sender or not sender.strip():
             raise MalformedPayloadError("Missing sender in UAP request")
-        if not tenant:
+        if not tenant or not tenant.strip():
             raise MalformedPayloadError("Missing tenant in UAP request")
-        if not principal:
+        if not principal or not principal.strip():
             raise MalformedPayloadError("Missing principal in UAP request")
 
         header = UapHeader(
-            sender=sender,
-            recipient=recipient,
-            tenant=tenant,
-            principal=principal,
+            sender=sender.strip(),
+            recipient=recipient.strip(),
+            tenant=tenant.strip(),
+            principal=principal.strip(),
         )
 
         # Capability / method
@@ -169,6 +169,35 @@ class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
             raise MalformedPayloadError("Missing required field 'capability' or 'method'")
         if not isinstance(parameters, dict):
             raise MalformedPayloadError("Parameters must be a JSON object")
+
+        if "quantity" in parameters:
+            raw_qty = parameters["quantity"]
+            if isinstance(raw_qty, bool) or not isinstance(raw_qty, int):
+                raise MalformedPayloadError(
+                    f"quantity must be an integer, got {type(raw_qty).__name__}"
+                )
+            if raw_qty <= 0:
+                raise MalformedPayloadError("quantity must be greater than zero")
+
+        for price_key in ("price_minor", "amount_minor", "amount"):
+            if price_key in parameters:
+                raw_price = parameters[price_key]
+                if isinstance(raw_price, bool) or not isinstance(raw_price, int):
+                    raise MalformedPayloadError(
+                        f"{price_key} must be an integer, got {type(raw_price).__name__}"
+                    )
+                if raw_price < 0:
+                    raise MalformedPayloadError(f"{price_key} cannot be negative")
+
+        for budget_key in ("budget_cap_minor", "budget_max_minor"):
+            if budget_key in parameters:
+                raw_budget = parameters[budget_key]
+                if isinstance(raw_budget, bool) or not isinstance(raw_budget, int):
+                    raise MalformedPayloadError(
+                        f"{budget_key} must be an integer, got {type(raw_budget).__name__}"
+                    )
+                if raw_budget < 0:
+                    raise MalformedPayloadError(f"{budget_key} cannot be negative")
 
         return UapMessage(
             uap_version=version,
@@ -198,30 +227,47 @@ class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
         agent_id = sender.split(":")[-1] if ":" in sender else sender
 
         p = request.parameters
-        resource_id = str(p.get("product_id", p.get("resource_id", p.get("id", ""))))
+        resource_id = str(p.get("product_id", p.get("resource_id", p.get("id", "")))).strip()
         if not resource_id:
             raise MalformedPayloadError("Missing 'product_id' or 'resource_id' in UAP parameters")
 
-        variant_id = str(p.get("variant_id", resource_id))
-        try:
-            quantity = int(p.get("quantity", 1))
-            if quantity <= 0:
-                raise ValueError("quantity must be greater than zero")
-            price_minor = int(p.get("price_minor", p.get("amount_minor", p.get("amount", 0))))
-            if price_minor < 0:
-                raise ValueError("price_minor cannot be negative")
-        except (ValueError, TypeError) as err:
-            raise MalformedPayloadError(f"Invalid quantity or price in parameters: {err}") from err
+        variant_id = str(p.get("variant_id", resource_id)).strip()
 
-        currency = str(p.get("currency", "INR")).upper()
+        raw_quantity = p.get("quantity", 1)
+        if isinstance(raw_quantity, bool) or not isinstance(raw_quantity, int):
+            raise MalformedPayloadError(
+                f"quantity must be an integer, got {type(raw_quantity).__name__}"
+            )
+        if raw_quantity <= 0:
+            raise MalformedPayloadError("quantity must be greater than zero")
+        quantity = raw_quantity
+
+        raw_price = p.get("price_minor", p.get("amount_minor", p.get("amount", 0)))
+        if isinstance(raw_price, bool) or not isinstance(raw_price, int):
+            raise MalformedPayloadError(
+                f"price_minor must be an integer, got {type(raw_price).__name__}"
+            )
+        if raw_price < 0:
+            raise MalformedPayloadError("price_minor cannot be negative")
+        price_minor = raw_price
+
+        raw_curr = p.get("currency", "INR")
+        if not isinstance(raw_curr, str) or not raw_curr.strip():
+            raise MalformedPayloadError("currency cannot be empty")
+        currency = raw_curr.strip().upper()
         amount = Money(minor_units=price_minor, currency=currency)
 
         budget_val = p.get("budget_cap_minor", p.get("budget_max_minor"))
-        budget_money = (
-            Money(minor_units=int(budget_val), currency=currency)
-            if budget_val is not None
-            else None
-        )
+        if budget_val is not None:
+            if isinstance(budget_val, bool) or not isinstance(budget_val, int):
+                raise MalformedPayloadError(
+                    f"budget cap must be an integer, got {type(budget_val).__name__}"
+                )
+            if budget_val < 0:
+                raise MalformedPayloadError("budget cap cannot be negative")
+            budget_money = Money(minor_units=budget_val, currency=currency)
+        else:
+            budget_money = None
 
         mode_str = str(
             request.constraints.get("execution_mode", request.constraints.get("mode", "AUTONOMOUS"))

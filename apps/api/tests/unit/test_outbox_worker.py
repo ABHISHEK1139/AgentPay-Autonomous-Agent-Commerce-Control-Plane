@@ -310,3 +310,77 @@ def test_background_worker_run_once_integration() -> None:
     assert updated_app is not None
     assert updated_app.status == ApprovalStatus.REJECTED
     assert "expired" in (updated_app.reason or "").lower()
+
+
+def test_standalone_agentpay_worker_runtime() -> None:
+    """Verifies apps/worker/src/agentpay_worker/worker.py BackgroundWorker runs cleanly on frozen Approval and stuck Payment (§104)."""
+    import sys
+    from pathlib import Path
+
+    worker_src = str(Path(__file__).resolve().parents[4] / "apps" / "worker" / "src")
+    if worker_src not in sys.path:
+        sys.path.insert(0, worker_src)
+
+    from agentpay_worker.worker import (  # type: ignore[import-not-found]
+        BackgroundWorker as StandaloneWorker,
+    )
+
+    outbox_repo = InMemoryOutboxRepository()
+    event_bus = EventBus()
+    payment_repo = InMemoryPaymentRepository()
+    approval_repo = InMemoryApprovalRepository()
+
+    # Seed stuck UNKNOWN payment
+    stuck_payment = PaymentAttempt(
+        attempt_id="att_standalone_stuck",
+        intent_id="intent_standalone",
+        tenant_id="tenant_s",
+        amount=Money(3000, "INR"),
+        provider="mock_razorpay",
+        idempotency_key="idemp_s",
+        status=PaymentStatus.UNKNOWN,
+        created_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    payment_repo.save("tenant_s", stuck_payment)
+
+    # Seed stale PENDING approval (frozen dataclass)
+    binding = ApprovalBinding(
+        action_id="act_standalone_stale",
+        amount=Money(5000, "INR"),
+        merchant_id="m1",
+        resource_id="r1",
+        currency="INR",
+        action_version=1,
+        tenant_id="tenant_s",
+    )
+    stale_app = Approval(
+        approval_id="app_standalone_stale",
+        tenant_id="tenant_s",
+        binding=binding,
+        status=ApprovalStatus.PENDING,
+        requested_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    approval_repo.save("tenant_s", stale_app)
+
+    reconciler = MagicMock()
+
+    worker = StandaloneWorker(
+        outbox_repo=outbox_repo,
+        event_bus=event_bus,
+        payment_repo=payment_repo,
+        payment_reconciler=reconciler,
+        approval_repo=approval_repo,
+        approval_ttl_seconds=3600,
+        payment_timeout_seconds=300,
+    )
+
+    stats = worker.run_once()
+    assert stats["reconciled_payments"] == 1
+    assert stats["expired_approvals"] == 1
+
+    reconciler.reconcile_timeout.assert_called_once_with(stuck_payment)
+
+    updated_app = approval_repo.get("tenant_s", "app_standalone_stale")
+    assert updated_app is not None
+    assert updated_app.status == ApprovalStatus.REJECTED
+    assert "expired" in (updated_app.reason or "").lower()

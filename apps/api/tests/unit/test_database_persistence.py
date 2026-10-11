@@ -17,6 +17,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from agentpay.domain.approval import (
+    Approval,
+    ApprovalAlreadyConsumedError,
+    ApprovalBinding,
+    ApprovalStatus,
+)
 from agentpay.domain.audit import (
     GENESIS_HASH,
     AuditEvent,
@@ -26,7 +32,9 @@ from agentpay.domain.audit import (
 from agentpay.domain.commerce import Product, ProductVariant
 from agentpay.domain.errors import (
     AgentRevokedError,
+    ApprovalBindingMismatchError,
     CrossTenantAccessError,
+    InvalidCommerceError,
 )
 from agentpay.domain.identity import (
     Agent,
@@ -48,6 +56,9 @@ from agentpay.domain.payments import (
 from agentpay.infrastructure.database.base import Base
 from agentpay.infrastructure.database.repositories.agent_repository import (
     SqlAlchemyAgentRepository,
+)
+from agentpay.infrastructure.database.repositories.approval_repository import (
+    SqlAlchemyApprovalRepository,
 )
 from agentpay.infrastructure.database.repositories.audit_ledger import (
     SqlAlchemyAuditRepository,
@@ -516,3 +527,83 @@ def test_audit_repository_persistence_and_chain_verification(
     )
     assert rec_event.previous_event_hash == event2_hash
     assert audit_repo.verify_chain(tenant_id) is True
+
+
+# ============================================================================
+# 8. Approval Persistence & Atomic Single-Use Consume Tests (§20, §49)
+# ============================================================================
+def test_approval_repository_roundtrip_and_atomic_consume(
+    session_factory: sessionmaker[Session],
+) -> None:
+    tenant_repo = SqlAlchemyTenantRepository(session_factory)
+    tenant_repo.save(Tenant(tenant_id="tenant_appr", name="Approval Tenant"))
+    tenant_repo.save(Tenant(tenant_id="tenant_other", name="Other Tenant"))
+
+    approval_repo = SqlAlchemyApprovalRepository(session_factory)
+    now = datetime.now(UTC)
+
+    binding = ApprovalBinding(
+        action_id="act_procure_01",
+        amount=Money(75000, "USD"),
+        merchant_id="merch_dell",
+        resource_id="res_server_r750",
+        currency="USD",
+        action_version=1,
+        tenant_id="tenant_appr",
+    )
+    approval = Approval(
+        approval_id="appr_server_01",
+        tenant_id="tenant_appr",
+        binding=binding,
+        status=ApprovalStatus.PENDING,
+        requested_at=now,
+    )
+
+    # 1. Save and retrieve
+    approval_repo.save("tenant_appr", approval)
+    retrieved = approval_repo.get("tenant_appr", "appr_server_01")
+    assert retrieved is not None
+    assert retrieved.approval_id == "appr_server_01"
+    assert retrieved.tenant_id == "tenant_appr"
+    assert retrieved.status == ApprovalStatus.PENDING
+    assert retrieved.binding.amount.minor_units == 75000
+    assert retrieved.binding.amount.currency == "USD"
+    assert retrieved.binding.merchant_id == "merch_dell"
+
+    # 2. list_for_action
+    action_approvals = approval_repo.list_for_action("tenant_appr", "act_procure_01")
+    assert len(action_approvals) == 1
+    assert action_approvals[0].approval_id == "appr_server_01"
+
+    # 3. Cross-tenant isolation
+    assert approval_repo.get("tenant_other", "appr_server_01") is None
+    assert len(approval_repo.list_for_action("tenant_other", "act_procure_01")) == 0
+    with pytest.raises(CrossTenantAccessError):
+        approval_repo.save("tenant_other", approval)
+
+    # 4. Attempt to consume while still PENDING raises ApprovalBindingMismatchError
+    with pytest.raises(ApprovalBindingMismatchError):
+        approval_repo.atomic_consume("tenant_appr", "appr_server_01")
+
+    # 5. Approve and save
+    approved = approval.approve(approver_id="admin_user_99")
+    approval_repo.save("tenant_appr", approved)
+    retrieved_approved = approval_repo.get("tenant_appr", "appr_server_01")
+    assert retrieved_approved is not None
+    assert retrieved_approved.status == ApprovalStatus.APPROVED
+    assert retrieved_approved.approver_id == "admin_user_99"
+
+    # 6. Atomic single-use consume (§20, §177 Vector 10)
+    consumed = approval_repo.atomic_consume("tenant_appr", "appr_server_01")
+    assert consumed.status == ApprovalStatus.CONSUMED
+    persisted_consumed = approval_repo.get("tenant_appr", "appr_server_01")
+    assert persisted_consumed is not None
+    assert persisted_consumed.status == ApprovalStatus.CONSUMED
+
+    # 7. Replay consumption must raise ApprovalAlreadyConsumedError
+    with pytest.raises(ApprovalAlreadyConsumedError):
+        approval_repo.atomic_consume("tenant_appr", "appr_server_01")
+
+    # 8. Consuming nonexistent approval raises InvalidCommerceError
+    with pytest.raises(InvalidCommerceError):
+        approval_repo.atomic_consume("tenant_appr", "nonexistent_appr")

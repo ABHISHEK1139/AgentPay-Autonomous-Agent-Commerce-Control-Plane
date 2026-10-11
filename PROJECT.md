@@ -33,10 +33,10 @@ AgentPay is an agent action-control and transaction platform enforcing determini
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
 | M1 | Component Bug Remediation & Model Gateway Resilience | Features 1–4 | none | DONE |
-| M2 | Purchase Orchestrator & Saga Coordinator Hardening | Features 5–7 | none | IN_PROGRESS |
-| M3 | Protocol Connectors & Adapters Hardening | Features 8–10 | none | PLANNED |
-| M4 | Payment Gateway & Webhook Connectors | Features 11–12 | none | PLANNED |
-| M5 | Frontend & Backend Contract Integration & Release Verification | Features 13–15 | M1, M2, M3, M4 | PLANNED |
+| M2 | Purchase Orchestrator & Saga Coordinator Hardening | Features 5–7 | none | DONE |
+| M3 | Protocol Connectors & Adapters Hardening | Features 8–10 | none | DONE |
+| M4 | Payment Gateway & Webhook Connectors | Features 11–12 | none | DONE |
+| M5 | Frontend & Backend Contract Integration & Release Verification | Features 13–15 | M1, M2, M3, M4 | DONE |
 
 ## Interface Contracts
 

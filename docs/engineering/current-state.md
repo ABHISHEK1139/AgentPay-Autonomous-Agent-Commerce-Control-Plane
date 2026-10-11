@@ -47,9 +47,9 @@ Verified command results:
 uv run ruff format --check .                                            160 files already formatted
 uv run ruff check .                                                     All checks passed!
 uv run mypy                                                             Success: no issues found in 140 source files
-uv run pytest                                                           700 passed in 9.14s
-node --test tests/web.test.mjs                                          5 passed in 262ms (incl. live API & §121 accessibility)
-uv run python tests/adversarial/stress_test_protocols.py                42/42 passed
+uv run pytest                                                           705 passed
+node --test tests/web.test.mjs                                          5 passed (incl. live API & §121 accessibility)
+uv run python tests/adversarial/stress_test_protocols.py                51/51 passed
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
 uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed

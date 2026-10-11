@@ -19,10 +19,10 @@ A full vertical slice is **implemented and verified** (independently re-run, not
 This section is the map of what actually exists:
 
 - **Gates, all green:** `ruff format --check` (160 files), `ruff check` (clean), `mypy --strict`
-  (140 files, clean), `pytest` (**700 passed, 0 failed, 0 skipped**). Tool versions are locked:
+  (140 files, clean), `pytest` (**705 passed, 0 failed, 0 skipped**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
 - **Auxiliary suites, all green:** 5 node web tests (`node --test tests/web.test.mjs`, including §121
-  ARIA accessibility, keyboard contracts, and authenticated live API client integration), 42/42 protocol
+  ARIA accessibility, keyboard contracts, and authenticated live API client integration), 51/51 protocol
   adversarial probes, 4/4 concurrency probes, 6/6 test-client privilege probes (including strict unconfigured
   fail-closed verification), 6/6 currency/money probes, 6/6 webhook replay/concurrency probes,
   9/9 SSRF & circuit breaker probes, 6/6 model gateway resilience probes, audit-chain verifier CLI
@@ -94,10 +94,10 @@ uv run pytest --hypothesis-show-statistics   # proves property tests really ran 
 Auxiliary verification suites (outside `pytest`; all verified green):
 
 ```powershell
-node --test tests/web.test.mjs                                           # 4 web tests (forwards to apps/web/tests/)
-uv run python tests/adversarial/stress_test_protocols.py                 # 42/42 adversarial probes
+node --test tests/web.test.mjs                                           # 5 web tests (forwards to apps/web/tests/)
+uv run python tests/adversarial/stress_test_protocols.py                 # 51/51 adversarial probes
 uv run python tests/adversarial/stress_test_concurrency.py               # 4/4 concurrency probes
-uv run python tests/adversarial/stress_test_client_privilege.py          # 5/5 least-privilege client probes
+uv run python tests/adversarial/stress_test_client_privilege.py          # 6/6 least-privilege client probes
 uv run python tests/adversarial/stress_test_money.py                     # 6/6 ISO 4217 currency & rational FX probes
 uv run python tests/adversarial/stress_test_webhooks.py                  # 6/6 HMAC webhook & replay probes
 uv run python tests/adversarial/stress_test_ssrf_resilience.py          # 9/9 SSRF & circuit breaker probes

@@ -69,6 +69,10 @@ class PaymentReconciler:
         self._repo.save(tenant_id, refreshed)
         return refreshed
 
+    def reconcile_timeout(self, attempt: PaymentAttempt) -> PaymentAttempt:
+        """Resolve a timeout attempt by querying the provider for BackgroundWorker compatibility (§43, §104)."""
+        return self.reconcile_unknown_payment(attempt.tenant_id, attempt.attempt_id)
+
     def reconcile_webhook_event(
         self,
         tenant_id: str,

@@ -115,11 +115,11 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
                 f"Unsupported x402 version '{version}'. Supported: {sorted(SUPPORTED_X402_VERSIONS)}"
             )
 
-        chal_id = str(raw_data.get("challenge_id", ""))
+        chal_id = str(raw_data.get("challenge_id", "")).strip()
         if not chal_id:
             raise MalformedPayloadError("Missing required field 'challenge_id'")
 
-        resource_uri = str(raw_data.get("resource_uri", raw_data.get("uri", "")))
+        resource_uri = str(raw_data.get("resource_uri", raw_data.get("uri", ""))).strip()
         if not resource_uri:
             raise MalformedPayloadError("Missing required field 'resource_uri'")
 
@@ -127,25 +127,35 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
             if raw_data.get(fld) is None:
                 raise MalformedPayloadError(f"Missing required field '{fld}' in x402 request")
 
-        try:
-            amt = int(raw_data["amount_minor"])
-            if amt < 0:
-                raise ValueError("amount_minor cannot be negative")
-        except (ValueError, TypeError) as err:
-            raise MalformedPayloadError(f"Invalid amount_minor: {err}") from err
+        for str_fld in ("principal_id", "agent_id", "tenant_id"):
+            val = str(raw_data[str_fld]).strip()
+            if not val:
+                raise MalformedPayloadError(f"Field '{str_fld}' cannot be empty")
 
-        curr = str(raw_data.get("currency", "INR")).upper()
+        raw_amt = raw_data["amount_minor"]
+        if isinstance(raw_amt, bool) or not isinstance(raw_amt, int):
+            raise MalformedPayloadError(
+                f"amount_minor must be an integer, got {type(raw_amt).__name__}"
+            )
+        if raw_amt < 0:
+            raise MalformedPayloadError("amount_minor cannot be negative")
+        amt = raw_amt
+
+        raw_curr = raw_data.get("currency", "INR")
+        if not isinstance(raw_curr, str) or not raw_curr.strip():
+            raise MalformedPayloadError("currency cannot be empty")
+        curr = raw_curr.strip().upper()
 
         return X402ChallengeRequest(
             x402_version=version,
             challenge_id=chal_id,
             resource_uri=resource_uri,
-            payee_id=str(raw_data.get("payee_id", "merchant_payee")),
+            payee_id=str(raw_data.get("payee_id", "merchant_payee")).strip(),
             amount_minor=amt,
             currency=curr,
-            agent_id=str(raw_data["agent_id"]),
-            principal_id=str(raw_data["principal_id"]),
-            tenant_id=str(raw_data["tenant_id"]),
+            agent_id=str(raw_data["agent_id"]).strip(),
+            principal_id=str(raw_data["principal_id"]).strip(),
+            tenant_id=str(raw_data["tenant_id"]).strip(),
             purpose=str(raw_data.get("purpose", f"HTTP 402 access for {resource_uri}")),
             timestamp=parse_iso_utc(raw_data.get("timestamp")),
             payment_scheme=str(raw_data.get("payment_scheme", "agentpay_direct")),

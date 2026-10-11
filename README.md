@@ -44,7 +44,7 @@ uv sync                             # create/update .venv from uv.lock
 uv run ruff format --check .        # format verification (160 files formatted)
 uv run ruff check .                 # lint (clean)
 uv run mypy                         # strict type check (140 source files clean)
-uv run pytest                       # 700 unit, property, chaos, persistence & adversarial tests pass
+uv run pytest                       # 705 unit, property, chaos, persistence & adversarial tests pass
 node --test tests/web.test.mjs      # 5 web control center suites pass (incl. live API client & §121 accessibility)
 ```
 

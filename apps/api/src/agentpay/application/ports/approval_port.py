@@ -28,6 +28,10 @@ class ApprovalRepository(Protocol):
         """List all approvals associated with an action within a tenant partition."""
         ...
 
+    def atomic_consume(self, tenant_id: str, approval_id: str) -> Approval:
+        """Atomically verify and transition approval to CONSUMED under lock/transaction (§20)."""
+        ...
+
 
 @runtime_checkable
 class DecisionEngine(Protocol):

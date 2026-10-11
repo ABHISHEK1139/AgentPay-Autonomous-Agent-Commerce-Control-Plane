@@ -10,10 +10,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from agentpay.application.ports.approval_port import ApprovalRepository
 from agentpay.domain.approval import (
     Approval,
+    ApprovalAlreadyConsumedError,
     ApprovalBinding,
     ApprovalStatus,
 )
-from agentpay.domain.errors import CrossTenantAccessError
+from agentpay.domain.errors import (
+    ApprovalBindingMismatchError,
+    CrossTenantAccessError,
+    InvalidCommerceError,
+)
 from agentpay.domain.money import Money
 from agentpay.infrastructure.database.models.approval import ApprovalModel
 from agentpay.infrastructure.database.repositories.base import BaseSqlAlchemyRepository
@@ -84,6 +89,34 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
             )
             models = session.scalars(stmt).all()
             return [self._to_domain(m) for m in models]
+
+    def atomic_consume(self, tenant_id: str, approval_id: str) -> Approval:
+        """Atomically verify and transition approval to CONSUMED under transaction (§20, §177 Vector 10)."""
+        with self._session() as session:
+            stmt = (
+                select(ApprovalModel)
+                .where(
+                    ApprovalModel.tenant_id == tenant_id,
+                    ApprovalModel.approval_id == approval_id,
+                )
+                .with_for_update()
+            )
+            model = session.scalar(stmt)
+            if model is None:
+                raise InvalidCommerceError(
+                    f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                )
+            if model.status == ApprovalStatus.CONSUMED.value:
+                raise ApprovalAlreadyConsumedError(
+                    f"Approval '{approval_id}' has already been consumed"
+                )
+            if model.status != ApprovalStatus.APPROVED.value:
+                raise ApprovalBindingMismatchError(
+                    f"Approval is in status '{model.status}', not APPROVED"
+                )
+            model.status = ApprovalStatus.CONSUMED.value
+            session.commit()
+            return self._to_domain(model)
 
     def _to_domain(self, model: ApprovalModel) -> Approval:
         req_at = model.requested_at

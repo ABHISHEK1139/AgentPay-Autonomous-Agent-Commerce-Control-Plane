@@ -262,3 +262,29 @@ def test_razorpay_webhook_signature_verification_and_parsing() -> None:
     # 4. Invalid signature raises RazorpayWebhookSignatureError
     with pytest.raises(RazorpayWebhookSignatureError):
         provider.parse_webhook_event(payload_bytes, "invalid_sig_hex")
+
+    # 5. Timestamp tolerance checking (§61)
+    now = int(time.time())
+    assert (
+        provider.verify_webhook_signature(
+            payload_bytes, sig, timestamp=now, tolerance_seconds=300, current_time=now
+        )
+        is True
+    )
+    # Expired timestamp (> 300s) rejected
+    assert (
+        provider.verify_webhook_signature(
+            payload_bytes, sig, timestamp=now - 305, tolerance_seconds=300, current_time=now
+        )
+        is False
+    )
+    # Parse with expired timestamp raises RazorpayWebhookSignatureError
+    with pytest.raises(RazorpayWebhookSignatureError):
+        provider.parse_webhook_event(
+            payload_bytes, sig, timestamp=now - 305, tolerance_seconds=300, current_time=now
+        )
+    # Parse with valid timestamp succeeds
+    parsed_with_ts = provider.parse_webhook_event(
+        payload_bytes, sig, timestamp=now, tolerance_seconds=300, current_time=now
+    )
+    assert parsed_with_ts["event_type"] == "payment.captured"

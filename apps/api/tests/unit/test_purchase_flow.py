@@ -13,6 +13,7 @@ Verifies the 7 core acceptance scenarios:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -71,7 +72,7 @@ from agentpay.domain.identity import (
     TenantStatus,
 )
 from agentpay.domain.money import Money
-from agentpay.domain.payments import OrderStatus, PaymentStatus
+from agentpay.domain.payments import OrderStatus, PaymentAttempt, PaymentStatus
 from agentpay.domain.policy import PolicyDecision, SpendingLimits
 
 
@@ -647,3 +648,131 @@ def test_scenario_7_privilege_escalation_denial() -> None:
     # Attempting to widen limits directly raises PrivilegeEscalationAttemptError
     with pytest.raises(PrivilegeEscalationAttemptError):
         current_perms.assert_no_escalation(proposed_perms)
+
+
+def test_saga_compensation_payment_creation_failure_releases_inventory() -> None:
+    """When create_payment raises an exception, SAGA compensation must release reserved inventory and audit ORDER_CANCELLED."""
+    (
+        orchestrator,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        inventory_repo,
+        payment_provider,
+        audit_ledger,
+        _,
+    ) = setup_orchestrator(tenant_id="tenant_01")
+
+    inv_before = inventory_repo.get("tenant_01", "var_01")
+    assert inv_before is not None
+    assert inv_before.available == 10
+    assert inv_before.reserved == 0
+
+    def failing_create_payment(*args: Any, **kwargs: Any) -> PaymentAttempt:
+        raise RuntimeError("Gateway connection dropped")
+
+    payment_provider.create_payment = failing_create_payment  # type: ignore[method-assign]
+
+    action = ActionRequest(
+        action_id="act_saga_pay_fail",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="saga payment failure test"),
+        amount=Money(129900, "INR"),
+        authorization_mode=AuthorizationMode.AUTONOMOUS,
+    )
+
+    with pytest.raises(RuntimeError, match="Gateway connection dropped"):
+        orchestrator.execute_purchase(
+            action=action,
+            tenant_id="tenant_01",
+            variant_id="var_01",
+            quantity=1,
+        )
+
+    # Verify inventory was compensated back to available
+    inv_after = inventory_repo.get("tenant_01", "var_01")
+    assert inv_after is not None
+    assert inv_after.available == 10
+    assert inv_after.reserved == 0
+
+    # Verify audit trail records compensation cancellation
+    events = audit_ledger.get_events("tenant_01")
+    cancel_events = [e for e in events if e.event_type == AuditEventType.ORDER_CANCELLED]
+    assert len(cancel_events) == 1
+    assert "Gateway connection dropped" in str(cancel_events[0].data.get("reason"))
+
+
+def test_saga_compensation_order_save_failure_refunds_and_releases_inventory() -> None:
+    """When order_repo.save raises an exception after payment capture, SAGA compensation must refund payment, release inventory, and audit ORDER_CANCELLED."""
+    (
+        orchestrator,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        inventory_repo,
+        payment_provider,
+        audit_ledger,
+        _,
+    ) = setup_orchestrator(tenant_id="tenant_01")
+
+    inv_before = inventory_repo.get("tenant_01", "var_01")
+    assert inv_before is not None
+    assert inv_before.available == 10
+    assert inv_before.reserved == 0
+
+    def failing_order_save(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Database storage exhausted")
+
+    assert orchestrator._order_repo is not None
+    orchestrator._order_repo.save = failing_order_save  # type: ignore[method-assign]
+
+    action = ActionRequest(
+        action_id="act_saga_order_fail",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="saga order failure test"),
+        amount=Money(129900, "INR"),
+        authorization_mode=AuthorizationMode.AUTONOMOUS,
+    )
+
+    with pytest.raises(RuntimeError, match="Database storage exhausted"):
+        orchestrator.execute_purchase(
+            action=action,
+            tenant_id="tenant_01",
+            variant_id="var_01",
+            quantity=1,
+        )
+
+    # Verify inventory was released
+    inv_after = inventory_repo.get("tenant_01", "var_01")
+    assert inv_after is not None
+    assert inv_after.available == 10
+    assert inv_after.reserved == 0
+
+    # Verify refund was executed on payment provider
+    refunds = list(payment_provider._refunds.values())
+    assert len(refunds) == 1
+    assert refunds[0].amount.minor_units == 129900
+
+    # Verify audit trail records order cancellation with failure reason
+    events = audit_ledger.get_events("tenant_01")
+    cancel_events = [e for e in events if e.event_type == AuditEventType.ORDER_CANCELLED]
+    assert len(cancel_events) == 1
+    assert "Database storage exhausted" in str(cancel_events[0].data.get("reason"))
