@@ -24,7 +24,7 @@ No claims by the authoring team were accepted on face value. Every boundary, con
 
 ### 1.1 Empirical Verification Corpus
 The audit verified the system across the complete test corpus on Python 3.12.10 (Windows PowerShell 5.1):
-- **736 tests under `apps/api/tests/unit`** passed cleanly with exit code 0 (`uv run pytest`):
+- **740 tests under `apps/api/tests/unit`** passed cleanly with exit code 0 (`uv run pytest`):
   unit, adversarial-threat-harness, failure-engineering, webhook security, ISO 4217 currency exponent, SQLAlchemy relational persistence (`test_database_persistence.py`), SSRF security (`test_ssrf.py`), Resilience circuit breaker & retry policy (`test_resilience.py`), ModelGateway & evaluation dataset (`test_model_gateway.py`, `test_model_evaluation.py`, `test_model_gateway_resilience_challenger.py`), Transactional Outbox & Background Workers (`test_outbox_worker.py`), Abuse Detection & Observability (`test_abuse_observability.py`), protocol boundaries (`test_protocols.py`), and SBOM generator validation (`test_sbom.py`).
 - **Hypothesis property-based tests**: completed full budgets across money, policy monotonicity, currency exponents, and cryptographic audit-chain tamper detection (`--hypothesis-show-statistics`).
 - **5 Web Control Center Test Suites** passed cleanly with exit code 0 (`node --test tests/web.test.mjs`, including §121 ARIA accessibility, live API client, and keyboard contracts).

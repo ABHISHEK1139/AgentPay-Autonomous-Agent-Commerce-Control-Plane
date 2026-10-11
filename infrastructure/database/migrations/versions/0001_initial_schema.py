@@ -132,6 +132,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("dispatched_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("error_message", sa.Text(), nullable=True),
+        sa.Column("locked_by", sa.String(length=64), nullable=True),
+        sa.Column("locked_until", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
         sa.PrimaryKeyConstraint("tenant_id", "event_id"),
     )
     op.create_index("ix_outbox_events_created", "outbox_events", ["created_at"], unique=False)
@@ -141,6 +144,12 @@ def upgrade() -> None:
     op.create_index(op.f("ix_outbox_events_status"), "outbox_events", ["status"], unique=False)
     op.create_index(
         "ix_outbox_events_tenant_status", "outbox_events", ["tenant_id", "status"], unique=False
+    )
+    op.create_index(
+        "ix_outbox_events_status_locked_until",
+        "outbox_events",
+        ["status", "locked_until"],
+        unique=False,
     )
     op.create_table(
         "payment_attempts",
@@ -402,6 +411,7 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_payment_attempts_intent_id"), table_name="payment_attempts")
     op.drop_index(op.f("ix_payment_attempts_idempotency_key"), table_name="payment_attempts")
     op.drop_table("payment_attempts")
+    op.drop_index("ix_outbox_events_status_locked_until", table_name="outbox_events")
     op.drop_index("ix_outbox_events_tenant_status", table_name="outbox_events")
     op.drop_index(op.f("ix_outbox_events_status"), table_name="outbox_events")
     op.drop_index(op.f("ix_outbox_events_event_type"), table_name="outbox_events")

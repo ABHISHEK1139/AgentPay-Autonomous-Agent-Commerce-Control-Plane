@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class BackgroundWorker:
-    """Unified background worker running outbox dispatching and reconciliation jobs (§104)."""
+    """Unified background worker running outbox dispatching and reconciliation jobs (§104, §105, §106)."""
 
     def __init__(
         self,
@@ -28,6 +29,8 @@ class BackgroundWorker:
         approval_repo: Any | None = None,
         approval_ttl_seconds: int = 3600,
         payment_timeout_seconds: int = 300,
+        worker_id: str | None = None,
+        outbox_lease_seconds: int = 30,
     ) -> None:
         self.outbox_repo = outbox_repo
         self.event_bus = event_bus or EventBus()
@@ -36,9 +39,18 @@ class BackgroundWorker:
         self.approval_repo = approval_repo
         self.approval_ttl_seconds = approval_ttl_seconds
         self.payment_timeout_seconds = payment_timeout_seconds
+        self.worker_id = worker_id or f"wrk_{uuid.uuid4().hex[:12]}"
+        self.outbox_lease_seconds = outbox_lease_seconds
 
         self.dispatcher = (
-            OutboxDispatcher(self.outbox_repo, self.event_bus) if self.outbox_repo else None
+            OutboxDispatcher(
+                self.outbox_repo,
+                self.event_bus,
+                worker_id=self.worker_id,
+                lease_seconds=self.outbox_lease_seconds,
+            )
+            if self.outbox_repo
+            else None
         )
 
         self._running = False

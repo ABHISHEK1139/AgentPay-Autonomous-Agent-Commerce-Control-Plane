@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
@@ -384,3 +385,187 @@ def test_standalone_agentpay_worker_runtime() -> None:
     assert updated_app is not None
     assert updated_app.status == ApprovalStatus.REJECTED
     assert "expired" in (updated_app.reason or "").lower()
+
+
+def test_b_out_01_concurrent_workers_prevent_duplicate_delivery() -> None:
+    """B-OUT-01: Multiple concurrent workers claiming outbox events never duplicate deliveries (§106)."""
+    import concurrent.futures
+
+    repo = InMemoryOutboxRepository()
+    event_bus = EventBus()
+
+    # Stage 50 outbox events
+    for i in range(50):
+        repo.save(
+            OutboxEvent(
+                tenant_id="tenant_dist",
+                event_type="order.created",
+                aggregate_type="order",
+                aggregate_id=f"ord_{i:03d}",
+                payload={"order_idx": i},
+            )
+        )
+
+    published_events: list[str] = []
+    bus_lock = threading.Lock()
+
+    def subscriber(evt: OutboxEvent) -> None:
+        with bus_lock:
+            published_events.append(evt.aggregate_id)
+
+    event_bus.subscribe("order.created", subscriber)
+
+    # 10 concurrent worker dispatchers racing on the same outbox
+    def worker_run(worker_idx: int) -> int:
+        dispatcher = OutboxDispatcher(
+            repo,
+            event_bus,
+            worker_id=f"worker_pod_{worker_idx}",
+            lease_seconds=30,
+        )
+        dispatched, _ = dispatcher.dispatch_batch(limit=20)
+        return dispatched
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(worker_run, i) for i in range(10)]
+        results = [f.result() for f in futures]
+
+    # Exactly 50 events must have been dispatched across all workers
+    assert sum(results) == 50
+    assert len(published_events) == 50
+    # Zero duplicates
+    assert len(set(published_events)) == 50
+    assert repo.count("tenant_dist", OutboxStatus.DISPATCHED) == 50
+    assert repo.count("tenant_dist", OutboxStatus.PENDING) == 0
+
+
+def test_b_out_01_worker_lease_expiration_and_recovery() -> None:
+    """B-OUT-01: Stalled or crashed worker lease expires, allowing standby worker to recover event (§105, §106)."""
+    repo = InMemoryOutboxRepository()
+    now = datetime.now(UTC)
+
+    event = OutboxEvent(
+        tenant_id="tenant_rec",
+        event_type="payment.captured",
+        aggregate_type="payment",
+        aggregate_id="pay_99",
+        payload={"amount": 5000},
+    )
+    repo.save(event)
+
+    # Worker 1 claims with 10-second lease
+    claimed_w1 = repo.claim_pending(worker_id="worker_1", lease_seconds=10, at=now)
+    assert len(claimed_w1) == 1
+    assert claimed_w1[0].status == OutboxStatus.PROCESSING
+    assert claimed_w1[0].locked_by == "worker_1"
+
+    # Worker 2 immediately tries to claim at now + 5s -> blocked by active lease
+    claimed_w2_early = repo.claim_pending(
+        worker_id="worker_2",
+        lease_seconds=10,
+        at=now + timedelta(seconds=5),
+    )
+    assert len(claimed_w2_early) == 0
+
+    # Worker 1 crashes. Standby Worker 2 polls at now + 15s (after lease expired)
+    claimed_w2_recovered = repo.claim_pending(
+        worker_id="worker_2",
+        lease_seconds=10,
+        at=now + timedelta(seconds=15),
+    )
+    assert len(claimed_w2_recovered) == 1
+    assert claimed_w2_recovered[0].status == OutboxStatus.PROCESSING
+    assert claimed_w2_recovered[0].locked_by == "worker_2"
+
+
+def test_b_out_01_exponential_backoff_and_dead_letter() -> None:
+    """B-OUT-01: Failed dispatch applies exponential backoff delay and moves to FAILED on max retries (§106)."""
+    event = OutboxEvent(
+        tenant_id="tenant_bo",
+        event_type="test.event",
+        aggregate_type="test",
+        aggregate_id="t1",
+        payload={},
+        max_retries=3,
+    )
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    # 1. First failure -> delay = 2^0 * 2s = 2s
+    event.record_failure("error 1", backoff_base_seconds=2.0, at=t0)
+    assert str(event.status) == OutboxStatus.PENDING
+    assert event.retry_count == 1
+    assert event.next_retry_at == t0 + timedelta(seconds=2)
+    assert event.is_claimable(at=t0 + timedelta(seconds=1)) is False
+    assert event.is_claimable(at=t0 + timedelta(seconds=2)) is True
+
+    # 2. Second failure -> delay = 2^1 * 2s = 4s
+    t1 = t0 + timedelta(seconds=2)
+    event.record_failure("error 2", backoff_base_seconds=2.0, at=t1)
+    assert str(event.status) == OutboxStatus.PENDING
+    assert event.retry_count == 2
+    assert event.next_retry_at == t1 + timedelta(seconds=4)
+    assert event.is_claimable(at=t1 + timedelta(seconds=3)) is False
+    assert event.is_claimable(at=t1 + timedelta(seconds=4)) is True
+
+    # 3. Third failure -> reaches max_retries=3 -> Dead Letter (FAILED)
+    t2 = t1 + timedelta(seconds=4)
+    event.record_failure("error 3", backoff_base_seconds=2.0, at=t2)
+    assert str(event.status) == OutboxStatus.FAILED
+    assert bool(event.can_retry) is False
+    nra: datetime | None = event.next_retry_at
+    assert nra is None
+    assert bool(event.is_claimable(at=t2 + timedelta(days=1))) is False
+
+
+def test_b_out_01_sqlalchemy_outbox_leasing_and_concurrency() -> None:
+    """B-OUT-01: SqlAlchemyOutboxRepository enforces atomic claiming, lease recovery, and backoffs (§49, §106)."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    repo = SqlAlchemyOutboxRepository(session_factory)
+
+    now = datetime.now(UTC)
+    evt = OutboxEvent(
+        tenant_id="tenant_sql_lease",
+        event_type="test.sql",
+        aggregate_type="test",
+        aggregate_id="s1",
+        payload={"k": "v"},
+        max_retries=2,
+    )
+    repo.save("tenant_sql_lease", evt)
+
+    # Worker 1 claims
+    c1 = repo.claim_pending("sql_worker_1", lease_seconds=10, at=now)
+    assert len(c1) == 1
+    assert c1[0].status == OutboxStatus.PROCESSING
+
+    # Worker 2 blocked during lease
+    c2 = repo.claim_pending("sql_worker_2", lease_seconds=10, at=now + timedelta(seconds=5))
+    assert len(c2) == 0
+
+    # Worker 2 recovers after lease expiry
+    c3 = repo.claim_pending("sql_worker_2", lease_seconds=10, at=now + timedelta(seconds=15))
+    assert len(c3) == 1
+    assert c3[0].event_id == evt.event_id
+
+    # Record failure with backoff
+    repo.record_failure(
+        "tenant_sql_lease",
+        evt.event_id,
+        "transient broker error",
+        backoff_base_seconds=2.0,
+        at=now + timedelta(seconds=15),
+    )
+    # Check that it's unclaimable before next_retry_at
+    c4 = repo.claim_pending("sql_worker_2", at=now + timedelta(seconds=16))
+    assert len(c4) == 0
+
+    # Eligible after next_retry_at (15 + 2 = 17s)
+    c5 = repo.claim_pending("sql_worker_2", at=now + timedelta(seconds=18))
+    assert len(c5) == 1
+
+    # Final mark_dispatched
+    repo.mark_dispatched("tenant_sql_lease", evt.event_id)
+    assert repo.count("tenant_sql_lease", OutboxStatus.DISPATCHED) == 1
+    assert repo.count("tenant_sql_lease", OutboxStatus.PENDING) == 0

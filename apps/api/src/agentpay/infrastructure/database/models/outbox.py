@@ -35,10 +35,14 @@ class OutboxEventModel(Base):
     )
     dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("ix_outbox_events_tenant_status", "tenant_id", "status"),
         Index("ix_outbox_events_created", "created_at"),
+        Index("ix_outbox_events_status_locked_until", "status", "locked_until"),
     )
 
     def to_domain(self) -> OutboxEvent:
@@ -50,6 +54,14 @@ class OutboxEventModel(Base):
         dat = self.dispatched_at
         if dat is not None and dat.tzinfo is None:
             dat = dat.replace(tzinfo=UTC)
+
+        lu = self.locked_until
+        if lu is not None and lu.tzinfo is None:
+            lu = lu.replace(tzinfo=UTC)
+
+        nra = self.next_retry_at
+        if nra is not None and nra.tzinfo is None:
+            nra = nra.replace(tzinfo=UTC)
 
         raw_payload: Any = self.payload
         payload_dict = dict(raw_payload) if isinstance(raw_payload, dict) else {}
@@ -67,6 +79,9 @@ class OutboxEventModel(Base):
             created_at=cat,
             dispatched_at=dat,
             error_message=self.error_message,
+            locked_by=self.locked_by,
+            locked_until=lu,
+            next_retry_at=nra,
         )
 
     @classmethod
@@ -86,4 +101,7 @@ class OutboxEventModel(Base):
             created_at=event.created_at,
             dispatched_at=event.dispatched_at,
             error_message=event.error_message,
+            locked_by=event.locked_by,
+            locked_until=event.locked_until,
+            next_retry_at=event.next_retry_at,
         )

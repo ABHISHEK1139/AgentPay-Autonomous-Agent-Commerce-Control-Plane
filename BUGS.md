@@ -20,8 +20,8 @@ it is recorded so nobody wastes time re-investigating it.
 | B-CODE-01 | MEDIUM | `assert` used as a production control; removed under `python -O` | **Fixed & Verified** |
 | B-WH-03 | MEDIUM | Hardcoded `"tenant_01"` fallback attributes webhooks to one tenant | **Fixed & Verified** |
 | B-WH-04 | MEDIUM | Replay keys are per-tenant, not per-event | **Fixed & Verified** |
-| B-DOC-01 | MEDIUM | `AGENTS.md` states stale gate counts (714/141 vs actual 736/167) | **Fixed & Verified** |
-| B-OUT-01 | LOW (suspected) | Outbox `list_pending` has no claim/lease — duplicate delivery possible | Needs runtime proof |
+| B-DOC-01 | MEDIUM | Documentation states stale gate counts (updated to 740 passed) | **Fixed & Verified** |
+| B-OUT-01 | LOW | Outbox worker concurrency lacked atomic claiming, leasing, and crash recovery | **Fixed & Verified** |
 | B-SBOM-01 | LOW | Sprint 15 claimed SBOM; no SBOM/CycloneDX code exists | **Fixed & Verified** |
 | B-A11Y-01 | LOW | Frontend has ARIA attributes but zero keyboard handlers (§121) | **Fixed & Verified** |
 | B-PAUSE-01 | MEDIUM | Emergency pause `scope` is accepted but ignored — scoped pause halts all tenants | **Fixed & Verified** |
@@ -157,7 +157,7 @@ Verified by: `test_b_wh_04_cross_tenant_event_replay_defense` in `test_webhooks.
 ### Resolution (Fixed & Verified)
 
 All repository documentation has been synchronized with exact measured gate command outputs:
-- `pytest`: **736 passed** (0 failed, 0 skipped)
+- `pytest`: **740 passed** (0 failed, 0 skipped)
 - `mypy`: **167 source files** (0 issues)
 - `ruff format`: **175 files** clean
 - `web tests`: **5 passed**
@@ -166,22 +166,37 @@ Updated in: `AGENTS.md`, `README.md`, `docs/engineering/current-state.md`, `docs
 
 ---
 
-## B-OUT-01 — Outbox polling has no claim or lease mechanism
+## B-OUT-01 — Outbox worker concurrency lacked atomic claiming, leasing, and crash recovery
 
-**Severity: LOW (suspected — not reproduced at runtime)** · §105, §106 · **Status: Needs proof**
+**Severity: LOW** · §105, §106 · **Status: Fixed & Verified**
 
-`infrastructure/database/repositories/outbox_repository.py:68`:
+### Problem
 
-```sql
-SELECT ... FROM outbox_events WHERE status = ? ORDER BY created_at LIMIT ? OFFSET ?
-```
+`OutboxRepository.list_pending()` fetched pending rows without an atomic claim, worker lease, or
+status transition. In multi-worker or multi-process deployments, multiple concurrent background
+pollers could claim identical events concurrently and publish duplicate events to downstream message
+buses. Furthermore, worker crashes mid-dispatch had no lease expiration mechanism, and retries lacked
+exponential backoff, risking hot-loop retry exhaustion.
 
-`list_pending` returns pending rows with no claim, lease, `FOR UPDATE SKIP LOCKED`, or status
-transition. Multiple concurrent pollers can receive the same event and both publish it.
+### Resolution (Fixed & Verified)
 
-**Not reproduced**: the threaded probe used separate in-memory SQLite connections, which do not share
-a database, so each poller saw an empty table. The finding rests on code reading and needs a runtime
-reproduction against a shared database.
+1. Extended `OutboxEvent` with `OutboxStatus.PROCESSING`, worker lock assignment (`locked_by`, `locked_until`),
+   and exponential backoff retry scheduling (`next_retry_at`).
+2. Implemented atomic `claim_pending(worker_id, lease_seconds, tenant_id, limit, at)` across both
+   `InMemoryOutboxRepository` and SQLAlchemy `SqlAlchemyOutboxRepository` (tested on SQLite).
+3. Added automatic crashed worker lease reclamation: if a worker node crashes mid-dispatch, another
+   worker claims events whose `locked_until < now`.
+4. Added exponential backoff (`delay = 2^(retry_count - 1) * backoff_base_seconds`) on `record_failure()`,
+   clearing the lease and preventing retry spam until `next_retry_at` elapses; dead-letters when `max_retries` is exceeded.
+5. Added database schema migration (`0001_initial_schema.py`) and index `ix_outbox_events_status_locked_until`
+   for high-performance lease claiming.
+6. Updated `OutboxDispatcher` and `BackgroundWorker` across both `agentpay.workers` and `agentpay_worker`.
+
+Verified by: 4 new empirical tests in `apps/api/tests/unit/test_outbox_worker.py`:
+- `test_b_out_01_concurrent_workers_prevent_duplicate_delivery` (10 workers racing on 50 events; 0 duplicates)
+- `test_b_out_01_worker_lease_expiration_and_recovery` (stalled worker lease expires and standby worker claims)
+- `test_b_out_01_exponential_backoff_and_dead_letter` (backoff delay progression and terminal dead-lettering)
+- `test_b_out_01_sqlalchemy_outbox_leasing_and_concurrency` (SQLAlchemy 2.0 relational models & SQLite).
 
 ---
 
