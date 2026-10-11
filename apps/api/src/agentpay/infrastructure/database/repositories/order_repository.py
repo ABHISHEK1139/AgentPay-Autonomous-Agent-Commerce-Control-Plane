@@ -29,6 +29,17 @@ class SqlAlchemyOrderRepository(BaseSqlAlchemyRepository, OrderRepository):
                 return None
             return model.to_domain()
 
+    def find_by_payment_attempt(self, tenant_id: str, attempt_id: str) -> Order | None:
+        with self._session() as session:
+            stmt = select(OrderModel).where(
+                OrderModel.tenant_id == tenant_id,
+                (OrderModel.payment_attempt_id == attempt_id) | (OrderModel.order_id == attempt_id),
+            )
+            model = session.scalar(stmt)
+            if model is None:
+                return None
+            return model.to_domain()
+
     def save(self, tenant_id_or_order: str | Order, order: Order | None = None) -> None:
         """Persist or update an order entity.
 

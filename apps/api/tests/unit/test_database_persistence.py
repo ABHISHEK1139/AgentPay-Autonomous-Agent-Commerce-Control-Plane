@@ -359,6 +359,14 @@ def test_order_repository_roundtrip(session_factory: sessionmaker[Session]) -> N
     assert updated_order.status == OrderStatus.CONFIRMED
     assert updated_order.payment_attempt_id == "att_pay_555"
 
+    # Find by payment attempt (§41, B-REC-01)
+    by_attempt = order_repo.find_by_payment_attempt("tenant_orders", "att_pay_555")
+    assert by_attempt is not None
+    assert by_attempt.order_id == "ord_987654"
+    assert by_attempt.payment_attempt_id == "att_pay_555"
+    assert order_repo.find_by_payment_attempt("tenant_other", "att_pay_555") is None
+    assert order_repo.find_by_payment_attempt("tenant_orders", "nonexistent_attempt") is None
+
     # List for buyer
     buyer_orders = order_repo.list_for_buyer("tenant_orders", "buyer_alice")
     assert len(buyer_orders) == 1

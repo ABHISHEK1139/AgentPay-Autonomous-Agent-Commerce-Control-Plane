@@ -71,6 +71,10 @@ class OrderRepository(Protocol):
         """Retrieve an order by ID."""
         ...
 
+    def find_by_payment_attempt(self, tenant_id: str, attempt_id: str) -> Order | None:
+        """Retrieve an order associated with a specific payment attempt ID (§41, B-REC-01)."""
+        ...
+
     def save(self, tenant_id: str, order: Order) -> None:
         """Persist or update an order."""
         ...

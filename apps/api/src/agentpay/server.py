@@ -69,6 +69,17 @@ def create_request_handler(
         def do_DELETE(self) -> None:
             self._handle_request("DELETE")
 
+        def _drain_and_close(self) -> None:
+            self.close_connection = True
+            try:
+                self.connection.setblocking(False)
+                while True:
+                    chunk = self.connection.recv(4096)
+                    if not chunk:
+                        break
+            except Exception:
+                pass
+
         def _handle_request(self, method: str) -> None:
             clean_path = self.path.split("?")[0]
 
@@ -112,7 +123,7 @@ def create_request_handler(
                 self.end_headers()
                 self.wfile.write(resp_bytes)
                 self.wfile.flush()
-                self.close_connection = True
+                self._drain_and_close()
                 return
 
             if content_length > MAX_REQUEST_BODY_BYTES:
@@ -132,7 +143,7 @@ def create_request_handler(
                 self.end_headers()
                 self.wfile.write(resp_bytes)
                 self.wfile.flush()
-                self.close_connection = True
+                self._drain_and_close()
                 return
 
             json_body: dict[str, Any] | None = None

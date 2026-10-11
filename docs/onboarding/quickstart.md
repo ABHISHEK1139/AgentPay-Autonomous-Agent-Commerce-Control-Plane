@@ -225,7 +225,7 @@ AgentPay maintains a zero-tolerance policy for test failures, lint errors, or ty
 uv run ruff format --check .       # Code style
 uv run ruff check .                # Lint rules
 uv run mypy                        # Strict static type checking (0 errors across 167 files)
-uv run pytest                      # 740 unit, property, chaos, persistence & live socket tests
+uv run pytest                      # 745 unit, property, chaos, persistence & live socket tests
 node --test tests/web.test.mjs     # 5 Control Center web tests (ARIA §121 & live client)
 ```
 

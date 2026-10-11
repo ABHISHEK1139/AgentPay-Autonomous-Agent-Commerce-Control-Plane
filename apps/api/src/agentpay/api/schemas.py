@@ -51,6 +51,7 @@ class ActionSubmissionRequest:
     quantity: int = 1
     idempotency_key: str | None = None
     authorization_mode: str = "AUTONOMOUS"
+    approval_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

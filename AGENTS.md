@@ -19,7 +19,7 @@ A full vertical slice is **implemented and verified** (independently re-run, not
 This section is the map of what actually exists:
 
 - **Gates, all green:** `ruff format --check` (175 files), `ruff check` (clean), `mypy --strict`
-  (167 files, clean), `pytest` (**740 passed, 0 failed, 0 skipped**). Tool versions are locked:
+  (167 files, clean), `pytest` (**745 passed, 0 failed, 0 skipped**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
 - **Auxiliary suites, all green:** 5 node web tests (`node --test tests/web.test.mjs`, including §121
   ARIA accessibility, keyboard contracts, and authenticated live API client integration), 70/70 protocol

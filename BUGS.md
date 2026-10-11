@@ -20,7 +20,7 @@ it is recorded so nobody wastes time re-investigating it.
 | B-CODE-01 | MEDIUM | `assert` used as a production control; removed under `python -O` | **Fixed & Verified** |
 | B-WH-03 | MEDIUM | Hardcoded `"tenant_01"` fallback attributes webhooks to one tenant | **Fixed & Verified** |
 | B-WH-04 | MEDIUM | Replay keys are per-tenant, not per-event | **Fixed & Verified** |
-| B-DOC-01 | MEDIUM | Documentation states stale gate counts (updated to 740 passed) | **Fixed & Verified** |
+| B-DOC-01 | MEDIUM | Documentation states stale gate counts (updated to 745 passed) | **Fixed & Verified** |
 | B-OUT-01 | LOW | Outbox worker concurrency lacked atomic claiming, leasing, and crash recovery | **Fixed & Verified** |
 | B-SBOM-01 | LOW | Sprint 15 claimed SBOM; no SBOM/CycloneDX code exists | **Fixed & Verified** |
 | B-A11Y-01 | LOW | Frontend has ARIA attributes but zero keyboard handlers (§121) | **Fixed & Verified** |
@@ -31,6 +31,11 @@ it is recorded so nobody wastes time re-investigating it.
 | B-RED-01 | HIGH | Audit redaction is case-sensitive with a 6-key set — `CVV`, `CardNumber`, `PAN`, `cvc`, `expiry` leak into the immutable ledger | **Fixed & Verified** |
 | B-PROTO-01 | LOW | Malformed protocol input raises `AttributeError` → HTTP 500 instead of 400 | **Fixed & Verified** |
 | B-BUD-01 | LOW | Token budget over-release erases usage; `has_budget` disagrees with `acquire` | **Fixed & Verified** |
+| B-AUTH-02 | **CRITICAL** | `execute_approved_purchase` executes without validating agent active lifecycle or category permissions | **Fixed & Verified** |
+| B-DRIFT-01 | HIGH | `execute_approved_purchase` does not re-verify live catalog price, stock, or evidence conflicts | **Fixed & Verified** |
+| B-REC-01 | MEDIUM | Webhook reconciliation relies on private attribute sniffing `hasattr(self._order_repo, "_orders")` | **Fixed & Verified** |
+| B-API-01 | MEDIUM | Non-dict JSON bodies on mutating endpoints raise bare `AttributeError` → HTTP 500 instead of HTTP 422 | **Fixed & Verified** |
+| B-API-02 | MEDIUM | Approved purchase execution lacked dedicated API endpoint and schema mapping | **Fixed & Verified** |
 
 ---
 
@@ -157,7 +162,7 @@ Verified by: `test_b_wh_04_cross_tenant_event_replay_defense` in `test_webhooks.
 ### Resolution (Fixed & Verified)
 
 All repository documentation has been synchronized with exact measured gate command outputs:
-- `pytest`: **740 passed** (0 failed, 0 skipped)
+- `pytest`: **745 passed** (0 failed, 0 skipped)
 - `mypy`: **167 source files** (0 issues)
 - `ruff format`: **175 files** clean
 - `web tests`: **5 passed**
@@ -469,6 +474,101 @@ Verified by: `test_token_budget_tracker_prevents_over_release_and_enforces_cost_
 
 ---
 
+## B-AUTH-02 — `execute_approved_purchase` executes without validating agent active lifecycle or permissions
+
+**Severity: CRITICAL** · §14, §15, §16, §20 · **Status: Fixed & Verified**
+
+### Problem
+
+In `PurchaseOrchestrator.execute_approved_purchase`, the orchestrator consumed the approval token and directly initiated checkout without performing any agent identity, lifecycle status, or permission checks. If an agent was revoked, suspended, terminated, or quarantined between approval and execution, or if its permissions were revoked, the transaction still proceeded to execution, violating §14 and §15.
+
+### Resolution (Fixed & Verified)
+
+In `PurchaseOrchestrator.execute_approved_purchase`:
+- Look up the agent via `_agent_repo.find_by_id(tenant_id, agent_id)` and fail closed with `PolicyDecision.DENY` and `ActionStatus.FAILED` if missing.
+- Validate active lifecycle status using `_auth_service.validate_agent_active(agent)` to reject revoked, suspended, expired, or quarantined agents.
+- Validate permission capability using `_auth_service.authorize_action(agent, request.action)` and verify category permissions `perms.allows_category(...)`.
+- Emit security events and audit entries for unauthorized or inactive agent execution attempts.
+
+Verified by: `test_b_auth_02_revoked_or_suspended_agent_approved_purchase_denied` in `apps/api/tests/unit/test_purchase_flow.py`.
+
+---
+
+## B-DRIFT-01 — `execute_approved_purchase` does not re-verify live catalog price, stock, or evidence conflicts
+
+**Severity: HIGH** · §2.4, §30, §32, §33 · **Status: Fixed & Verified**
+
+### Problem
+
+When human approval is granted, an arbitrary amount of time can elapse before execution. During this window, product prices can change (catalog price drift), inventory can deplete, or conflicting evidence can emerge. `execute_approved_purchase` previously trusted the snapshot data inside the `ActionRequest` without querying the live catalog or running `EvidenceConflictDetector`. This allowed purchases at stale, drifted prices or against out-of-stock items.
+
+### Resolution (Fixed & Verified)
+
+In `PurchaseOrchestrator.execute_approved_purchase`:
+- Query live product and variant details from `_catalog_repo`. If the product or variant is missing or removed, fail closed.
+- Verify live variant price against the action request amount (`live_variant.price != request.amount`). Any discrepancy (even 1 minor unit / paise) fails closed with `ActionStatus.FAILED`.
+- Verify inventory availability against requested quantity (`inv.available < 1`).
+- Run `EvidenceConflictDetector.detect_all_conflicts(...)` across snapshots and fail closed if conflicts are detected.
+
+Verified by: `test_b_drift_01_catalog_price_drift_approved_purchase_denied` in `apps/api/tests/unit/test_purchase_flow.py`.
+
+---
+
+## B-REC-01 — Webhook reconciliation relies on private attribute sniffing `hasattr(self._order_repo, "_orders")`
+
+**Severity: MEDIUM** · §8, §41, §44 · **Status: Fixed & Verified**
+
+### Problem
+
+`PaymentReconciler.reconcile_webhook_event` attempted to resolve an order by payment attempt ID by checking `if hasattr(self._order_repo, "_orders"): for o in self._order_repo._orders.values(): ...`. This broke the repository port abstraction (§8), failing silently when using `SqlAlchemyOrderRepository` or any non-in-memory storage engine.
+
+### Resolution (Fixed & Verified)
+
+- Added `find_by_payment_attempt(tenant_id: str, attempt_id: str) -> Order | None` to the `OrderRepository` port protocol in `application/ports/payment_port.py`.
+- Implemented `find_by_payment_attempt` in `InMemoryOrderRepository` and `SqlAlchemyOrderRepository`.
+- Updated `PaymentReconciler` to call `self._order_repo.find_by_payment_attempt(tenant_id, payment_attempt_id)`.
+
+Verified by: `test_b_rec_01_webhook_reconciliation_resolves_order_via_find_by_payment_attempt` in `apps/api/tests/unit/test_webhooks.py` and `test_order_repository_roundtrip` in `apps/api/tests/unit/test_database_persistence.py`.
+
+---
+
+## B-API-01 — Non-dict JSON bodies on mutating endpoints raise bare `AttributeError`
+
+**Severity: MEDIUM** · §13 · **Status: Fixed & Verified**
+
+### Problem
+
+When a client sent a valid JSON body that was not an object (e.g. `[1, 2, 3]`, `"hello"`, or `123`), `AgentPayApiApp._dispatch` called `body.get(...)` assuming a dict. This raised an unhandled `AttributeError` caught by the outermost fallback shield and returned HTTP 500 `INTERNAL_ERROR` instead of a client error HTTP 422 `UNPROCESSABLE_ENTITY` (or HTTP 400 `INVALID_PAYLOAD` on webhooks).
+
+### Resolution (Fixed & Verified)
+
+- In `AgentPayApiApp._dispatch`, added validation ensuring `body` is an instance of `dict` for mutating methods (`POST`, `PUT`, `PATCH`) with non-empty payloads.
+- Returns HTTP 422 `INVALID_REQUEST_BODY` ("Request body must be a JSON object") for API routes, and HTTP 400 `INVALID_PAYLOAD` for payment webhooks.
+- Updated `body` type signature across `handle_request`, `handle_request_with_headers`, and `ApiTestClient` to `Any` to properly support and type-check negative payload tests.
+
+Verified by: `test_b_api_01_non_dict_json_body_returns_422` in `apps/api/tests/unit/test_api.py`.
+
+---
+
+## B-API-02 — Approved purchase execution lacked dedicated API endpoint and schema mapping
+
+**Severity: MEDIUM** · §20, §66 · **Status: Fixed & Verified**
+
+### Problem
+
+Although `PurchaseOrchestrator.execute_approved_purchase` existed at the use case layer, the HTTP API lacked a route to trigger execution of an approved action. Clients had no way via HTTP to execute an action once approved by a human approver. Additionally, submitting an action with an `approval_id` was unmapped in the API schema.
+
+### Resolution (Fixed & Verified)
+
+- Added `POST /api/v1/approvals/{id}/execute` endpoint to `AgentPayApiApp`.
+- Added optional `approval_id: str | None = None` to `ActionSubmissionRequest`.
+- Added routing in `POST /api/v1/actions` and `POST /agent/actions` to dispatch to `execute_approved_purchase` when `approval_id` is provided.
+- Added API error handling mapping `ApprovalNotFoundError` to 404, `ApprovalAlreadyConsumedError` to 409, and `ApprovalBindingMismatchError` to 422.
+
+Verified by: `test_b_api_02_execute_approved_purchase_via_api` in `apps/api/tests/unit/test_api.py`.
+
+---
+
 ## Verification environment
 
 Windows, PowerShell 5.1, Python 3.12.10, uv 0.12.22, ruff 0.16.10, mypy 2.4.0, pytest 9.1.1.
@@ -476,4 +576,4 @@ Docker daemon is **not running**, so persistence tests use SQLite in-memory; Pos
 behaviour is unverified. No external security assessment has been performed.
 
 Gates at time of writing: `ruff format` 175 files clean, `ruff check` clean, `mypy` 167 files clean,
-`pytest` 740 passed / 0 skipped.
+`pytest` 745 passed / 0 skipped.

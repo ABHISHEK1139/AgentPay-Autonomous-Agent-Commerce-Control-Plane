@@ -132,14 +132,17 @@ class PaymentReconciler:
             ).strip()
             if order_id:
                 order = self._order_repo.get(tenant_id, order_id)
-            if order is None and hasattr(self._order_repo, "_orders"):
-                for candidate in self._order_repo._orders.get(tenant_id, {}).values():
-                    if (
-                        candidate.payment_attempt_id == attempt_id
-                        or candidate.order_id == attempt_id
-                    ):
-                        order = candidate
-                        break
+            if order is None:
+                if hasattr(self._order_repo, "find_by_payment_attempt"):
+                    order = self._order_repo.find_by_payment_attempt(tenant_id, attempt_id)
+                elif hasattr(self._order_repo, "_orders"):
+                    for candidate in self._order_repo._orders.get(tenant_id, {}).values():
+                        if (
+                            candidate.payment_attempt_id == attempt_id
+                            or candidate.order_id == attempt_id
+                        ):
+                            order = candidate
+                            break
 
         refund: Refund | None = None
 

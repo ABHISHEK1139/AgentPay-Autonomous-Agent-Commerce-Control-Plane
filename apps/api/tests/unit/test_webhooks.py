@@ -1037,3 +1037,57 @@ def test_b_sbom_01_api_endpoint() -> None:
     assert "sbom" in resp.body
     assert "provenance" in resp.body
     assert resp.body["provenance"]["_type"] == "https://in-toto.io/Statement/v1"
+
+
+def test_b_rec_01_webhook_reconciliation_resolves_order_via_find_by_payment_attempt() -> None:
+    """B-REC-01 Regression Test: Webhook reconciliation resolves Order via find_by_payment_attempt when payload lacks order_id (§41, §61)."""
+    app, client, _ = _seed_test_env("tenant_01")
+    orch = app.orchestrator
+
+    attempt = PaymentAttempt(
+        attempt_id="att_rec_find_01",
+        intent_id="intent_custom_rec",
+        tenant_id="tenant_01",
+        amount=Money(50000, "INR"),
+        status=PaymentStatus.CREATED,
+        idempotency_key="idem_rec_find_01",
+        provider="mock",
+    )
+    assert orch._payment_repo is not None
+    orch._payment_repo.save("tenant_01", attempt)
+
+    order = Order(
+        order_id="ord_rec_find_01",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="user_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=1,
+        total_amount=Money(50000, "INR"),
+        status=OrderStatus.PENDING_PAYMENT,
+        payment_attempt_id="att_rec_find_01",
+    )
+    assert orch._order_repo is not None
+    orch._order_repo.save("tenant_01", order)
+
+    # Deliver webhook notification without order_id in the payload
+    resp = client.post_webhook(
+        "payment.captured",
+        payload={
+            "event_id": "evt_rec_find_att_01",
+            "attempt_id": "att_rec_find_01",
+            "provider_payment_id": "prov_rec_01",
+        },
+        tenant_id="tenant_01",
+    )
+    assert resp.status_code == 200
+    assert resp.body["status"] == "PROCESSED"
+    assert resp.body["payment_status"] == "CAPTURED"
+    assert resp.body["order_id"] == "ord_rec_find_01"
+    assert resp.body["order_status"] == "CONFIRMED"
+
+    # Verify Order was updated to CONFIRMED
+    updated_order = orch._order_repo.get("tenant_01", "ord_rec_find_01")
+    assert updated_order is not None
+    assert updated_order.status == OrderStatus.CONFIRMED

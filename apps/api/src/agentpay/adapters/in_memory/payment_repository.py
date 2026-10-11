@@ -51,6 +51,13 @@ class InMemoryOrderRepository(OrderRepository):
         with self._lock:
             return self._orders.get(tenant_id, {}).get(order_id)
 
+    def find_by_payment_attempt(self, tenant_id: str, attempt_id: str) -> Order | None:
+        with self._lock:
+            for candidate in self._orders.get(tenant_id, {}).values():
+                if candidate.payment_attempt_id == attempt_id or candidate.order_id == attempt_id:
+                    return candidate
+            return None
+
     def save(self, tenant_id: str, order: Order) -> None:
         if order.tenant_id != tenant_id:
             raise CrossTenantAccessError(

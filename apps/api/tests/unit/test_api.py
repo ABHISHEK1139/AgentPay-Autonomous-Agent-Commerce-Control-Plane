@@ -323,3 +323,164 @@ def test_error_envelope_includes_trace_id_correlation() -> None:
     assert "error" in body2
     assert body2["error"]["trace_id"] is not None
     assert body2["error"]["trace_id"].startswith("trace_")
+
+
+def test_b_api_01_non_dict_json_body_returns_422() -> None:
+    """B-API-01: Non-dict JSON bodies to mutating endpoints return 422 INVALID_REQUEST_BODY, never 500 (§13)."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    admin_client = ApiTestClient(app).as_admin()
+    buyer_client = ApiTestClient(app).as_buyer()
+    headers = {"x-tenant-id": "tenant_01"}
+
+    # 1. List body to emergency pause
+    status, body = admin_client.post(
+        "/api/v1/emergency/pause", json_body=[1, 2, 3], headers=headers
+    )
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_REQUEST_BODY"
+
+    # 2. String body to actions endpoint
+    status, body = buyer_client.post(
+        "/api/v1/actions", json_body="unexpected_string", headers=headers
+    )
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_REQUEST_BODY"
+
+    # 3. List body to tool execution
+    status, body = buyer_client.post(
+        "/agent/tools/catalog_search/execute",
+        json_body=[{"tool": "catalog_search"}],
+        headers=headers,
+    )
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_REQUEST_BODY"
+
+    # 4. Integer body to token revocation
+    status, body = admin_client.post("/api/v1/auth/tokens/revoke", json_body=12345, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_REQUEST_BODY"
+
+    # 5. Non-dict to webhook returns 400 (consistent with webhook payload validation)
+    status, body = buyer_client.post(
+        "/api/v1/webhooks/payments", json_body=[1, 2, 3], headers=headers, auth=False
+    )
+    assert status == 400
+    assert body["error"]["code"] == "INVALID_PAYLOAD"
+
+
+def test_b_api_02_execute_approved_purchase_via_api() -> None:
+    """B-API-02: Approved purchases can be executed via POST /api/v1/approvals/{id}/execute or approval_id in action submission (§20)."""
+    orch, *_, variant_repo, inv_repo, _, _, _ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app).as_buyer()
+    headers = {"x-tenant-id": "tenant_01"}
+
+    from agentpay.domain.commerce import Inventory, ProductVariant
+    from agentpay.domain.money import Money
+
+    variant_repo.save(
+        "tenant_01",
+        ProductVariant(
+            variant_id="var_expensive_api",
+            product_id="prod_01",
+            sku="SKU-EXPENSIVE-API",
+            name="Max Server API",
+            price=Money(800000, "INR"),
+        ),
+    )
+    inv_repo.save(
+        "tenant_01",
+        Inventory(
+            variant_id="var_expensive_api",
+            tenant_id="tenant_01",
+            available=5,
+            reserved=0,
+        ),
+    )
+
+    # 1. Submit purchase requiring approval
+    payload = {
+        "action_id": "act_api_exec_01",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "resource_id": "prod_01",
+        "variant_id": "var_expensive_api",
+        "amount_minor": 800000,
+        "currency": "INR",
+        "intent_purpose": "expensive server",
+    }
+    status, body = client.post("/api/v1/actions", json_body=payload, headers=headers)
+    assert status == 200
+    assert body["status"] == "AWAITING_APPROVAL"
+    approval_id = body["approval_id"]
+    assert approval_id is not None
+
+    # 2. Grant approval
+    status, body = client.post(
+        f"/api/v1/approvals/{approval_id}/approve",
+        json_body={"approver_id": "manager_alice"},
+        headers=headers,
+    )
+    assert status == 200
+    assert body["status"] == "APPROVED"
+
+    # 3. Execute approved purchase via POST /api/v1/approvals/{id}/execute
+    exec_payload = {
+        "action_id": "act_api_exec_01",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "variant_id": "var_expensive_api",
+        "resource_id": "prod_01",
+        "amount_minor": 800000,
+        "currency": "INR",
+        "quantity": 1,
+    }
+    status, body = client.post(
+        f"/api/v1/approvals/{approval_id}/execute",
+        json_body=exec_payload,
+        headers=headers,
+    )
+    assert status == 200
+    assert body["status"] == "COMPLETED"
+    assert body["decision"] == "ALLOW"
+    assert body["order_id"] is not None
+    assert body["payment_id"] is not None
+
+    # 4. Attempting to execute the already consumed approval returns 409
+    status, body = client.post(
+        f"/api/v1/approvals/{approval_id}/execute",
+        json_body=exec_payload,
+        headers=headers,
+    )
+    assert status == 409
+    assert body["error"]["code"] == "APPROVAL_ALREADY_CONSUMED"
+
+    # 5. Also verify execution via POST /api/v1/actions with approval_id parameter
+    payload2 = {
+        "action_id": "act_api_exec_02",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "resource_id": "prod_01",
+        "variant_id": "var_expensive_api",
+        "amount_minor": 800000,
+        "currency": "INR",
+        "intent_purpose": "second expensive server",
+    }
+    status, body = client.post("/api/v1/actions", json_body=payload2, headers=headers)
+    assert status == 200
+    approval_id_2 = body["approval_id"]
+    assert approval_id_2 is not None
+
+    client.post(
+        f"/api/v1/approvals/{approval_id_2}/approve",
+        json_body={"approver_id": "manager_alice"},
+        headers=headers,
+    )
+
+    payload2["approval_id"] = approval_id_2
+    status, body = client.post("/api/v1/actions", json_body=payload2, headers=headers)
+    assert status == 200
+    assert body["status"] == "COMPLETED"
+    assert body["decision"] == "ALLOW"
+    assert body["order_id"] is not None

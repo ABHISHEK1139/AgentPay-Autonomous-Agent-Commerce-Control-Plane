@@ -60,7 +60,9 @@ from agentpay.domain.action_request import (
     Intent,
     ResourceRef,
 )
+from agentpay.domain.approval import ApprovalAlreadyConsumedError
 from agentpay.domain.errors import (
+    ApprovalBindingMismatchError,
     CrossTenantAccessError,
     DomainError,
     IdempotencyConflictError,
@@ -596,7 +598,7 @@ class AgentPayApiApp:
         method: str,
         path: str,
         headers: dict[str, str],
-        body: dict[str, Any] | None = None,
+        body: Any = None,
         raw_body: bytes | None = None,
     ) -> ApiResponse:
         """Synchronous dispatch for hermetic testing and clean request processing."""
@@ -687,7 +689,7 @@ class AgentPayApiApp:
         method: str,
         path: str,
         headers: dict[str, str],
-        body: dict[str, Any] | None = None,
+        body: Any = None,
         raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         """Dispatch returning explicit 3-tuple (status_code, body, headers)."""
@@ -916,12 +918,26 @@ class AgentPayApiApp:
         method: str,
         path: str,
         headers: dict[str, str],
-        body: dict[str, Any] | None,
+        body: Any,
         request_id: str,
         tenant_id: str,
         trace_id: str = "",
         raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any]]:
+
+        # Guard against non-object JSON bodies on mutating routes (§13, B-API-01)
+        if method in ("POST", "PUT", "PATCH") and body is not None and not isinstance(body, dict):
+            if path == "/api/v1/webhooks/payments":
+                return self._error_response(
+                    400, "INVALID_PAYLOAD", "Missing or invalid JSON payload", request_id
+                )
+            return self._error_response(
+                422,
+                "INVALID_REQUEST_BODY",
+                "Request body must be a JSON object",
+                request_id,
+                details={"received_type": type(body).__name__},
+            )
 
         # 1. Health check
         if path == "/api/v1/health" and method == "GET":
@@ -1268,6 +1284,7 @@ class AgentPayApiApp:
                     variant_id=req["variant_id"],
                     quantity=int(req.get("quantity", 1)),
                     idempotency_key=req.get("idempotency_key"),
+                    approval_id=req.get("approval_id"),
                 )
             except (KeyError, ValueError, TypeError) as err:
                 return self._error_response(
@@ -1289,14 +1306,29 @@ class AgentPayApiApp:
             )
 
             try:
-                res: PurchaseExecutionResult = self.orchestrator.execute_purchase(
-                    action=action,
-                    tenant_id=tenant_id,
-                    variant_id=sub.variant_id,
-                    quantity=sub.quantity,
-                    idempotency_key=sub.idempotency_key,
-                    trace_id=trace_id,
-                )
+                if sub.approval_id:
+                    res: PurchaseExecutionResult = self.orchestrator.execute_approved_purchase(
+                        approval_id=sub.approval_id,
+                        action=action,
+                        tenant_id=tenant_id,
+                        variant_id=sub.variant_id,
+                        quantity=sub.quantity,
+                        idempotency_key=sub.idempotency_key,
+                        trace_id=trace_id,
+                    )
+                else:
+                    res = self.orchestrator.execute_purchase(
+                        action=action,
+                        tenant_id=tenant_id,
+                        variant_id=sub.variant_id,
+                        quantity=sub.quantity,
+                        idempotency_key=sub.idempotency_key,
+                        trace_id=trace_id,
+                    )
+            except ApprovalAlreadyConsumedError as err:
+                return self._error_response(409, "APPROVAL_ALREADY_CONSUMED", str(err), request_id)
+            except ApprovalBindingMismatchError as err:
+                return self._error_response(422, "APPROVAL_BINDING_MISMATCH", str(err), request_id)
             except CrossTenantAccessError as err:
                 return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
             except PrivilegeEscalationAttemptError as err:
@@ -1347,6 +1379,98 @@ class AgentPayApiApp:
                 approval_id = parts[3]
                 sub_action = parts[4]
                 req = body or {}
+
+                if sub_action == "execute":
+                    if self.is_emergency_paused_for(tenant_id):
+                        return self._error_response(
+                            503,
+                            "EMERGENCY_PAUSE_ACTIVE",
+                            "Autonomous payment processing is temporarily suspended by emergency control",
+                            request_id,
+                        )
+                    appr = (
+                        self.orchestrator._approval_repo.get(tenant_id, approval_id)
+                        if self.orchestrator._approval_repo
+                        else None
+                    )
+                    if appr is None:
+                        return self._error_response(
+                            404, "NOT_FOUND", f"Approval '{approval_id}' not found", request_id
+                        )
+
+                    action_id = str(req.get("action_id") or appr.binding.action_id)
+                    agent_id = str(req.get("agent_id") or "agent_01")
+                    principal_id = str(req.get("principal_id") or "user_01")
+                    resource_id = str(req.get("resource_id") or appr.binding.resource_id)
+                    variant_id = str(req.get("variant_id") or resource_id)
+                    quantity = int(req.get("quantity", 1))
+                    amount_minor = int(req.get("amount_minor", appr.binding.amount.minor_units))
+                    currency = str(req.get("currency", appr.binding.amount.currency))
+
+                    action = ActionRequest(
+                        action_id=action_id,
+                        tenant_id=tenant_id,
+                        principal_id=principal_id,
+                        agent_id=agent_id,
+                        domain=str(req.get("domain", "commerce")),
+                        action=str(req.get("action", "purchase")),
+                        resource=ResourceRef(
+                            type=str(req.get("resource_type", "product")), id=resource_id
+                        ),
+                        requested_at=datetime.now(UTC),
+                        intent=Intent(purpose=str(req.get("intent_purpose", "procurement"))),
+                        amount=Money(amount_minor, currency),
+                        authorization_mode=AuthorizationMode.AUTONOMOUS,
+                        version=appr.binding.action_version,
+                    )
+                    try:
+                        res = self.orchestrator.execute_approved_purchase(
+                            approval_id=approval_id,
+                            action=action,
+                            tenant_id=tenant_id,
+                            variant_id=variant_id,
+                            quantity=quantity,
+                            idempotency_key=req.get("idempotency_key"),
+                            trace_id=trace_id,
+                        )
+                    except ApprovalAlreadyConsumedError as err:
+                        return self._error_response(
+                            409, "APPROVAL_ALREADY_CONSUMED", str(err), request_id
+                        )
+                    except ApprovalBindingMismatchError as err:
+                        return self._error_response(
+                            422, "APPROVAL_BINDING_MISMATCH", str(err), request_id
+                        )
+                    except CrossTenantAccessError as err:
+                        return self._error_response(
+                            403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id
+                        )
+                    except PrivilegeEscalationAttemptError as err:
+                        return self._error_response(
+                            403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                        )
+                    except InsufficientInventoryError as err:
+                        return self._error_response(
+                            409, "INSUFFICIENT_INVENTORY", str(err), request_id
+                        )
+                    except IdempotencyConflictError as err:
+                        return self._error_response(
+                            409, "IDEMPOTENCY_CONFLICT", str(err), request_id
+                        )
+                    except DomainError as err:
+                        return self._error_response(400, err.code, str(err), request_id)
+
+                    return 200, {
+                        "action_id": res.action_id,
+                        "status": res.status.value,
+                        "decision": res.decision.value,
+                        "order_id": res.order.order_id if res.order else None,
+                        "payment_id": res.payment.attempt_id if res.payment else None,
+                        "approval_id": approval_id,
+                        "rejection_reason": res.rejection_reason,
+                        "trace_id": trace_id,
+                    }
+
                 approver_id = req.get("approver_id", "")
                 reason = req.get("reason", "")
 
@@ -1900,7 +2024,7 @@ class ApiTestClient:
         method: str,
         path: str,
         headers: dict[str, str] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: Any = None,
         auth: bool = True,
         raw_body: bytes | None = None,
     ) -> ApiResponse:
@@ -1972,7 +2096,7 @@ class ApiTestClient:
         method: str,
         path: str,
         headers: dict[str, str] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: Any = None,
         auth: bool = True,
         raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
@@ -1992,7 +2116,7 @@ class ApiTestClient:
     def post(
         self,
         path: str,
-        json_body: dict[str, Any] | None = None,
+        json_body: Any = None,
         headers: dict[str, str] | None = None,
         auth: bool = True,
     ) -> ApiResponse:

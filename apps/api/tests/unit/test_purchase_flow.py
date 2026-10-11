@@ -776,3 +776,189 @@ def test_saga_compensation_order_save_failure_refunds_and_releases_inventory() -
     cancel_events = [e for e in events if e.event_type == AuditEventType.ORDER_CANCELLED]
     assert len(cancel_events) == 1
     assert "Database storage exhausted" in str(cancel_events[0].data.get("reason"))
+
+
+def test_b_auth_02_revoked_or_suspended_agent_approved_purchase_denied() -> None:
+    """B-AUTH-02 Regression Test: execute_approved_purchase must fail closed when agent is revoked or suspended (§14, §15, §20)."""
+    (
+        orchestrator,
+        _,
+        agent_repo,
+        _,
+        _,
+        _,
+        variant_repo,
+        inventory_repo,
+        payment_provider,
+        _,
+        approval_repo,
+    ) = setup_orchestrator()
+
+    variant_repo.save(
+        "tenant_01",
+        ProductVariant(
+            variant_id="var_high",
+            product_id="prod_01",
+            sku="SKU-HIGH",
+            name="Maxed Spec",
+            price=Money(800000, "INR"),
+        ),
+    )
+    inventory_repo.save(
+        "tenant_01",
+        Inventory(
+            variant_id="var_high",
+            tenant_id="tenant_01",
+            available=5,
+            reserved=0,
+        ),
+    )
+
+    # Step 1: Submit high-value purchase that requires human approval
+    action = ActionRequest(
+        action_id="act_revoked_test_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="laptop procurement"),
+        amount=Money(800000, "INR"),  # ₹8,000 > ₹2,000 threshold
+        authorization_mode=AuthorizationMode.SUPERVISED,
+    )
+
+    initial_result = orchestrator.execute_purchase(
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+    )
+    assert initial_result.status == ActionStatus.AWAITING_APPROVAL
+    assert initial_result.approval is not None
+    approval_id = initial_result.approval.approval_id
+
+    # Step 2: Human manager grants approval
+    approval_service = ApprovalService(approval_repo=approval_repo)
+    approval_service.grant_approval(
+        approval_id=approval_id,
+        approver_id="manager_dave",
+        tenant_id="tenant_01",
+    )
+
+    # Step 3: Agent is revoked before execution!
+    agent = agent_repo.get("tenant_01", "agent_01")
+    assert agent is not None
+    agent_repo.save("tenant_01", agent.transition_to(AgentStatus.REVOKED))
+
+    # Step 4: execute_approved_purchase MUST fail closed
+    res = orchestrator.execute_approved_purchase(
+        approval_id=approval_id,
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+    )
+
+    assert res.status == ActionStatus.FAILED
+    assert res.decision == PolicyDecision.DENY
+    assert "REVOKED" in (res.rejection_reason or "")
+    assert res.order is None
+    assert len(payment_provider._attempts) == 0
+
+
+def test_b_drift_01_catalog_price_drift_approved_purchase_denied() -> None:
+    """B-DRIFT-01 Regression Test: execute_approved_purchase must detect catalog price drift and fail closed (§30, §32, §33)."""
+    (
+        orchestrator,
+        _,
+        _,
+        _,
+        _,
+        _,
+        variant_repo,
+        inventory_repo,
+        payment_provider,
+        _,
+        approval_repo,
+    ) = setup_orchestrator()
+
+    variant_repo.save(
+        "tenant_01",
+        ProductVariant(
+            variant_id="var_high",
+            product_id="prod_01",
+            sku="SKU-HIGH",
+            name="Maxed Spec",
+            price=Money(800000, "INR"),
+        ),
+    )
+    inventory_repo.save(
+        "tenant_01",
+        Inventory(
+            variant_id="var_high",
+            tenant_id="tenant_01",
+            available=5,
+            reserved=0,
+        ),
+    )
+
+    action = ActionRequest(
+        action_id="act_drift_test_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="laptop procurement"),
+        amount=Money(800000, "INR"),
+        authorization_mode=AuthorizationMode.SUPERVISED,
+    )
+
+    initial_result = orchestrator.execute_purchase(
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+    )
+    assert initial_result.status == ActionStatus.AWAITING_APPROVAL
+    assert initial_result.approval is not None
+    approval_id = initial_result.approval.approval_id
+
+    # Human manager grants approval
+    approval_service = ApprovalService(approval_repo=approval_repo)
+    approval_service.grant_approval(
+        approval_id=approval_id,
+        approver_id="manager_dave",
+        tenant_id="tenant_01",
+    )
+
+    # Merchant drifts catalog price by 1 minor unit / paise (₹8000.01)
+    drifted_variant = ProductVariant(
+        variant_id="var_high",
+        product_id="prod_01",
+        sku="SKU-PRO-01",
+        name="Pro Laptop High Tier",
+        price=Money(800001, "INR"),
+    )
+    variant_repo.save("tenant_01", drifted_variant)
+
+    # execute_approved_purchase MUST fail closed due to price conflict
+    res = orchestrator.execute_approved_purchase(
+        approval_id=approval_id,
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_high",
+        quantity=1,
+    )
+
+    assert res.status == ActionStatus.FAILED
+    assert res.decision == PolicyDecision.DENY
+    assert res.conflicts is not None
+    assert len(res.conflicts) > 0
+    assert "Evidence conflict" in (res.rejection_reason or "")
+    assert res.order is None
+    assert len(payment_provider._attempts) == 0

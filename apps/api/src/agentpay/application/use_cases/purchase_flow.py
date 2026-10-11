@@ -1002,13 +1002,157 @@ class PurchaseOrchestrator:
         # 2. Strict binding verification (§0.4, §20)
         self._approval_service.verify_binding(consumed_approval, action)
 
-        # 3. Merchant verification for approved purchase (§2.4, §20, §30, §177 Vector 9)
+        # 3. Agent Identity & Lifecycle validation (§14, §15, §16, §177 Vectors 1 & 4, B-AUTH-02)
+        agent = None
+        if self._agent_repo is not None:
+            agent = self._agent_repo.get(tenant_id, action.agent_id)
+
+        if agent is None:
+            self._audit(
+                AuditEventType.POLICY_EVALUATED,
+                action,
+                tenant_id,
+                actor="auth_service",
+                data={
+                    "decision": "DENIED",
+                    "reason": "UNREGISTERED_AGENT",
+                    "agent_id": action.agent_id,
+                },
+                trace_id=trace_id,
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason=f"Agent '{action.agent_id}' not found in tenant '{tenant_id}'",
+            )
+
+        try:
+            self._auth_service.authorize_action(agent, action, tenant_id)
+        except DomainError as err:
+            self._audit(
+                AuditEventType.POLICY_EVALUATED,
+                action,
+                tenant_id,
+                actor="auth_service",
+                data={"decision": "DENIED", "error": str(err)},
+                trace_id=trace_id,
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason=f"Authorization rejected: {err}",
+            )
+
+        # 4. Commerce & Evidence Verification & Drift Detection (§30, §32, §33, §177 Vectors 8 & 12, B-DRIFT-01)
+        variant = None
+        if self._variant_repo is not None:
+            variant = self._variant_repo.get(tenant_id, variant_id)
+
+        if variant is None:
+            self._audit(
+                AuditEventType.POLICY_EVALUATED,
+                action,
+                tenant_id,
+                actor="commerce_service",
+                data={"decision": "DENIED", "reason": "VARIANT_NOT_FOUND"},
+                trace_id=trace_id,
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason="Variant not found",
+            )
+
+        product = None
+        if self._product_repo is not None:
+            product = self._product_repo.get(tenant_id, variant.product_id)
+            if product is None:
+                self._audit(
+                    AuditEventType.POLICY_EVALUATED,
+                    action,
+                    tenant_id,
+                    actor="commerce_service",
+                    data={"decision": "DENIED", "reason": "PRODUCT_NOT_FOUND"},
+                    trace_id=trace_id,
+                )
+                return PurchaseExecutionResult(
+                    action_id=action.action_id,
+                    tenant_id=tenant_id,
+                    status=ActionStatus.FAILED,
+                    decision=PolicyDecision.DENY,
+                    rejection_reason="Product not found",
+                )
+            if self._permissions_repo is not None:
+                perms = self._permissions_repo.get(tenant_id, agent.agent_id)
+                if perms is not None and not perms.allows_category(product.category):
+                    self._audit(
+                        AuditEventType.POLICY_EVALUATED,
+                        action,
+                        tenant_id,
+                        actor="auth_service",
+                        data={"decision": "DENIED", "category": product.category},
+                        trace_id=trace_id,
+                    )
+                    return PurchaseExecutionResult(
+                        action_id=action.action_id,
+                        tenant_id=tenant_id,
+                        status=ActionStatus.FAILED,
+                        decision=PolicyDecision.DENY,
+                        rejection_reason=f"Category '{product.category}' is not permitted for agent '{agent.agent_id}'",
+                    )
+
+        inventory = None
+        if self._inventory_repo is not None:
+            inventory = self._inventory_repo.get(tenant_id, variant_id)
+
+        expected_total = None
+        if action.amount is not None:
+            expected_total = variant.price.multiply(quantity)
+        conflicts = EvidenceConflictDetector.detect_all_conflicts(
+            tenant_id=tenant_id,
+            resource_id=variant_id,
+            asserted_price=action.amount,
+            merchant_price=expected_total,
+            asserted_available=None,
+            actual_available=inventory.effective_available if inventory else 0,
+            requested_qty=quantity,
+        )
+        if conflicts:
+            self._audit(
+                AuditEventType.CONFLICT_DETECTED,
+                action,
+                tenant_id,
+                actor="conflict_detector",
+                data={
+                    "conflict_count": len(conflicts),
+                    "first_conflict": conflicts[0].conflict_type.value,
+                },
+                trace_id=trace_id,
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                conflicts=conflicts,
+                rejection_reason="Evidence conflict detected (price/inventory mismatch)",
+            )
+
+        # 5. Merchant verification for approved purchase (§2.4, §20, §30, §177 Vector 9)
         target_merchant_id = consumed_approval.binding.merchant_id
         if self._merchant_repo is not None:
             merchant = None
             if target_merchant_id:
                 merchant = self._merchant_repo.get(tenant_id, target_merchant_id)
-            if merchant is None and self._product_repo is not None:
+            if merchant is None and product is not None and product.merchant_id:
+                merchant = self._merchant_repo.get(tenant_id, product.merchant_id)
+            elif merchant is None and self._product_repo is not None:
                 p = (
                     self._product_repo.get(tenant_id, target_merchant_id)
                     if target_merchant_id
@@ -1062,6 +1206,30 @@ class PurchaseOrchestrator:
                         status=ActionStatus.FAILED,
                         decision=PolicyDecision.DENY,
                         rejection_reason=f"Merchant '{target_merchant_id}' does not allow autonomous agent purchases",
+                    )
+                if (
+                    merchant.max_order_amount_minor is not None
+                    and action.amount is not None
+                    and action.amount.minor_units > merchant.max_order_amount_minor
+                ):
+                    self._audit(
+                        AuditEventType.POLICY_EVALUATED,
+                        action,
+                        tenant_id,
+                        actor="merchant_verifier",
+                        data={
+                            "decision": "DENIED",
+                            "reason": "MERCHANT_MAX_ORDER_EXCEEDED",
+                            "max_order_minor": merchant.max_order_amount_minor,
+                        },
+                        trace_id=trace_id,
+                    )
+                    return PurchaseExecutionResult(
+                        action_id=action.action_id,
+                        tenant_id=tenant_id,
+                        status=ActionStatus.FAILED,
+                        decision=PolicyDecision.DENY,
+                        rejection_reason=f"Order amount exceeds merchant max order limit of {merchant.max_order_amount_minor} minor units",
                     )
 
         self._audit(
