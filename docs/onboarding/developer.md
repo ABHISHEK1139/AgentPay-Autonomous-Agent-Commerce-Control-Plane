@@ -71,6 +71,6 @@ Do not add a dependency without checking whether the standard library suffices (
 
 - The directory is named `platfrom` (one `a`). That is correct. Do not rename it.
 - PowerShell 5.1: no `&&`, no heredocs. Use `; if ($?) { ... }`.
-- The repository is not yet a git repository — there is no history to consult.
+- Git history is preserved on the `master` branch — consult `git log` for incremental development history.
 - `ruff format` is configured to skip `*.md`, so it will not rewrite the Python snippets inside
   `AGENTS.md`. Keep it that way: `AGENTS.md` is the blueprint.

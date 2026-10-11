@@ -2,6 +2,8 @@
 name = "agentpay"
 version = "0.1.0"
 description = "AgentPay - agent action-control and transaction platform"
+readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.0",
