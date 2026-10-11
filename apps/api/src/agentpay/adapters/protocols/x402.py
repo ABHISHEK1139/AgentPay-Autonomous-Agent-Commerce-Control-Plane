@@ -166,6 +166,13 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
         self, request: X402ChallengeRequest, tenant_id: str | None = None
     ) -> tuple[ActionRequest, dict[str, Any]]:
         """Translate typed X402ChallengeRequest into canonical ActionRequest and metadata."""
+        if isinstance(request.amount_minor, bool) or not isinstance(request.amount_minor, int):
+            raise MalformedPayloadError(
+                f"amount_minor must be an integer, got {type(request.amount_minor).__name__}"
+            )
+        if request.amount_minor < 0:
+            raise MalformedPayloadError("amount_minor cannot be negative")
+
         effective_tenant = request.tenant_id or (tenant_id or "")
         amount = Money(minor_units=request.amount_minor, currency=request.currency)
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpay.application.ports.approval_port import ApprovalRepository
@@ -29,6 +30,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
 
     def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
         super().__init__(session_or_factory)
+        self._lock = threading.Lock()
 
     def get(self, tenant_id: str, approval_id: str) -> Approval | None:
         with self._session() as session:
@@ -92,31 +94,48 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
 
     def atomic_consume(self, tenant_id: str, approval_id: str) -> Approval:
         """Atomically verify and transition approval to CONSUMED under transaction (§20, §177 Vector 10)."""
-        with self._session() as session:
+        with self._lock, self._session() as session:
             stmt = (
-                select(ApprovalModel)
+                update(ApprovalModel)
                 .where(
                     ApprovalModel.tenant_id == tenant_id,
                     ApprovalModel.approval_id == approval_id,
+                    ApprovalModel.status == ApprovalStatus.APPROVED.value,
                 )
-                .with_for_update()
+                .values(status=ApprovalStatus.CONSUMED.value)
             )
-            model = session.scalar(stmt)
-            if model is None:
-                raise InvalidCommerceError(
-                    f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+            res = session.execute(stmt)
+            session.commit()
+            rowcount = res.rowcount if isinstance(res, CursorResult) else 0
+            if rowcount == 0:
+                # Inspect why update matched 0 rows:
+                check_stmt = select(ApprovalModel).where(
+                    ApprovalModel.tenant_id == tenant_id,
+                    ApprovalModel.approval_id == approval_id,
                 )
-            if model.status == ApprovalStatus.CONSUMED.value:
-                raise ApprovalAlreadyConsumedError(
-                    f"Approval '{approval_id}' has already been consumed"
-                )
-            if model.status != ApprovalStatus.APPROVED.value:
+                model = session.scalar(check_stmt)
+                if model is None:
+                    raise InvalidCommerceError(
+                        f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                    )
+                if model.status == ApprovalStatus.CONSUMED.value:
+                    raise ApprovalAlreadyConsumedError(
+                        f"Approval '{approval_id}' has already been consumed"
+                    )
                 raise ApprovalBindingMismatchError(
                     f"Approval is in status '{model.status}', not APPROVED"
                 )
-            model.status = ApprovalStatus.CONSUMED.value
-            session.commit()
-            return self._to_domain(model)
+            # Retrieve consumed model to convert to domain entity:
+            get_stmt = select(ApprovalModel).where(
+                ApprovalModel.tenant_id == tenant_id,
+                ApprovalModel.approval_id == approval_id,
+            )
+            consumed_model = session.scalar(get_stmt)
+            if consumed_model is None:
+                raise InvalidCommerceError(
+                    f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                )
+            return self._to_domain(consumed_model)
 
     def _to_domain(self, model: ApprovalModel) -> Approval:
         req_at = model.requested_at

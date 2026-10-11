@@ -18,15 +18,15 @@
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (160 files), `ruff check` (clean), `mypy --strict`
-  (140 files, clean), `pytest` (**705 passed, 0 failed, 0 skipped**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (162 files), `ruff check` (clean), `mypy --strict`
+  (141 files, clean), `pytest` (**714 passed, 0 failed, 0 skipped**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
 - **Auxiliary suites, all green:** 5 node web tests (`node --test tests/web.test.mjs`, including §121
   ARIA accessibility, keyboard contracts, and authenticated live API client integration), 51/51 protocol
   adversarial probes, 4/4 concurrency probes, 6/6 test-client privilege probes (including strict unconfigured
   fail-closed verification), 6/6 currency/money probes, 6/6 webhook replay/concurrency probes,
-  9/9 SSRF & circuit breaker probes, 6/6 model gateway resilience probes, audit-chain verifier CLI
-  (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
+  9/9 SSRF & circuit breaker probes, 6/6 model gateway resilience probes, 8/8 SAGA concurrency probes,
+  audit-chain verifier CLI (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
   (`scripts/generate_sbom.py --verify`).
 - **Backend confirmed present:** 16 domain modules (`Money` + ISO 4217 `currencies` exponent table,
   `ActionRequest`, identity, policy, approval with exact 7-field binding, SHA-256 chained audit

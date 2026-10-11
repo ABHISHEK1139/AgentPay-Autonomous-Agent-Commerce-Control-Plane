@@ -352,6 +352,116 @@ def run_tests() -> dict[str, Any]:
             f"Unexpected error: {type(e).__name__}: {e}",
         )
 
+    # 1.9 UAP zero quantity rejection
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_zero_qty",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {"product_id": "prod_1", "quantity": 0, "currency": "INR"},
+                },
+            }
+        )
+        record(
+            "negative_amounts",
+            "uap_zero_quantity",
+            False,
+            "Accepted zero quantity in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "negative_amounts",
+            "uap_zero_quantity",
+            True,
+            "Rejected zero quantity with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "negative_amounts",
+            "uap_zero_quantity",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 1.10 UAP negative budget_cap_minor rejection
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_neg_budget",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {
+                        "product_id": "prod_1",
+                        "price_minor": 100,
+                        "budget_cap_minor": -500,
+                        "currency": "INR",
+                    },
+                },
+            }
+        )
+        record(
+            "negative_amounts",
+            "uap_negative_budget_cap",
+            False,
+            "Accepted negative budget_cap_minor in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "negative_amounts",
+            "uap_negative_budget_cap",
+            True,
+            "Rejected negative budget cap with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "negative_amounts",
+            "uap_negative_budget_cap",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 1.11 UAP negative amount_minor fallback rejection
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_neg_amt_fallback",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {"product_id": "prod_1", "amount": -100, "currency": "INR"},
+                },
+            }
+        )
+        record(
+            "negative_amounts",
+            "uap_negative_amount_fallback",
+            False,
+            "Accepted negative amount fallback in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "negative_amounts",
+            "uap_negative_amount_fallback",
+            True,
+            "Rejected negative amount fallback with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "negative_amounts",
+            "uap_negative_amount_fallback",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
     # -----------------------------------------------------------------------
     # 2. FLOATING POINT & NON-INTEGER VALUES
     # -----------------------------------------------------------------------
@@ -677,6 +787,166 @@ def run_tests() -> dict[str, Any]:
         record(
             "floating_point_values",
             "x402_bool_amount_coercion",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 2.10 UAP float quantity coercion
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_flt_qty",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {
+                        "product_id": "prod_1",
+                        "quantity": 2.5,
+                        "price_minor": 100,
+                        "currency": "INR",
+                    },
+                },
+            }
+        )
+        record(
+            "floating_point_values",
+            "uap_float_quantity_coercion",
+            False,
+            "Accepted float quantity in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "floating_point_values",
+            "uap_float_quantity_coercion",
+            True,
+            "Rejected float quantity with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "floating_point_values",
+            "uap_float_quantity_coercion",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 2.11 UAP boolean quantity coercion
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_bool_qty",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {
+                        "product_id": "prod_1",
+                        "quantity": True,
+                        "price_minor": 100,
+                        "currency": "INR",
+                    },
+                },
+            }
+        )
+        record(
+            "floating_point_values",
+            "uap_bool_quantity_coercion",
+            False,
+            "Coerced boolean quantity into integer in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "floating_point_values",
+            "uap_bool_quantity_coercion",
+            True,
+            "Rejected boolean quantity with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "floating_point_values",
+            "uap_bool_quantity_coercion",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 2.12 UAP float budget cap coercion
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_flt_budget",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {
+                        "product_id": "prod_1",
+                        "price_minor": 100,
+                        "budget_cap_minor": 2500.5,
+                        "currency": "INR",
+                    },
+                },
+            }
+        )
+        record(
+            "floating_point_values",
+            "uap_float_budget_coercion",
+            False,
+            "Accepted float budget_cap_minor in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "floating_point_values",
+            "uap_float_budget_coercion",
+            True,
+            "Rejected float budget cap with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "floating_point_values",
+            "uap_float_budget_coercion",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 2.13 UAP boolean budget cap coercion
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_bool_budget",
+                "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {
+                        "product_id": "prod_1",
+                        "price_minor": 100,
+                        "budget_cap_minor": True,
+                        "currency": "INR",
+                    },
+                },
+            }
+        )
+        record(
+            "floating_point_values",
+            "uap_bool_budget_coercion",
+            False,
+            "Coerced boolean budget cap into integer in UAP",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "floating_point_values",
+            "uap_bool_budget_coercion",
+            True,
+            "Rejected boolean budget cap with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "floating_point_values",
+            "uap_bool_budget_coercion",
             False,
             f"Unexpected error: {type(e).__name__}: {e}",
         )
@@ -1082,6 +1352,213 @@ def run_tests() -> dict[str, Any]:
         record(
             "missing_ids",
             "ap2_missing_payer_principal_id",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 5.7 x402 missing principal_id
+    try:
+        x402.parse_payload(
+            {
+                "x402_version": "1.0",
+                "challenge_id": "x402_no_prin",
+                "resource_uri": "https://api.example.com/data",
+                "agent_id": "agent_01",
+                "tenant_id": "tenant_01",
+                "amount_minor": 100,
+                "currency": "INR",
+            }
+        )
+        record(
+            "missing_ids",
+            "x402_missing_principal_id",
+            False,
+            "Accepted x402 request missing principal_id",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "missing_ids",
+            "x402_missing_principal_id",
+            True,
+            "Rejected missing principal_id with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "missing_ids",
+            "x402_missing_principal_id",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 5.8 x402 missing agent_id
+    try:
+        x402.parse_payload(
+            {
+                "x402_version": "1.0",
+                "challenge_id": "x402_no_agent",
+                "resource_uri": "https://api.example.com/data",
+                "principal_id": "user_01",
+                "tenant_id": "tenant_01",
+                "amount_minor": 100,
+                "currency": "INR",
+            }
+        )
+        record(
+            "missing_ids",
+            "x402_missing_agent_id",
+            False,
+            "Accepted x402 request missing agent_id",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "missing_ids",
+            "x402_missing_agent_id",
+            True,
+            "Rejected missing agent_id with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "missing_ids",
+            "x402_missing_agent_id",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 5.9 x402 missing challenge_id
+    try:
+        x402.parse_payload(
+            {
+                "x402_version": "1.0",
+                "resource_uri": "https://api.example.com/data",
+                "principal_id": "user_01",
+                "agent_id": "agent_01",
+                "tenant_id": "tenant_01",
+                "amount_minor": 100,
+                "currency": "INR",
+            }
+        )
+        record(
+            "missing_ids",
+            "x402_missing_challenge_id",
+            False,
+            "Accepted x402 request missing challenge_id",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "missing_ids",
+            "x402_missing_challenge_id",
+            True,
+            "Rejected missing challenge_id with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "missing_ids",
+            "x402_missing_challenge_id",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 5.10 x402 missing amount_minor
+    try:
+        x402.parse_payload(
+            {
+                "x402_version": "1.0",
+                "challenge_id": "x402_no_amt",
+                "resource_uri": "https://api.example.com/data",
+                "principal_id": "user_01",
+                "agent_id": "agent_01",
+                "tenant_id": "tenant_01",
+                "currency": "INR",
+            }
+        )
+        record(
+            "missing_ids",
+            "x402_missing_amount_minor",
+            False,
+            "Accepted x402 request missing amount_minor",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "missing_ids",
+            "x402_missing_amount_minor",
+            True,
+            "Rejected missing amount_minor with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "missing_ids",
+            "x402_missing_amount_minor",
+            False,
+            f"Unexpected error: {type(e).__name__}: {e}",
+        )
+
+    # 5.11 UAP missing sender
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_no_sender",
+                "header": {"tenant": "tenant_01", "principal": "user_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {"product_id": "prod_1", "price_minor": 100, "currency": "INR"},
+                },
+            }
+        )
+        record(
+            "missing_ids",
+            "uap_missing_sender",
+            False,
+            "Accepted UAP request missing sender",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "missing_ids",
+            "uap_missing_sender",
+            True,
+            "Rejected missing sender with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "missing_ids", "uap_missing_sender", False, f"Unexpected error: {type(e).__name__}: {e}"
+        )
+
+    # 5.12 UAP missing principal
+    try:
+        uap.parse_payload(
+            {
+                "uap_version": "1.0",
+                "message_id": "uap_no_prin",
+                "header": {"sender": "agent_01", "tenant": "tenant_01"},
+                "payload": {
+                    "capability": "commerce.purchase",
+                    "parameters": {"product_id": "prod_1", "price_minor": 100, "currency": "INR"},
+                },
+            }
+        )
+        record(
+            "missing_ids",
+            "uap_missing_principal",
+            False,
+            "Accepted UAP request missing principal",
+            is_vuln=True,
+        )
+    except MalformedPayloadError:
+        record(
+            "missing_ids",
+            "uap_missing_principal",
+            True,
+            "Rejected missing principal with MalformedPayloadError",
+        )
+    except Exception as e:
+        record(
+            "missing_ids",
+            "uap_missing_principal",
             False,
             f"Unexpected error: {type(e).__name__}: {e}",
         )
@@ -1622,6 +2099,211 @@ def run_tests() -> dict[str, Any]:
     else:
         record(
             "api_fail_closed", "api_ap2_bool_amount_rejected", False, f"Got status {status}: {body}"
+        )
+
+    # 8.6 UAP POST float price over HTTP
+    float_uap_payload = {
+        "uap_version": "1.0",
+        "message_id": "api_flt_uap_test",
+        "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+        "payload": {
+            "capability": "commerce.purchase",
+            "parameters": {"product_id": "prod_laptop_001", "price_minor": 12.5, "quantity": 1},
+        },
+    }
+    status, body = client.post(
+        "/api/v1/protocols/uap/rpc",
+        json_body=float_uap_payload,
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    if status in (400, 422):
+        record(
+            "api_fail_closed",
+            "api_uap_float_rejected",
+            True,
+            f"Properly rejected float with HTTP {status}",
+        )
+    elif status == 200:
+        record(
+            "api_fail_closed",
+            "api_uap_float_rejected",
+            False,
+            f"HTTP 200 SUCCESS! Float price_minor=12.5 was executed! Result={body.get('result')}",
+            is_vuln=True,
+        )
+    else:
+        record("api_fail_closed", "api_uap_float_rejected", False, f"Got status {status}: {body}")
+
+    # 8.7 UAP POST boolean price over HTTP
+    bool_uap_payload = {
+        "uap_version": "1.0",
+        "message_id": "api_bool_uap_test",
+        "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+        "payload": {
+            "capability": "commerce.purchase",
+            "parameters": {"product_id": "prod_laptop_001", "price_minor": True, "quantity": 1},
+        },
+    }
+    status, body = client.post(
+        "/api/v1/protocols/uap/rpc",
+        json_body=bool_uap_payload,
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    if status in (400, 422):
+        record(
+            "api_fail_closed",
+            "api_uap_bool_rejected",
+            True,
+            f"Properly rejected boolean with HTTP {status}",
+        )
+    elif status == 200:
+        record(
+            "api_fail_closed",
+            "api_uap_bool_rejected",
+            False,
+            f"HTTP 200 SUCCESS! Boolean price_minor=True was executed! Result={body.get('result')}",
+            is_vuln=True,
+        )
+    else:
+        record("api_fail_closed", "api_uap_bool_rejected", False, f"Got status {status}: {body}")
+
+    # 8.8 UAP POST negative price over HTTP
+    neg_uap_payload = {
+        "uap_version": "1.0",
+        "message_id": "api_neg_uap_test",
+        "header": {"sender": "agent_01", "tenant": "tenant_01", "principal": "user_01"},
+        "payload": {
+            "capability": "commerce.purchase",
+            "parameters": {"product_id": "prod_laptop_001", "price_minor": -500, "quantity": 1},
+        },
+    }
+    status, body = client.post(
+        "/api/v1/protocols/uap/rpc",
+        json_body=neg_uap_payload,
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    if status in (400, 422):
+        record(
+            "api_fail_closed",
+            "api_uap_negative_rejected",
+            True,
+            f"Properly rejected negative price with HTTP {status}",
+        )
+    elif status == 200:
+        record(
+            "api_fail_closed",
+            "api_uap_negative_rejected",
+            False,
+            f"HTTP 200 SUCCESS! Negative price_minor=-500 was executed! Result={body.get('result')}",
+            is_vuln=True,
+        )
+    else:
+        record(
+            "api_fail_closed", "api_uap_negative_rejected", False, f"Got status {status}: {body}"
+        )
+
+    # 8.9 x402 POST float amount over HTTP
+    float_x402_payload = {
+        "x402_version": "1.0",
+        "challenge_id": "api_flt_x402_test",
+        "resource_uri": "https://api.example.com/data",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "tenant_id": "tenant_01",
+        "amount_minor": 12.5,
+        "currency": "INR",
+    }
+    status, body = client.post(
+        "/api/v1/protocols/x402/pay",
+        json_body=float_x402_payload,
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    if status in (400, 422):
+        record(
+            "api_fail_closed",
+            "api_x402_float_rejected",
+            True,
+            f"Properly rejected float with HTTP {status}",
+        )
+    elif status == 200:
+        record(
+            "api_fail_closed",
+            "api_x402_float_rejected",
+            False,
+            f"HTTP 200 SUCCESS! Float amount_minor=12.5 was executed! Token={body.get('authorization_token')}",
+            is_vuln=True,
+        )
+    else:
+        record("api_fail_closed", "api_x402_float_rejected", False, f"Got status {status}: {body}")
+
+    # 8.10 x402 POST boolean amount over HTTP
+    bool_x402_payload = {
+        "x402_version": "1.0",
+        "challenge_id": "api_bool_x402_test",
+        "resource_uri": "https://api.example.com/data",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "tenant_id": "tenant_01",
+        "amount_minor": True,
+        "currency": "INR",
+    }
+    status, body = client.post(
+        "/api/v1/protocols/x402/pay",
+        json_body=bool_x402_payload,
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    if status in (400, 422):
+        record(
+            "api_fail_closed",
+            "api_x402_bool_rejected",
+            True,
+            f"Properly rejected boolean with HTTP {status}",
+        )
+    elif status == 200:
+        record(
+            "api_fail_closed",
+            "api_x402_bool_rejected",
+            False,
+            f"HTTP 200 SUCCESS! Boolean amount_minor=True was executed! Token={body.get('authorization_token')}",
+            is_vuln=True,
+        )
+    else:
+        record("api_fail_closed", "api_x402_bool_rejected", False, f"Got status {status}: {body}")
+
+    # 8.11 x402 POST negative amount over HTTP
+    neg_x402_payload = {
+        "x402_version": "1.0",
+        "challenge_id": "api_neg_x402_test",
+        "resource_uri": "https://api.example.com/data",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "tenant_id": "tenant_01",
+        "amount_minor": -250,
+        "currency": "INR",
+    }
+    status, body = client.post(
+        "/api/v1/protocols/x402/pay",
+        json_body=neg_x402_payload,
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    if status in (400, 422):
+        record(
+            "api_fail_closed",
+            "api_x402_negative_rejected",
+            True,
+            f"Properly rejected negative amount with HTTP {status}",
+        )
+    elif status == 200:
+        record(
+            "api_fail_closed",
+            "api_x402_negative_rejected",
+            False,
+            f"HTTP 200 SUCCESS! Negative amount_minor=-250 was executed! Token={body.get('authorization_token')}",
+            is_vuln=True,
+        )
+    else:
+        record(
+            "api_fail_closed", "api_x402_negative_rejected", False, f"Got status {status}: {body}"
         )
 
     # -----------------------------------------------------------------------

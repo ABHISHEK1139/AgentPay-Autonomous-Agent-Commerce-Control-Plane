@@ -979,10 +979,10 @@ class PurchaseOrchestrator:
             raise InvalidCommerceError("Approval repository not configured")
 
         # 1. Atomic check-and-consume or lock-guarded consumption to prevent TOCTOU race (§20, §177 Vector 10)
-        if hasattr(self._approval_repo, "atomic_consume"):
-            consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
-        else:
-            with self._approval_lock:
+        with self._approval_lock:
+            if hasattr(self._approval_repo, "atomic_consume"):
+                consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
+            else:
                 approval = self._approval_repo.get(tenant_id, approval_id)
                 if approval is None:
                     raise InvalidCommerceError(
