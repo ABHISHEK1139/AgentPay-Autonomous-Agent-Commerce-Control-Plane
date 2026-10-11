@@ -273,12 +273,12 @@ def probe_model_gateway_concurrency_burst_toctou() -> dict[str, Any]:
     total_consumed, _ = tracker.get_usage("agent_burst")
 
     # In a strict budget model, at most 1 or 2 calls should be allowed (200 token limit, 150 per call).
-    # Due to check-then-consume TOCTOU, multiple threads slip through concurrently.
     toctou_overshoot_observed = allowed_count > 2
+    passed = (not toctou_overshoot_observed) and (allowed_count <= 2) and (total_consumed <= 200)
 
     return {
-        "probe": "Probe 3: Concurrency Burst TOCTOU Demonstration",
-        "passed": True,  # Measurement probe documenting empirical behavior
+        "probe": "Probe 3: Concurrency Burst TOCTOU Prevention",
+        "passed": passed,
         "allowed_count": allowed_count,
         "total_consumed_tokens": total_consumed,
         "configured_limit": 200,
@@ -290,36 +290,35 @@ def probe_model_gateway_concurrency_burst_toctou() -> dict[str, Any]:
 # Probe 4: TokenBudgetTracker Implementation Flaws & Vulnerabilities
 # ===========================================================================
 def probe_token_budget_tracker_bugs() -> dict[str, Any]:
-    """Empirically test implementation flaws: reset() crash, cross-tenant collision, double-consumption."""
-    # 1. Reset Crash Flaw (line 96: self._token_usage.clearケーキ = None)
+    """Empirically test that TokenBudgetTracker flaws are remediated: reset clean, isolated cross-tenant, no double-consume."""
+    # 1. Reset Clean: consume, then reset, usage is 0
     tracker = TokenBudgetTracker()
-    reset_crashed = False
-    try:
-        tracker.reset()
-    except AttributeError as exc:
-        if "clear" in str(exc):
-            reset_crashed = True
+    tracker.consume("tenant_01", "agent_01", tokens=100, cost_minor_units=10)
+    tracker.reset()
+    t_used, c_used = tracker.get_usage("tenant_01")
+    a_t_used, a_c_used = tracker.get_usage("agent_01")
+    reset_clean = t_used == 0 and c_used == 0 and a_t_used == 0 and a_c_used == 0
 
-    # 2. Cross-Tenant Agent Collision Flaw (unnamespaced agent_id)
+    # 2. Cross-Tenant Agent Collision: Tenant B must NOT be blocked by Tenant A
     tracker_col = TokenBudgetTracker(default_limits=BudgetLimits(max_tokens=200))
     tracker_col.consume("tenant_A", "agent_common", 200)
-    # Tenant B has not spent any tokens, but its agent named 'agent_common' is blocked
+    # Tenant B has not spent any tokens, agent_common should have budget
     cross_tenant_collision = not tracker_col.has_budget("tenant_B", "agent_common")
 
-    # 3. Double-Consumption Flaw when tenant_id == agent_id
+    # 3. Double-Consumption Flaw: tenant_id == agent_id must consume exactly 100, not 200
     tracker_double = TokenBudgetTracker()
     tracker_double.consume("acme_corp", "acme_corp", tokens=100, cost_minor_units=10)
     tokens_used, cost_used = tracker_double.get_usage("acme_corp")
-    double_consumed = tokens_used == 200 and cost_used == 20
+    double_consumed = not (tokens_used == 100 and cost_used == 10)
 
-    all_flaws_verified = reset_crashed and cross_tenant_collision and double_consumed
+    bugs_fixed = reset_clean and (not cross_tenant_collision) and (not double_consumed)
 
     return {
-        "probe": "Probe 4: TokenBudgetTracker Implementation Flaws",
-        "passed": all_flaws_verified,
-        "reset_crash_verified": reset_crashed,
-        "cross_tenant_collision_verified": cross_tenant_collision,
-        "double_consumed_verified": double_consumed,
+        "probe": "Probe 4: TokenBudgetTracker Bug Remediation Verification",
+        "passed": bugs_fixed,
+        "reset_clean": reset_clean,
+        "cross_tenant_collision": cross_tenant_collision,
+        "double_consumed": double_consumed,
     }
 
 
@@ -537,19 +536,15 @@ def main() -> int:
     )
 
     p3 = probe_model_gateway_concurrency_burst_toctou()
-    log(
-        f"[*] Probe 3 (Concurrency Burst TOCTOU): {'OBSERVED' if p3['toctou_overshoot_observed'] else 'BOUNDED'}"
-    )
+    log(f"[*] Probe 3 (Concurrency Burst TOCTOU): {'PASS' if p3['passed'] else 'FAIL'}")
     log(
         f"    Allowed Count: {p3['allowed_count']}/10, Consumed: {p3['total_consumed_tokens']} tokens against limit {p3['configured_limit']}"
     )
 
     p4 = probe_token_budget_tracker_bugs()
+    log(f"[*] Probe 4 (TokenBudgetTracker Bug Remediation): {'PASS' if p4['passed'] else 'FAIL'}")
     log(
-        f"[*] Probe 4 (TokenBudgetTracker Implementation Flaws): {'CONFIRMED' if p4['passed'] else 'UNCONFIRMED'}"
-    )
-    log(
-        f"    Reset Crash Flaw: {p4['reset_crash_verified']}, Cross-Tenant Collision: {p4['cross_tenant_collision_verified']}, Double-Consume: {p4['double_consumed_verified']}"
+        f"    Reset Clean: {p4['reset_clean']}, Cross-Tenant Collision: {p4['cross_tenant_collision']}, Double-Consume: {p4['double_consumed']}"
     )
 
     p5 = probe_model_gateway_arbitrary_faults_non_widening()
@@ -567,15 +562,14 @@ def main() -> int:
     )
 
     log("==================================================================")
-    core_invariants_pass = p1["passed"] and p2["passed"] and p5["passed"] and p6["passed"]
+    core_invariants_pass = all(p["passed"] for p in [p1, p2, p3, p4, p5, p6])
     if not core_invariants_pass:
-        log("[!] VERDICT: FAILED (Core safety or financial invariant breached)")
+        log("[!] VERDICT: FAILED (Core safety or resilience invariant breached)")
         return 1
 
     log(
-        "[+] VERDICT: CONFIRMED (Core security, non-widening, and financial non-retryability invariants verified)"
+        "[+] VERDICT: CONFIRMED (All 6 model gateway resilience probes and budget invariants verified)"
     )
-    log("    Note: Implementation bugs in TokenBudgetTracker documented for remediation.")
     return 0
 
 

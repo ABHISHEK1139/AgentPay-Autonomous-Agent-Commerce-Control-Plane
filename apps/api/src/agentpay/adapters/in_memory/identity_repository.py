@@ -51,7 +51,7 @@ def format_tenant_cache_key(tenant_id: str, resource_type: str, resource_id: str
             raise ValueError(f"{name} cannot be empty")
         if ":" in raw_val:
             raise ValueError("Colons are not permitted in cache key segments")
-        if any(c in raw_val for c in ("\r", "\n", "\0")):
+        if any(c in raw_val for c in ("\r", "\n", "\0", "\x00")):
             raise ValueError(
                 f"Control characters (CR, LF, null byte) are not permitted in cache key segment '{name}'"
             )

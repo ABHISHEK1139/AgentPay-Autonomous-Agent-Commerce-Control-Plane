@@ -1,88 +1,67 @@
-# Project: AgentPay Hardening & Production Extensions
+# Project: AgentPay Autonomous Agent Commerce Control Plane
 
 ## Architecture
-AgentPay is an agent action-control and transaction platform built as a modular monolith with strict Clean Architecture dependency boundaries (§10).
-- **Domain Layer** (`apps/api/src/agentpay/domain/`): Pure Python business models, domain events, and state machines. Zero framework, ORM, HTTP, or SDK imports.
-- **Application Layer** (`apps/api/src/agentpay/application/`): Use cases, orchestrators, ports, and domain services.
-- **Infrastructure & Adapters** (`apps/api/src/agentpay/infrastructure/`, `adapters/`, `security/`): Implementations of application ports including database repositories (in-memory & SQLAlchemy 2.0 SQLite), resilience primitives, and observability collectors.
-- **API Layer** (`apps/api/src/agentpay/api/`): HTTP routes, error envelopes, and middleware.
-- **Worker Runtime** (`apps/worker/src/agentpay/worker/`): Background outbox event dispatcher, periodic maintenance jobs (approval expiration, payment reconciliation).
-- **Control Center Frontend** (`apps/web/`): React 19 + TypeScript 5 accessible dashboard.
-- **Scripts & Security** (`scripts/`, `security/`): Standalone CLI tools (audit verifier, SBOM & provenance generator).
+AgentPay is an agent action-control and transaction platform enforcing deterministic spending policies, cryptographic human approval bindings, and fail-closed safety (§1, §2).
+- **Domain Layer** (`apps/api/src/agentpay/domain/`): Pure Python business models (`Money`, `ActionRequest`, `Approval`, `Policy`, `Payments`, `Outbox`, `Security`). Zero framework, ORM, HTTP, or SDK imports (§10).
+- **Application Layer** (`apps/api/src/agentpay/application/`): `PurchaseOrchestrator`, `ApprovalService`, `PaymentReconciler`, `AbuseDetector`, `EventBus`, domain ports.
+- **Adapters & Infrastructure** (`apps/api/src/agentpay/adapters/`, `infrastructure/`, `security/`): `StripePaymentProvider`, `RazorpayPaymentProvider`, `ModelGateway`, Protocols (`ACP`, `AP2`, `UAP`, `x402`), Database repositories (in-memory & SQLAlchemy 2.0 SQLite), Resilience primitives (`CircuitBreaker`, `RetryPolicy`), Outbound SSRF guard.
+- **API Layer** (`apps/api/src/agentpay/api/`): ASGI application `AgentPayApiApp`, `/api/v1/*`, `/agent/catalog`, `/api/v1/webhooks/payments`.
+- **Worker Runtime** (`apps/worker/src/agentpay_worker/`, `apps/api/src/agentpay/workers/`): Background outbox dispatcher, periodic maintenance jobs.
+- **Control Center Frontend** (`apps/web/`): React 19 + TypeScript 5 accessible dashboard with live ASGI client and offline fallback.
+- **Adversarial & Verification Tooling** (`tests/adversarial/`, `scripts/`): Multi-protocol probes, concurrency probes, least-privilege client probes, webhook replay probes, SSRF resilience, model gateway resilience, SBOM/provenance verifier.
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| 1 | SSRF Protection | Outbound URL validator blocking private IPs, metadata, loopback, IPv6 mapped/ULA | M1 | §60 |
-| 2 | Retries & Backoff | Bounded exponential backoff with full jitter, read-only/idempotent restriction | M1 | §102 |
-| 3 | Circuit Breaker | Thread-safe state machine (CLOSED/OPEN/HALF_OPEN) with failure thresholds | M1 | §103 |
-| 4 | Model Gateway | DecisionEngine adapter with token budget, timeout, circuit breaker, fail-closed fallback | M1 | §23 |
-| 5 | Evaluation Dataset & Runner | Versioned JSON benchmark dataset and automated evaluator in pytest | M1 | §117 |
-| 6 | Transactional Outbox | OutboxEvent domain entity, OutboxRepository port, in-memory & SQLAlchemy implementations | M2 | §106 |
-| 7 | Event Bus | Pluggable EventBus interface and thread-safe in-process InMemoryEventBus | M2 | §104 |
-| 8 | Background Worker Runtime | Functional runtime in apps/worker/ polling outbox, dispatching events with idempotency | M2 | §105 |
-| 9 | Maintenance Jobs | Periodic ApprovalSweeperJob and PaymentReconciliationJob | M2 | §104, §105 |
-| 10 | Security Events | SecurityEvent model and AuditEventType additions for audit ledger | M3 | §62, §63 |
-| 11 | Abuse Detection Service | AbuseDetector monitoring credential stuffing, scraping, tool loops, spend velocity | M3 | §62, §63 |
-| 12 | Observability Tracer & Meter | OpenTelemetry-compatible Tracer (Span, span_id) and Meter (Counter, Histogram) | M3 | §47 |
-| 13 | Metrics Endpoint | Authenticated /api/v1/metrics route returning Prometheus text and JSON | M3 | §47 |
-| 14 | Frontend Accessibility | ARIA landmarks, roles, live regions, keyboard navigation across apps/web/src/ | M4 | §121 |
-| 15 | Web Accessibility Tests | Programmatic assertions in apps/web/tests/ (node --test tests/web.test.mjs) | M4 | §121 |
-| 16 | SBOM & Provenance CLI | scripts/generate_sbom.py parsing uv.lock & package.json into CycloneDX 1.5 & SLSA | M4 | §57, §130 |
-| 17 | SBOM Unit Tests | Comprehensive automated tests for SBOM & SLSA provenance generation | M4 | §57, §130 |
-| 18 | Documentation & Gate Sync | Synchronize test/file counts and status in AGENTS.md, README.md, docs/ | M5 | §0.1, §176 |
+| 1 | Model Gateway Concurrency & TOCTOU Fix | Atomic acquire/reserve and release in TokenBudgetTracker preventing concurrency overshoot | M1 | R1 (§23, §102) |
+| 2 | Multi-Tenant Token Budget Isolation | Tenant-scoped agent key partitioning (tenant:X, agent:X:Y) and double-consume elimination | M1 | R1 (§49–§51) |
+| 3 | Per-Tenant Circuit Breakers | ModelGateway tenant-isolated circuit breakers preventing cross-tenant denial-of-service | M1 | R1 (§103) |
+| 4 | Model Gateway Resilience Probes | Update stress_test_model_gateway_resilience.py and unit tests to verify all 6 probes pass | M1 | R1 (§117) |
+| 5 | SAGA Compensation Exception Rollback | PurchaseOrchestrator exception guards releasing inventory on create_payment/order_save failures | M2 | R2 (§43, §44) |
+| 6 | SQL Repository Atomic Approval Consumption | SqlAlchemyApprovalRepository atomic_consume implementation with conditional row locking | M2 | R2 (§20) |
+| 7 | PaymentReconciler Worker Contract Alignment | Add reconcile_timeout(attempt) to PaymentReconciler and fix frozen Approval status mutation in worker | M2 | R2 (§104, §105) |
+| 8 | UAP Protocol Strict Integer Validation | Reject floats, booleans, negative amounts/quantities with MalformedPayloadError in UAP | M3 | R3 (§107, §108) |
+| 9 | x402 Protocol Strict Integer Validation | Reject floats, booleans, negative amounts with MalformedPayloadError in x402 | M3 | R3 (§107, §108) |
+| 10 | Protocol Stress Harness Expansion | Expand stress_test_protocols.py to include UAP and x402 adversarial probes | M3 | R3 (§107, §108) |
+| 11 | Razorpay Provider Timestamp Hardening | Add timestamp tolerance verification to RazorpayPaymentProvider.verify_webhook_signature | M4 | R4 (§39, §61) |
+| 12 | Webhook Replay & Reconciliation Hardening | End-to-end verification of HMAC verification, anti-replay, and payment state reconciliation | M4 | R4 (§41, §61) |
+| 13 | Vite Dev Server Proxy Expansion | Add /agent proxy to apps/web/vite.config.ts alongside /api | M5 | R5 (§110, §111) |
+| 14 | Frontend Live Dispatching & Offline Sync | Ensure Control Center live API dispatch, token/tenant propagation, and fallback contracts | M5 | R5 (§112, §121) |
+| 15 | Full Release Verification & Documentation | Verify 4 CI gates + 9 auxiliary stress suites pass with 0 errors; update docs | M5 | R5 (§0.2, §176) |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Outbound SSRF & Resilience & Model Gateway | Features 1–5 | none | COMPLETE |
-| M2 | Transactional Outbox, Event Bus & Workers | Features 6–9 | none | COMPLETE |
-| M3 | Abuse Detection & Structured Observability | Features 10–13 | M1 (observability hooks) | COMPLETE |
-| M4 | Frontend Accessibility & Supply-Chain SBOM | Features 14–17 | none | COMPLETE |
-| M5 | Documentation Sync & Release Verification | Feature 18 | M1, M2, M3, M4 | COMPLETE |
+| M1 | Component Bug Remediation & Model Gateway Resilience | Features 1–4 | none | DONE |
+| M2 | Purchase Orchestrator & Saga Coordinator Hardening | Features 5–7 | none | IN_PROGRESS |
+| M3 | Protocol Connectors & Adapters Hardening | Features 8–10 | none | PLANNED |
+| M4 | Payment Gateway & Webhook Connectors | Features 11–12 | none | PLANNED |
+| M5 | Frontend & Backend Contract Integration & Release Verification | Features 13–15 | M1, M2, M3, M4 | PLANNED |
 
 ## Interface Contracts
 
-### M1: Security SSRF & Resilience ↔ Applications
-- `OutboundUrlValidator.validate_url(url: str, allowed_schemes: set[str] | None, allowed_hosts: set[str] | None) -> SafeTarget`
-- `CircuitBreaker.call(func: Callable[..., T], *args, **kwargs) -> T` (raises `CircuitBreakerOpenError`)
-- `RetryPolicy.execute(func: Callable[..., T], *args, **kwargs) -> T`
-- `ModelGateway(DecisionEngine).evaluate(context: DecisionContext) -> Decision` (fail-closed fallback returning `DecisionRecommendation.REVIEW` / `DENY`, `RiskLevel.HIGH`, `confidence=0.0`)
+### M1: Model Gateway ↔ TokenBudgetTracker & Resilience (VERIFIED)
+- `TokenBudgetTracker.acquire(tenant_id: str, agent_id: str, estimated_tokens: int, estimated_cost: int) -> bool`
+- `TokenBudgetTracker.release(tenant_id: str, agent_id: str, tokens: int, cost_minor_units: int) -> None`
+- `TokenBudgetTracker.consume(tenant_id: str, agent_id: str, tokens: int, cost_minor_units: int) -> None`
+- `TokenBudgetTracker.get_usage(entity_id: str) -> tuple[int, int]` (backward-compatible)
+- `ModelGateway._get_circuit_breaker(tenant_id: str) -> CircuitBreaker`
 
-### M2: Transactional Outbox & Event Bus ↔ Worker
-- `OutboxRepository.save(event: OutboxEvent) -> None`
-- `OutboxRepository.list_pending(tenant_id: str, limit: int) -> list[OutboxEvent]`
-- `OutboxRepository.mark_published(tenant_id: str, event_id: str, published_at: datetime) -> None`
-- `OutboxRepository.mark_failed(tenant_id: str, event_id: str, error: str, retry_count: int, next_retry_at: datetime | None) -> None`
-- `EventBus.publish(event: OutboxEvent) -> None`
-- `EventBus.subscribe(pattern: str, handler: Callable[[OutboxEvent], None]) -> None`
-- `ApprovalRepository.list_pending(tenant_id: str, before: datetime) -> list[Approval]`
-- `PaymentRepository.list_by_status(tenant_id: str, status: PaymentStatus) -> list[PaymentAttempt]`
+### M2: Purchase Orchestrator ↔ Repositories & Reconciler
+- `SqlAlchemyApprovalRepository.atomic_consume(tenant_id: str, approval_id: str) -> Approval`
+- `PurchaseOrchestrator._execute_order_and_payment_pipeline()`: SAGA compensation `try...except` releasing inventory on payment/persistence errors
+- `PaymentReconciler.reconcile_timeout(attempt: PaymentAttempt) -> PaymentAttempt`
+- `Approval.reject(reason: str, rejected_at: datetime) -> Approval` (immutable return)
 
-### M3: Abuse Detector & Observability ↔ Domain & API
-- `AbuseDetector.record_auth_failure(tenant_id: str, principal_id: str, ip: str) -> None`
-- `AbuseDetector.record_request(tenant_id: str, agent_id: str, path: str) -> None`
-- `AbuseDetector.record_spend(tenant_id: str, agent_id: str, amount: Money) -> None`
-- Emits `AuditEventType.SECURITY_EVENT_EMITTED`, transitions agent to `QUARANTINED` / `SUSPENDED`.
-- `Tracer.start_span(name: str, attributes: dict[str, Any] | None) -> Span`
-- `Meter.counter(name: str).increment(delta: int, labels: dict[str, str]) -> None`
-- `Meter.histogram(name: str).record(value: float, labels: dict[str, str]) -> None`
+### M3: Protocol Adapters ↔ ActionRequest
+- `UapAdapter.parse_payload(payload: dict[str, Any]) -> UapMessage` (raises `MalformedPayloadError` on `bool` or non-`int`)
+- `X402Adapter.parse_payload(payload: dict[str, Any]) -> X402PaymentRequest` (raises `MalformedPayloadError` on `bool` or non-`int`)
+- `tests/adversarial/stress_test_protocols.py`: executes ACP, AP2, UAP, and x402 adversarial suites
 
-### M4: Accessibility & SBOM ↔ Web / Build
-- ARIA semantic roles: `role="dialog"`, `role="alert"`, `role="tablist"`, `role="tab"`
-- Keyboard handling: `onKeyDown` (`Enter`, `Space`, `Escape`)
-- `scripts/generate_sbom.py --format cyclonedx|slsa --output <path>`
+### M4: Payment Providers ↔ Webhooks
+- `RazorpayPaymentProvider.verify_webhook_signature(payload: bytes, signature: str, secret: str, timestamp: int | None, tolerance_seconds: int = 300) -> bool`
+- `PaymentReconciler.process_webhook(provider: str, payload: bytes, signature: str, timestamp_str: str | None)`
 
-## Code Layout
-- `apps/api/src/agentpay/domain/` (Pure domain entities: `security.py`, `outbox.py`, etc.)
-- `apps/api/src/agentpay/application/ports/` (`outbox_port.py`, `event_bus_port.py`, etc.)
-- `apps/api/src/agentpay/application/services/` (`abuse_detector.py`, etc.)
-- `apps/api/src/agentpay/infrastructure/resilience/` (`circuit_breaker.py`, `retry.py`)
-- `apps/api/src/agentpay/infrastructure/observability/` (`tracer.py`, `meter.py`)
-- `apps/api/src/agentpay/infrastructure/database/` (SQLAlchemy models and repositories)
-- `apps/api/src/agentpay/security/` (`ssrf.py`)
-- `apps/api/src/agentpay/adapters/model_gateway/` (`model_gateway.py`)
-- `apps/worker/src/agentpay/worker/` (`runtime.py`, `dispatcher.py`, `jobs.py`)
-- `apps/web/src/` (React accessibility upgrades)
-- `scripts/` (`generate_sbom.py`)
-- `tests/` (`apps/api/tests/unit/`, `tests/fixtures/evaluation/`, `apps/web/tests/`)
+### M5: Web Frontend ↔ ASGI Backend
+- `apps/web/vite.config.ts`: proxy `"/api"` and `"/agent"` to `http://localhost:8000`
+- `apps/web/src/services/api.ts`: Bearer token authorization, `X-Tenant-ID` propagation, offline fallback

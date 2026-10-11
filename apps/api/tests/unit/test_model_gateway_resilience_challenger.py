@@ -249,17 +249,45 @@ def test_token_budget_tracker_reset_clears_usage() -> None:
 
 
 def test_token_budget_tracker_double_consumption_on_identical_ids() -> None:
-    """Documenting logic flaw in TokenBudgetTracker.consume() when tenant_id == agent_id."""
+    """Verifying TokenBudgetTracker.consume() avoids double consumption when tenant_id == agent_id."""
     tracker = TokenBudgetTracker()
     tracker.consume("same_id", "same_id", tokens=100, cost_minor_units=10)
     tokens, cost = tracker.get_usage("same_id")
-    assert tokens == 200
-    assert cost == 20
+    assert tokens == 100
+    assert cost == 10
 
 
 def test_token_budget_tracker_cross_tenant_collision() -> None:
-    """Documenting multi-tenant isolation flaw when agent_id is not namespaced by tenant_id."""
+    """Verifying multi-tenant isolation when agent_id is namespaced by tenant_id."""
     tracker = TokenBudgetTracker(default_limits=BudgetLimits(max_tokens=200))
     tracker.consume("tenant_A", "agent_shared", 200)
-    # Tenant B has not spent any tokens, but agent_shared is exhausted globally
-    assert tracker.has_budget("tenant_B", "agent_shared") is False
+    # Tenant B has not spent any tokens; agent_shared is isolated per tenant
+    assert tracker.has_budget("tenant_B", "agent_shared") is True
+
+
+def test_token_budget_tracker_atomic_acquire_and_release() -> None:
+    """Verifying atomic acquire and rollback release under TokenBudgetTracker."""
+    tracker = TokenBudgetTracker(
+        default_limits=BudgetLimits(max_tokens=200, max_cost_minor_units=10)
+    )
+    # First reservation succeeds
+    assert tracker.acquire("t1", "a1", estimated_tokens=150, estimated_cost=5) is True
+    # Second reservation exceeds token limit (150 + 150 = 300 > 200)
+    assert tracker.acquire("t1", "a1", estimated_tokens=150, estimated_cost=5) is False
+    # Release reservation on failure/abort
+    tracker.release("t1", "a1", tokens=150, cost_minor_units=5)
+    # Now reservation can be acquired again
+    assert tracker.acquire("t1", "a1", estimated_tokens=150, estimated_cost=5) is True
+
+
+def test_model_gateway_per_tenant_circuit_breaker_isolation() -> None:
+    """Verifying ModelGateway maintains independent per-tenant circuit breakers."""
+    gateway = ModelGateway()
+    cb_tenant1 = gateway._get_circuit_breaker("tenant_01")
+    cb_tenant2 = gateway._get_circuit_breaker("tenant_02")
+    assert cb_tenant1 is not cb_tenant2
+    assert cb_tenant1.name == "model_gateway:tenant_01"
+    assert cb_tenant2.name == "model_gateway:tenant_02"
+    cb_tenant1.trip("Tenant 1 failure")
+    assert cb_tenant1.is_open is True
+    assert cb_tenant2.is_open is False

@@ -1449,3 +1449,249 @@ def test_property_cache_key_with_control_characters_always_fails(
         format_tenant_cache_key("tenant_01", corrupted, "01")
     with pytest.raises(ValueError):
         format_tenant_cache_key("tenant_01", "agent", corrupted)
+
+
+# =============================================================================
+# Milestone 1 Challenger 1 Vulnerability Remediation Tests
+# =============================================================================
+
+
+def test_remediation_principal_id_binding_enforced_in_authorize_action() -> None:
+    """Remediation 1: authorize_action strictly validates action.principal_id == agent.principal_id (§6, §15)."""
+    service = AgentAuthorizationService()
+    agent = build_agent(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        principal_id="user_low_privilege",
+        capabilities=("catalog.search",),
+    )
+
+    # Spoofed principal attempting privilege escalation
+    spoofed_action = build_action_request(
+        action_id="act_spoof",
+        tenant_id="tenant_01",
+        principal_id="user_admin",
+        agent_id="agent_01",
+        action="search",
+    )
+    with pytest.raises(InvalidIdentityError, match="principal_id"):
+        service.authorize_action(agent, spoofed_action, tenant_id="tenant_01")
+
+    # Legitimate matching principal succeeds
+    legit_action = build_action_request(
+        action_id="act_legit",
+        tenant_id="tenant_01",
+        principal_id="user_low_privilege",
+        agent_id="agent_01",
+        action="search",
+    )
+    assert service.authorize_action(agent, legit_action, tenant_id="tenant_01") is True
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "UPDATE_PERMISSIONS",
+        "Update_Permissions",
+        "update_permissions",
+        "widen_spending_limits ",
+        "  widen_spending_limits",
+        "  WIDEN SPENDING LIMITS  ",
+        "update-permissions",
+        "GRANT_CAPABILITY",
+        "elevate role",
+    ],
+)
+def test_remediation_forbidden_agent_actions_normalization(variant: str) -> None:
+    """Remediation 2: FORBIDDEN_AGENT_ACTIONS is normalized for casing, whitespace, and slugs."""
+    service = AgentAuthorizationService()
+    agent = build_agent(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        capabilities=("catalog.search",),
+    )
+    action = build_action_request(
+        action_id="act_forbid_var",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        action=variant,
+    )
+    with pytest.raises(
+        PrivilegeEscalationAttemptError, match="cannot perform administrative action"
+    ):
+        service.authorize_action(agent, action, tenant_id="tenant_01")
+
+
+def test_remediation_authorize_action_falls_back_to_permissions_repo_when_none() -> None:
+    """Remediation 3: authorize_action consults permissions_repo when permissions=None (§17)."""
+    repo = InMemoryAgentPermissionsRepository()
+    # Revoke payment.request in repository
+    repo.save(
+        "tenant_01",
+        build_permissions(
+            agent_id="agent_01",
+            tenant_id="tenant_01",
+            capabilities=("catalog.search",),
+        ),
+    )
+
+    # Agent entity still has payment.request in memory
+    agent = build_agent(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        capabilities=("catalog.search", "payment.request"),
+    )
+
+    service = AgentAuthorizationService(permissions_repo=repo)
+    action = build_action_request(
+        action_id="act_purchase",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        action="purchase",
+    )
+
+    # When permissions=None, service consults repo and denies revoked capability
+    with pytest.raises(
+        MissingCapabilityError, match=r"lacks required capability 'payment\.request'"
+    ):
+        service.authorize_action(agent, action, tenant_id="tenant_01", permissions=None)
+
+
+def test_remediation_permissions_tenant_id_matching_and_none_rejection() -> None:
+    """Remediation 4: Permissions tenant_id must strictly match execution context and reject None (§49, §50)."""
+    service = AgentAuthorizationService()
+    agent = build_agent(
+        agent_id="agent_01",
+        tenant_id="victim_tenant",
+        principal_id="user_01",
+        capabilities=("catalog.search", "payment.request"),
+    )
+    action = build_action_request(
+        action_id="act_01",
+        tenant_id="victim_tenant",
+        principal_id="user_01",
+        agent_id="agent_01",
+        action="purchase",
+    )
+
+    # 1. Foreign tenant permissions rejected
+    foreign_perms = build_permissions(
+        agent_id="agent_01",
+        tenant_id="attacker_tenant",
+        capabilities=("payment.request",),
+    )
+    with pytest.raises(CrossTenantAccessError, match="Permissions tenant does not match"):
+        service.authorize_action(
+            agent, action, tenant_id="victim_tenant", permissions=foreign_perms
+        )
+
+    # 2. AgentPermissions instantiation rejects None tenant_id
+    with pytest.raises(InvalidIdentityError, match="tenant_id must be a non-empty string"):
+        AgentPermissions(
+            agent_id="agent_01",
+            tenant_id=None,  # type: ignore[arg-type]
+            capabilities=("payment.request",),
+            limits=SpendingLimits(100, 100),
+        )
+
+    # 3. Repository save rejects mismatched or None tenant_id
+    repo = InMemoryAgentPermissionsRepository()
+    with pytest.raises(CrossTenantAccessError, match="does not match partition"):
+        repo.save("victim_tenant", foreign_perms)
+
+
+def test_remediation_assert_no_escalation_requires_approval_above_minor_and_allowed_categories() -> (
+    None
+):
+    """Remediation 5: assert_no_escalation defends against approval threshold and category escalation (§0.4, §17)."""
+    current = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, 50_000),
+        requires_approval_above_minor=50_000,
+        allowed_categories=("books",),
+    )
+
+    # 1. Increasing requires_approval_above_minor raises PrivilegeEscalationAttemptError
+    escalated_thresh = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, 900_000),
+        requires_approval_above_minor=900_000,
+        allowed_categories=("books",),
+    )
+    with pytest.raises(PrivilegeEscalationAttemptError, match="Cannot increase approval threshold"):
+        current.assert_no_escalation(escalated_thresh)
+
+    # 2. Removing requires_approval_above_minor raises PrivilegeEscalationAttemptError
+    removed_thresh = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, None),
+        requires_approval_above_minor=None,
+        allowed_categories=("books",),
+    )
+    with pytest.raises(PrivilegeEscalationAttemptError, match="Cannot remove"):
+        current.assert_no_escalation(removed_thresh)
+
+    # 3. Widening allowed_categories raises PrivilegeEscalationAttemptError
+    widened_cats = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, 50_000),
+        requires_approval_above_minor=50_000,
+        allowed_categories=("books", "weapons"),
+    )
+    with pytest.raises(PrivilegeEscalationAttemptError, match="Cannot widen allowed_categories"):
+        current.assert_no_escalation(widened_cats)
+
+    # 4. Removing allowed_categories restriction entirely raises PrivilegeEscalationAttemptError
+    cleared_cats = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, 50_000),
+        requires_approval_above_minor=50_000,
+        allowed_categories=(),
+    )
+    with pytest.raises(PrivilegeEscalationAttemptError, match="Cannot remove allowed_categories"):
+        current.assert_no_escalation(cleared_cats)
+
+    # 5. Narrowing allowed_categories is permitted
+    current_broad = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, 50_000),
+        requires_approval_above_minor=50_000,
+        allowed_categories=("books", "electronics", "groceries"),
+    )
+    narrowed = build_permissions(
+        agent_id="agent_01",
+        tenant_id="tenant_01",
+        capabilities=("payment.request",),
+        limits=SpendingLimits(100_000, 200_000, 50_000),
+        requires_approval_above_minor=50_000,
+        allowed_categories=("books",),
+    )
+    # Must not raise
+    current_broad.assert_no_escalation(narrowed)
+
+
+def test_remediation_format_tenant_cache_key_rejects_crlf_and_null_bytes() -> None:
+    """Remediation 6: format_tenant_cache_key rejects CRLF and null-byte injection (§51)."""
+    for bad_input in ["t1\r\nSET injected 1", "t1\rextra", "t1\nextra", "t1\x00extra", "t1\0extra"]:
+        with pytest.raises(ValueError, match="Control characters"):
+            format_tenant_cache_key(bad_input, "agent", "01")
+        with pytest.raises(ValueError, match="Control characters"):
+            format_tenant_cache_key("tenant_01", bad_input, "01")
+        with pytest.raises(ValueError, match="Control characters"):
+            format_tenant_cache_key("tenant_01", "agent", bad_input)

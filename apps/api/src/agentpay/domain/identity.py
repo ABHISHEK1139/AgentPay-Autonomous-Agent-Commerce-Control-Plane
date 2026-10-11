@@ -452,6 +452,21 @@ class AgentPermissions:
                 f"Cannot increase limits.requires_approval_above_minor from {cur_lim_thresh} to {prop_lim_thresh}"
             )
 
+        cur_direct_thresh = self.requires_approval_above_minor
+        prop_direct_thresh = proposed.requires_approval_above_minor
+        if cur_direct_thresh is not None and prop_direct_thresh is None:
+            raise PrivilegeEscalationAttemptError(
+                "Cannot remove requires_approval_above_minor threshold"
+            )
+        if (
+            cur_direct_thresh is not None
+            and prop_direct_thresh is not None
+            and prop_direct_thresh > cur_direct_thresh
+        ):
+            raise PrivilegeEscalationAttemptError(
+                f"Cannot increase requires_approval_above_minor from {cur_direct_thresh} to {prop_direct_thresh}"
+            )
+
         # Category Widening Defense (§0.4, §17)
         if self.allowed_categories:
             if not proposed.allowed_categories:

@@ -16,6 +16,7 @@ Coordinates the canonical 12-step vertical slice flow:
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -736,12 +737,26 @@ class PurchaseOrchestrator:
         payment_attempt = None
         if self._payment_provider is not None:
             idem_key = idempotency_key or f"idem_{action.action_id}"
-            payment_attempt = self._payment_provider.create_payment(
-                tenant_id=tenant_id,
-                intent_id=f"intent_{action.action_id}",
-                amount=action.amount,
-                idempotency_key=idem_key,
-            )
+            try:
+                payment_attempt = self._payment_provider.create_payment(
+                    tenant_id=tenant_id,
+                    intent_id=f"intent_{action.action_id}",
+                    amount=action.amount,
+                    idempotency_key=idem_key,
+                )
+            except Exception as exc:
+                # SAGA COMPENSATION: Release reserved inventory on payment creation failure (§44)
+                if self._inventory_repo is not None:
+                    self._inventory_repo.release(tenant_id, variant_id, quantity)
+                self._audit(
+                    AuditEventType.ORDER_CANCELLED,
+                    action,
+                    tenant_id,
+                    actor="order_service",
+                    data={"reason": f"Payment creation failed: {exc}"},
+                    trace_id=trace_id,
+                )
+                raise
 
             if self._payment_repo is not None:
                 self._payment_repo.save(tenant_id, payment_attempt)
@@ -879,7 +894,36 @@ class PurchaseOrchestrator:
         )
 
         if self._order_repo is not None:
-            self._order_repo.save(tenant_id, order)
+            try:
+                self._order_repo.save(tenant_id, order)
+            except Exception as exc:
+                # SAGA COMPENSATION: Trigger refund if payment was captured and release inventory (§44)
+                if (
+                    self._payment_provider is not None
+                    and payment_attempt is not None
+                    and payment_attempt.status is PaymentStatus.CAPTURED
+                ):
+                    with contextlib.suppress(Exception):
+                        self._payment_provider.refund(
+                            tenant_id=tenant_id,
+                            attempt_id=payment_attempt.attempt_id,
+                            amount=action.amount,
+                            reason="Order persistence failure compensation",
+                        )
+                if self._inventory_repo is not None:
+                    self._inventory_repo.release(tenant_id, variant_id, quantity)
+                self._audit(
+                    AuditEventType.ORDER_CANCELLED,
+                    action,
+                    tenant_id,
+                    actor="order_service",
+                    data={
+                        "order_id": order.order_id,
+                        "reason": f"Order persistence failed after payment capture: {exc}",
+                    },
+                    trace_id=trace_id,
+                )
+                raise
 
         self._audit(
             AuditEventType.ORDER_CREATED,

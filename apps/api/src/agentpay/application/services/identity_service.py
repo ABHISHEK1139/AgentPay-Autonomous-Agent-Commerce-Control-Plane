@@ -206,7 +206,11 @@ class AgentAuthorizationService:
 
         # 3. Privilege Escalation Defense (§0.4, §15, §112)
         normalized_action = action.action.strip().lower()
-        if normalized_action in FORBIDDEN_AGENT_ACTIONS:
+        normalized_action_slug = normalized_action.replace(" ", "_").replace("-", "_")
+        if (
+            normalized_action in FORBIDDEN_AGENT_ACTIONS
+            or normalized_action_slug in FORBIDDEN_AGENT_ACTIONS
+        ):
             raise PrivilegeEscalationAttemptError(
                 f"Agent '{agent.agent_id}' cannot perform administrative action '{action.action}'"
             )

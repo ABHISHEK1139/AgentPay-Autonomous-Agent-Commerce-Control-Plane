@@ -63,35 +63,129 @@ class TokenBudgetTracker:
     def _get_limits(self, entity_id: str) -> BudgetLimits:
         return self._limits.get(entity_id, self._default_limits)
 
+    def _get_entity_limits(self, namespaced_key: str, raw_id: str) -> BudgetLimits:
+        if namespaced_key in self._limits:
+            return self._limits[namespaced_key]
+        return self._limits.get(raw_id, self._default_limits)
+
     def has_budget(self, tenant_id: str, agent_id: str, estimated_tokens: int = 100) -> bool:
         """Checks if both tenant and agent have remaining token and cost budget."""
         with self._lock:
-            for entity_id in (tenant_id, agent_id):
-                limits = self._get_limits(entity_id)
-                current_tokens = self._token_usage.get(entity_id, 0)
-                current_cost = self._cost_usage.get(entity_id, 0)
-                if current_tokens + estimated_tokens > limits.max_tokens:
-                    return False
-                if current_cost > limits.max_cost_minor_units:
-                    return False
+            tenant_key = f"tenant:{tenant_id}"
+            agent_key = f"agent:{tenant_id}:{agent_id}"
+            t_limits = self._get_entity_limits(tenant_key, tenant_id)
+            a_limits = self._get_entity_limits(agent_key, agent_id)
+
+            t_tokens = self._token_usage.get(tenant_key, 0)
+            t_cost = self._cost_usage.get(tenant_key, 0)
+            if t_tokens + estimated_tokens > t_limits.max_tokens:
+                return False
+            if t_cost > t_limits.max_cost_minor_units:
+                return False
+
+            a_tokens = self._token_usage.get(agent_key, 0)
+            a_cost = self._cost_usage.get(agent_key, 0)
+            if a_tokens + estimated_tokens > a_limits.max_tokens:
+                return False
+            return a_cost <= a_limits.max_cost_minor_units
+
+    def acquire(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        estimated_tokens: int = 150,
+        estimated_cost: int = 1,
+    ) -> bool:
+        """Atomically checks limits and reserves budget under lock (§23)."""
+        with self._lock:
+            tenant_key = f"tenant:{tenant_id}"
+            agent_key = f"agent:{tenant_id}:{agent_id}"
+            t_limits = self._get_entity_limits(tenant_key, tenant_id)
+            a_limits = self._get_entity_limits(agent_key, agent_id)
+
+            t_tokens = self._token_usage.get(tenant_key, 0)
+            t_cost = self._cost_usage.get(tenant_key, 0)
+            if t_tokens + estimated_tokens > t_limits.max_tokens:
+                return False
+            if t_cost + estimated_cost > t_limits.max_cost_minor_units:
+                return False
+
+            a_tokens = self._token_usage.get(agent_key, 0)
+            a_cost = self._cost_usage.get(agent_key, 0)
+            if a_tokens + estimated_tokens > a_limits.max_tokens:
+                return False
+            if a_cost + estimated_cost > a_limits.max_cost_minor_units:
+                return False
+
+            # Atomically reserve budget
+            self._token_usage[tenant_key] = t_tokens + estimated_tokens
+            self._cost_usage[tenant_key] = t_cost + estimated_cost
+            self._token_usage[agent_key] = a_tokens + estimated_tokens
+            self._cost_usage[agent_key] = a_cost + estimated_cost
             return True
+
+    def release(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        tokens: int = 150,
+        cost_minor_units: int = 1,
+    ) -> None:
+        """Rollbacks reserved tokens and cost on failure under lock (§23)."""
+        with self._lock:
+            tenant_key = f"tenant:{tenant_id}"
+            agent_key = f"agent:{tenant_id}:{agent_id}"
+
+            self._token_usage[tenant_key] = max(0, self._token_usage.get(tenant_key, 0) - tokens)
+            self._cost_usage[tenant_key] = max(
+                0, self._cost_usage.get(tenant_key, 0) - cost_minor_units
+            )
+            self._token_usage[agent_key] = max(0, self._token_usage.get(agent_key, 0) - tokens)
+            self._cost_usage[agent_key] = max(
+                0, self._cost_usage.get(agent_key, 0) - cost_minor_units
+            )
 
     def consume(
         self, tenant_id: str, agent_id: str, tokens: int, cost_minor_units: int = 0
     ) -> None:
-        """Records token and cost consumption."""
+        """Records token and cost consumption without double consumption (§23)."""
         with self._lock:
-            for entity_id in (tenant_id, agent_id):
-                self._token_usage[entity_id] = self._token_usage.get(entity_id, 0) + tokens
-                self._cost_usage[entity_id] = self._cost_usage.get(entity_id, 0) + cost_minor_units
+            tenant_key = f"tenant:{tenant_id}"
+            agent_key = f"agent:{tenant_id}:{agent_id}"
+
+            self._token_usage[tenant_key] = self._token_usage.get(tenant_key, 0) + tokens
+            self._cost_usage[tenant_key] = self._cost_usage.get(tenant_key, 0) + cost_minor_units
+            self._token_usage[agent_key] = self._token_usage.get(agent_key, 0) + tokens
+            self._cost_usage[agent_key] = self._cost_usage.get(agent_key, 0) + cost_minor_units
 
     def get_usage(self, entity_id: str) -> tuple[int, int]:
-        """Returns (tokens_used, cost_minor_units_used) for an entity."""
+        """Returns (tokens_used, cost_minor_units_used) for an entity (§23).
+
+        Supports exact match, tenant keys ('tenant:{entity_id}'), and agent suffixes.
+        """
         with self._lock:
-            return (self._token_usage.get(entity_id, 0), self._cost_usage.get(entity_id, 0))
+            if entity_id in self._token_usage:
+                return (self._token_usage[entity_id], self._cost_usage.get(entity_id, 0))
+
+            tenant_key = f"tenant:{entity_id}"
+            if tenant_key in self._token_usage:
+                return (self._token_usage[tenant_key], self._cost_usage.get(tenant_key, 0))
+
+            matching_agent_keys = [
+                k
+                for k in self._token_usage
+                if k.startswith("agent:")
+                and (k.endswith(f":{entity_id}") or k == f"agent:{entity_id}")
+            ]
+            if matching_agent_keys:
+                total_t = sum(self._token_usage.get(k, 0) for k in matching_agent_keys)
+                total_c = sum(self._cost_usage.get(k, 0) for k in matching_agent_keys)
+                return (total_t, total_c)
+
+            return (0, 0)
 
     def reset(self) -> None:
-        """Resets all usage counters."""
+        """Resets all usage counters under lock (§23)."""
         with self._lock:
             self._token_usage.clear()
             self._cost_usage.clear()
@@ -261,11 +355,9 @@ class ModelGateway(DecisionEngine):
         policy_version: str = "spending-policy-v1",
     ) -> None:
         self._provider = provider or DefaultModelProvider()
-        self._circuit_breaker = circuit_breaker or CircuitBreaker(
-            name="model_gateway",
-            failure_threshold=3,
-            recovery_timeout_seconds=5.0,
-        )
+        self._default_circuit_breaker = circuit_breaker
+        self._circuit_breakers: dict[str, CircuitBreaker] = {}
+        self._cb_lock = threading.Lock()
         self._budget_tracker = budget_tracker
         self._timeout_seconds = timeout_seconds
         # Invariant: Fallback recommendation must NEVER be ALLOW (§23)
@@ -276,9 +368,28 @@ class ModelGateway(DecisionEngine):
         self._tool_policy_version = tool_policy_version
         self._policy_version = policy_version
 
+    def _get_circuit_breaker(self, tenant_id: str) -> CircuitBreaker:
+        """Retrieves or creates a tenant-isolated CircuitBreaker (§23, §103)."""
+        if self._default_circuit_breaker is not None:
+            return self._default_circuit_breaker
+        with self._cb_lock:
+            if tenant_id not in self._circuit_breakers:
+                self._circuit_breakers[tenant_id] = CircuitBreaker(
+                    name=f"model_gateway:{tenant_id}",
+                    failure_threshold=3,
+                    recovery_timeout_seconds=5.0,
+                )
+            return self._circuit_breakers[tenant_id]
+
     @property
     def circuit_breaker(self) -> CircuitBreaker:
-        return self._circuit_breaker
+        if self._default_circuit_breaker is not None:
+            return self._default_circuit_breaker
+        return self._get_circuit_breaker("default")
+
+    @property
+    def _circuit_breaker(self) -> CircuitBreaker:
+        return self.circuit_breaker
 
     @property
     def budget_tracker(self) -> TokenBudgetTracker | None:
@@ -347,58 +458,76 @@ class ModelGateway(DecisionEngine):
                 policy_version=self._policy_version,
             )
 
-        # 2. Pre-flight: Token / Cost Budget Check (§23)
-        if self._budget_tracker is not None and not self._budget_tracker.has_budget(
-            context.tenant_id, context.agent_id
-        ):
+        cb = self._get_circuit_breaker(context.tenant_id)
+
+        # 2. Circuit Breaker Fast-Check (§103)
+        if cb.is_open:
             return self._create_fallback_decision(
-                factor_code="BUDGET_EXCEEDED",
-                reason="Model token or cost budget exhausted for tenant or agent",
+                factor_code="CIRCUIT_BREAKER_OPEN",
+                reason=f"Model Gateway circuit breaker '{cb.name}' is OPEN",
                 risk_level=RiskLevel.HIGH,
             )
 
-        # 3. Circuit Breaker Check (§103)
-        if self._circuit_breaker.is_open:
-            return self._create_fallback_decision(
-                factor_code="CIRCUIT_BREAKER_OPEN",
-                reason=f"Model Gateway circuit breaker '{self._circuit_breaker.name}' is OPEN",
-                risk_level=RiskLevel.HIGH,
-            )
+        # 3. Pre-flight: Atomic Token / Cost Budget Reservation (§23)
+        reserved = False
+        if self._budget_tracker is not None:
+            if not self._budget_tracker.acquire(
+                context.tenant_id,
+                context.agent_id,
+                estimated_tokens=150,
+                estimated_cost=1,
+            ):
+                return self._create_fallback_decision(
+                    factor_code="BUDGET_EXCEEDED",
+                    reason="Model token or cost budget exhausted for tenant or agent",
+                    risk_level=RiskLevel.HIGH,
+                )
+            reserved = True
 
         # 4. Invocate downstream model with timeout and circuit breaker protection
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    self._circuit_breaker.call, self._provider.evaluate, context
-                )
+                future = executor.submit(cb.call, self._provider.evaluate, context)
                 decision = future.result(timeout=self._timeout_seconds)
         except concurrent.futures.TimeoutError:
-            self._circuit_breaker.trip(reason=f"Model timeout exceeded ({self._timeout_seconds}s)")
+            cb.trip(reason=f"Model timeout exceeded ({self._timeout_seconds}s)")
+            if reserved and self._budget_tracker is not None:
+                self._budget_tracker.release(
+                    context.tenant_id,
+                    context.agent_id,
+                    tokens=150,
+                    cost_minor_units=1,
+                )
             return self._create_fallback_decision(
                 factor_code="MODEL_TIMEOUT",
                 reason=f"Model request timed out after {self._timeout_seconds}s",
                 risk_level=RiskLevel.HIGH,
             )
         except CircuitBreakerOpenError as exc:
+            if reserved and self._budget_tracker is not None:
+                self._budget_tracker.release(
+                    context.tenant_id,
+                    context.agent_id,
+                    tokens=150,
+                    cost_minor_units=1,
+                )
             return self._create_fallback_decision(
                 factor_code="CIRCUIT_BREAKER_OPEN",
                 reason=str(exc),
                 risk_level=RiskLevel.HIGH,
             )
         except Exception as exc:
+            if reserved and self._budget_tracker is not None:
+                self._budget_tracker.release(
+                    context.tenant_id,
+                    context.agent_id,
+                    tokens=150,
+                    cost_minor_units=1,
+                )
             return self._create_fallback_decision(
                 factor_code="MODEL_GATEWAY_FALLBACK",
                 reason=f"Model invocation failed: {exc}",
                 risk_level=RiskLevel.HIGH,
-            )
-
-        # 5. Post-execution token accounting
-        if self._budget_tracker is not None:
-            self._budget_tracker.consume(
-                context.tenant_id,
-                context.agent_id,
-                tokens=150,
-                cost_minor_units=1,
             )
 
         return decision

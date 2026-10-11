@@ -386,3 +386,63 @@ Integrity mode: development
 - [x] `apps/web/src/` components include explicit ARIA roles/attributes (`aria-*`, `role=`) and keyboard interaction support, verified by automated assertions in `node --test tests/web.test.mjs`.
 - [x] `uv run python scripts/generate_sbom.py --help` and programmatic SBOM/provenance generation tests verify valid CycloneDX JSON and SHA-256 provenance digests from `uv.lock` and `package.json`.
 - [x] All 4 CI gates (`uv run ruff format --check .`, `uv run ruff check .`, `uv run mypy`, `uv run pytest`) and all auxiliary/adversarial suites pass with 0 errors, and `AGENTS.md`, `README.md`, `docs/engineering/known-limitations.md`, `docs/engineering/current-state.md`, and `docs/security/autonomous-audit-report.md` are updated to match the exact measured counts.
+
+
+## Follow-up — 2026-10-11T04:03:12Z
+
+# Comprehensive Bug Remediation, Orchestrator Hardening, and Full System Integration for AgentPay
+
+Working directory: c:\Users\ak612\OneDrive\Desktop\platfrom
+Integrity mode: development
+
+Perform a comprehensive multi-agent audit and remediation of all bugs, orchestrator/coordinator contracts, protocol connectors, payment providers, and live frontend integration across the AgentPay platform according to the authoritative AGENTS.md specification.
+
+## Requirements
+
+### R1. Component Bug Remediation & Model Gateway Resilience
+- Remediate TokenBudgetTracker concurrency burst TOCTOU, double-consume, and cross-tenant collision flaws flagged in stress_test_model_gateway_resilience.py.
+- Ensure all token budget tracking, circuit breaker states, and sliding-window rate limiters enforce strict multi-tenant isolation and thread safety.
+
+### R2. Purchase Orchestrator & Saga Coordinator Hardening
+- Audit and harden PurchaseOrchestrator transaction lifecycle, atomic single-use approval consumption (§20), and idempotency conflict handling (§42).
+- Ensure fail-closed timeout reconciliation (§43), compensation sagas, and inventory rollbacks on partial execution failures.
+- Verify exact 7-field approval binding (action, amount, merchant, resource, currency, tenant, action version).
+
+### R3. Protocol Connectors & Adapters Hardening
+- Audit and verify all protocol connectors (ACP, AP2, UAP, x402) for complete schema conformance, fail-closed handling of malformed, negative, or floating-point payloads, and lossless mapping to canonical ActionRequest.
+- Guarantee that all protocol adapters preserve integer minor units and ISO 4217 currency exponent semantics.
+
+### R4. Payment Gateway & Webhook Connectors
+- Verify and harden StripePaymentProvider and RazorpayPaymentProvider implementations of the canonical PaymentProvider domain port.
+- Enforce HMAC-SHA256 signature verification, anti-replay timestamp tolerance windows (300s), and canonical webhook event normalization.
+
+### R5. Frontend & Backend Contract Integration
+- Verify contract synchronization between React Control Center (apps/web) and backend ASGI endpoints (apps/api).
+- Ensure authenticated live dispatching (/api/v1/emergency/*, /api/v1/approvals/*, /api/v1/metrics, /api/v1/actions, /agent/catalog), token management, tenant header propagation, and offline fallback resilience.
+
+## Verification Resources & Acceptance Criteria
+
+### Verification Commands
+The following programmatic test commands must be executed and pass with 0 errors:
+1. uv run ruff format --check . (Code formatting clean across all files)
+2. uv run ruff check . (Lint clean across all files)
+3. uv run mypy (Strict type checking clean across all source files)
+4. uv run pytest (Full test suite passes, 684+ tests, 0 failures, 0 regressions)
+5. node --test tests/web.test.mjs (All web frontend unit & integration suites pass)
+6. npm --prefix apps/web run build (Clean TypeScript & Vite production build)
+7. uv run python tests/adversarial/stress_test_protocols.py (42/42 protocol probes pass)
+8. uv run python tests/adversarial/stress_test_concurrency.py (4/4 concurrency probes pass)
+9. uv run python tests/adversarial/stress_test_client_privilege.py (6/6 least-privilege probes pass)
+10. uv run python tests/adversarial/stress_test_money.py (6/6 currency & rational FX probes pass)
+11. uv run python tests/adversarial/stress_test_webhooks.py (6/6 webhook replay probes pass)
+12. uv run python tests/adversarial/stress_test_ssrf_resilience.py (9/9 SSRF & circuit breaker probes pass)
+13. uv run python tests/adversarial/stress_test_model_gateway_resilience.py (All model gateway probes pass, TokenBudgetTracker flaws resolved)
+14. uv run python scripts/generate_sbom.py --verify (CycloneDX 1.5 SBOM & SLSA 1.2 provenance verified)
+
+### Acceptance Criteria
+- [ ] TokenBudgetTracker concurrency race and cross-tenant collision flaws are completely resolved and verified in stress probes.
+- [ ] PurchaseOrchestrator guarantees single-use approval consumption, idempotency replay, and fail-closed saga compensation.
+- [ ] All protocol connectors (ACP, AP2, UAP, x402) cleanly pass all empirical adversarial malformed payload probes.
+- [ ] Stripe and Razorpay webhook signature verification, replay protection, and reconciliation pass all contract tests.
+- [ ] Frontend Control Center builds without TypeScript/Vite errors and successfully dispatches live authenticated requests to backend endpoints.
+- [ ] All 4 CI gates and all 9 auxiliary adversarial stress suites pass with 100% success.
