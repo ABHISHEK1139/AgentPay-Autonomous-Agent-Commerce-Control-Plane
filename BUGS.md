@@ -476,4 +476,4 @@ Docker daemon is **not running**, so persistence tests use SQLite in-memory; Pos
 behaviour is unverified. No external security assessment has been performed.
 
 Gates at time of writing: `ruff format` 175 files clean, `ruff check` clean, `mypy` 167 files clean,
-`pytest` 736 passed / 0 skipped.
+`pytest` 740 passed / 0 skipped.
