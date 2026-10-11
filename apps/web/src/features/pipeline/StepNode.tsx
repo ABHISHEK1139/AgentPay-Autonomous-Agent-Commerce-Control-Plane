@@ -64,10 +64,22 @@ export const StepNode: React.FC<StepNodeProps> = ({ step, index, isSelected, onC
 
   const style = getStatusColor(step.status);
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onClick();
+    }
+  };
+
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-pressed={isSelected}
+      aria-label={`Step ${index + 1}: ${step.title}, status ${step.status}`}
       onClick={onClick}
-      className={`relative cursor-pointer transition-all duration-200 p-3 rounded-xl border flex flex-col justify-between min-w-[130px] max-w-[150px] flex-1 ${
+      onKeyDown={handleKeyDown}
+      className={`relative cursor-pointer transition-all duration-200 p-3 rounded-xl border flex flex-col justify-between min-w-[130px] max-w-[150px] flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500 ${
         isSelected
           ? "ring-2 ring-blue-600 shadow-md " + style.bg + " " + style.border
           : "hover:shadow-sm hover:border-slate-300 " + style.bg + " " + style.border

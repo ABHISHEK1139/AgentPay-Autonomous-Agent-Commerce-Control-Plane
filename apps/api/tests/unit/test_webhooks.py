@@ -916,3 +916,124 @@ def test_direct_reconciler_state_machine_guards_and_idempotency() -> None:
     )
     assert res_ref["status"] == "PROCESSED"
     assert res_ref["payment_status"] == "REFUNDED"
+
+
+def test_b_wh_01_raw_bytes_hmac_verification() -> None:
+    """B-WH-01: Real PSP raw request bytes verify successfully without re-serialization drift."""
+    import hashlib
+    import hmac
+
+    app, client, _ = _seed_test_env("tenant_01")
+    raw_payload_bytes = (
+        b'{"zebra": 100, "apple": 200, "event_id": "evt_psp_raw_01", '
+        b'"attempt_id": "att_test_01", "event_type": "payment.captured", "tenant_id": "tenant_01"}'
+    )
+    secret = app.webhook_secret
+    psp_sig = hmac.new(secret.encode("utf-8"), raw_payload_bytes, hashlib.sha256).hexdigest()
+
+    resp = client.post_webhook(
+        "payment.captured",
+        payload={
+            "zebra": 100,
+            "apple": 200,
+            "event_id": "evt_psp_raw_01",
+            "attempt_id": "att_test_01",
+        },
+        tenant_id="tenant_01",
+        custom_signature=psp_sig,
+        raw_body=raw_payload_bytes,
+    )
+    assert resp.status_code == 200
+    assert resp.body["status"] == "PROCESSED"
+
+
+def test_b_wh_02_future_timestamp_skew_rejection() -> None:
+    """B-WH-02: Future timestamp skew > 30s is rejected; <= 30s is tolerated."""
+    _, client, _ = _seed_test_env("tenant_01")
+    now_epoch = int(time.time())
+
+    # Skew > 30s in future must be rejected
+    for future_skew in [35, 60, 120, 290]:
+        resp_future = client.post_webhook(
+            "payment.captured",
+            payload={"event_id": f"evt_fut_{future_skew}", "attempt_id": "att_test_01"},
+            tenant_id="tenant_01",
+            timestamp=now_epoch + future_skew,
+        )
+        assert resp_future.status_code == 401
+        assert resp_future.body["error"]["code"] == "EXPIRED_WEBHOOK_TIMESTAMP"
+
+    # Small clock skew (e.g. +10s) is accepted
+    resp_tolerated = client.post_webhook(
+        "payment.captured",
+        payload={"event_id": "evt_fut_tolerated_10", "attempt_id": "att_test_01"},
+        tenant_id="tenant_01",
+        timestamp=now_epoch + 10,
+    )
+    assert resp_tolerated.status_code == 200
+
+
+def test_b_wh_03_missing_tenant_rejected() -> None:
+    """B-WH-03: Webhook payload without identifiable tenant is rejected with 400 INVALID_PAYLOAD."""
+    _, client, _ = _seed_test_env("tenant_01")
+    resp = client.post_webhook(
+        "payment.captured",
+        payload={"event_id": "evt_no_tenant_01", "attempt_id": "att_test_01"},
+        tenant_id="",  # empty tenant
+    )
+    assert resp.status_code == 400
+    assert resp.body["error"]["code"] == "INVALID_PAYLOAD"
+
+
+def test_b_wh_04_cross_tenant_event_replay_defense() -> None:
+    """B-WH-04: Same provider event_id submitted to different tenants is rejected as replay."""
+    app, client, _ = _seed_test_env("tenant_01")
+    # Seed attempt in tenant_02 as well
+    attempt_02 = PaymentAttempt(
+        attempt_id="att_test_02",
+        intent_id="intent_test_02",
+        tenant_id="tenant_02",
+        amount=Money(5000, "INR"),
+        status=PaymentStatus.CREATED,
+        idempotency_key="idem_att_02",
+        provider="mock",
+    )
+    assert app.orchestrator._payment_repo is not None
+    app.orchestrator._payment_repo.save("tenant_02", attempt_02)
+
+    # First delivery to tenant_01 succeeds
+    resp1 = client.post_webhook(
+        "payment.captured",
+        payload={"event_id": "evt_global_unique_01", "attempt_id": "att_test_01"},
+        tenant_id="tenant_01",
+    )
+    assert resp1.status_code == 200
+
+    # Second delivery with SAME event_id to tenant_02 is rejected with 409
+    resp2 = client.post_webhook(
+        "payment.captured",
+        payload={"event_id": "evt_global_unique_01", "attempt_id": "att_test_02"},
+        tenant_id="tenant_02",
+    )
+    assert resp2.status_code == 409
+    assert resp2.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+
+
+def test_b_code_01_type_error_on_invalid_role() -> None:
+    """B-CODE-01: Passing invalid role raises explicit TypeError instead of assert."""
+    _, client, _ = _seed_test_env("tenant_01")
+    with pytest.raises(TypeError, match="Expected UserRole or None"):
+        client.get_or_create_token("tenant_01", role="not_a_role")
+
+
+def test_b_sbom_01_api_endpoint() -> None:
+    """B-SBOM-01: GET /api/v1/security/sbom returns valid CycloneDX 1.5 and SLSA 1.2 provenance."""
+    _, client, _ = _seed_test_env("tenant_01")
+    resp = client.get("/api/v1/security/sbom")
+    assert resp.status_code == 200
+    assert resp.body["format"] == "CycloneDX-1.5"
+    assert resp.body["spec_version"] == "1.5"
+    assert resp.body["component_count"] > 0
+    assert "sbom" in resp.body
+    assert "provenance" in resp.body
+    assert resp.body["provenance"]["_type"] == "https://in-toto.io/Statement/v1"

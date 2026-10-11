@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { Badge, BadgeVariant } from "../../components/ui/Badge";
 import { PipelineStep, StepStatus } from "../../types/pipeline";
 
@@ -9,6 +9,16 @@ interface StepDrawerProps {
 }
 
 export const StepDrawer: React.FC<StepDrawerProps> = ({ step, stepIndex, onClose }) => {
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
   if (!step) return null;
 
   const getStatusBadge = (status: StepStatus): { variant: BadgeVariant; label: string } => {
@@ -31,7 +41,11 @@ export const StepDrawer: React.FC<StepDrawerProps> = ({ step, stepIndex, onClose
   const badge = getStatusBadge(step.status);
 
   return (
-    <div className="bg-slate-900 text-slate-100 rounded-xl p-5 border border-slate-800 shadow-xl mt-4 animate-fade-in">
+    <div
+      role="region"
+      aria-label={`Step ${stepIndex + 1} Execution Details`}
+      className="bg-slate-900 text-slate-100 rounded-xl p-5 border border-slate-800 shadow-xl mt-4 animate-fade-in"
+    >
       <div className="flex items-center justify-between pb-4 border-b border-slate-800">
         <div className="flex items-center gap-3">
           <span className="w-7 h-7 rounded-lg bg-blue-600/30 text-blue-400 font-mono text-sm font-bold flex items-center justify-center border border-blue-500/40">
@@ -50,7 +64,8 @@ export const StepDrawer: React.FC<StepDrawerProps> = ({ step, stepIndex, onClose
 
         <button
           onClick={onClose}
-          className="text-slate-400 hover:text-white rounded-lg p-1.5 hover:bg-slate-800 transition-colors"
+          aria-label="Close step details drawer"
+          className="text-slate-400 hover:text-white rounded-lg p-1.5 hover:bg-slate-800 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-400"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

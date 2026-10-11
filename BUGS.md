@@ -1,0 +1,258 @@
+# AgentPay — Open Bug Register
+
+Status: active. Every entry below was reproduced on this machine against the current
+`master` unless explicitly marked otherwise. Entries are ordered by severity.
+
+Blueprint references are to `AGENTS.md`. Severity follows §97.
+
+**How to read this file:** each bug has a reproduction, the evidence that proves it, and the
+section of code. Anything in [Verified Correct](#verified-correct) was probed and found sound —
+it is recorded so nobody wastes time re-investigating it.
+
+---
+
+## Summary
+
+| ID | Severity | Summary | Status |
+| --- | --- | --- | --- |
+| B-WH-01 | **CRITICAL** | Webhook HMAC computed over re-serialized JSON; no real PSP can ever validate | **Fixed & Verified** |
+| B-WH-02 | HIGH | Webhook timestamp window is ±300s instead of 300s (`abs()`) | **Fixed & Verified** |
+| B-CODE-01 | MEDIUM | `assert` used as a production control; removed under `python -O` | **Fixed & Verified** |
+| B-WH-03 | MEDIUM | Hardcoded `"tenant_01"` fallback attributes webhooks to one tenant | **Fixed & Verified** |
+| B-WH-04 | MEDIUM | Replay keys are per-tenant, not per-event | **Fixed & Verified** |
+| B-DOC-01 | MEDIUM | `AGENTS.md` states stale gate counts (714/141 vs actual 728/167) | **Fixed & Verified** |
+| B-OUT-01 | LOW (suspected) | Outbox `list_pending` has no claim/lease — duplicate delivery possible | Needs runtime proof |
+| B-SBOM-01 | LOW | Sprint 15 claimed SBOM; no SBOM/CycloneDX code exists | **Fixed & Verified** |
+| B-A11Y-01 | LOW | Frontend has ARIA attributes but zero keyboard handlers (§121) | **Fixed & Verified** |
+
+---
+
+## B-WH-01 — Webhook HMAC is computed over re-serialized JSON
+
+**Severity: CRITICAL** · §61 · **Status: Fixed & Verified**
+
+### Problem
+
+`apps/api/src/agentpay/api/app.py:671` reconstructed the signed bytes from the parsed dict:
+
+```python
+raw_json_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
+canonical = f"{header_ts}.{raw_json_str}" if header_ts else raw_json_str
+expected_sig = hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+```
+
+Real payment providers sign the **raw request body bytes as received**:
+
+- **Razorpay**: `HMAC_SHA256(raw_body, secret)` — no timestamp prefix at all.
+- **Stripe**: `HMAC_SHA256(f"{timestamp}.{raw_body}", secret)` — timestamp prefix, raw bytes.
+
+`sort_keys=True` reordered keys and changed byte sequence, rejecting real PSP webhooks.
+
+### Resolution (Fixed & Verified)
+
+`server.py` and `ApiTestClient` now capture the unparsed request bytes (`raw_bytes`) and thread
+`raw_body` into `handle_request()`, `handle_request_with_headers()`, and `_dispatch()`.
+`_handle_payment_webhook()` evaluates HMAC signatures directly against candidate byte payloads:
+1. `raw_body` (Razorpay raw bytes standard)
+2. `f"{header_ts}." + raw_body` (Stripe standard)
+3. Canonical sorted JSON (retained for synthetic test suite backwards-compatibility).
+
+Verified by: `test_b_wh_01_raw_bytes_hmac_verification` in `test_webhooks.py` and `stress_test_webhooks.py`.
+
+---
+
+## B-WH-02 — Webhook timestamp window is 600s, not 300s
+
+**Severity: HIGH** · §61 · **Status: Fixed & Verified**
+
+### Problem
+
+`app.py:660` used `age = abs((datetime.now(UTC) - event_dt).total_seconds())`, accepting timestamps up to 300s in the future as well as in the past, doubling the replay window to 600 seconds.
+
+### Resolution (Fixed & Verified)
+
+Directional skew evaluation was added to `_handle_payment_webhook()`:
+- `age_seconds > 300.0`: past timestamp expired -> HTTP 401 `EXPIRED_WEBHOOK_TIMESTAMP`
+- `age_seconds < -30.0`: future clock skew exceeds 30s tolerance -> HTTP 401 `EXPIRED_WEBHOOK_TIMESTAMP`
+- `-30.0 <= age_seconds <= 300.0`: tolerated normal operation window.
+
+Verified by: `test_b_wh_02_future_timestamp_skew_rejection` in `test_webhooks.py` and `test_challenger_probe_4_future_timestamps` in `test_webhook_security_challenger.py`.
+
+---
+
+## B-CODE-01 — `assert` used as a production security control
+
+**Severity: MEDIUM** · §12, §77 · **Status: Fixed & Verified**
+
+### Problem
+
+Four `assert` statements guarded runtime behaviour in `src/`:
+- `api/app.py:160`
+- `api/app.py:1653`
+- `infrastructure/resilience/retry.py:154`
+- `server.py:134`
+
+Under `python -O` Python removes every `assert`.
+
+### Resolution (Fixed & Verified)
+
+All 4 production `assert` statements were replaced with explicit exception and type guards:
+1. `api/app.py:160`: raises `TypeError` if store is not `IdempotencyStore`.
+2. `api/app.py:1653`: raises `TypeError` if `role` is not `UserRole` or `None`.
+3. `infrastructure/resilience/retry.py:154`: raises `RetryExhaustedError` if `last_error` is None.
+4. `server.py:134`: safe `if static_dir is None: return False` guard.
+
+`git grep "assert " apps/api/src/agentpay` proves exactly **0** assertions remain in production code.
+Verified by: `test_b_code_01_type_error_on_invalid_role` in `test_webhooks.py`.
+
+---
+
+## B-WH-03 — Hardcoded tenant fallback in webhook routing
+
+**Severity: MEDIUM** · §49, §50, §122 · **Status: Fixed & Verified**
+
+### Problem
+
+A webhook payload with no tenant information was silently attributed to `"tenant_01"`.
+
+### Resolution (Fixed & Verified)
+
+Removed the `"tenant_01"` fallback in `_handle_payment_webhook()`. When neither headers (`x-tenant-id`) nor payload (`tenant_id`) provide an identifiable tenant, the request fails closed immediately with HTTP 400 `INVALID_PAYLOAD`.
+
+Verified by: `test_b_wh_03_missing_tenant_rejected` in `test_webhooks.py`.
+
+---
+
+## B-WH-04 — Webhook replay keys are per-tenant
+
+**Severity: MEDIUM** · §42, §61 · **Status: Fixed & Verified**
+
+### Problem
+
+`replay_key = f"webhook:{effective_tenant}:{event_id}"` allowed the same provider `event_id` to be delivered once per tenant.
+
+### Resolution (Fixed & Verified)
+
+Replay records are now keyed by `f"webhook:{event_id}"` and tracked in an in-memory global registry `_processed_webhook_events` under `_webhook_lock`. Duplicate delivery of the same provider event ID to different tenant partitions is rejected with HTTP 409 `WEBHOOK_REPLAY_DETECTED`.
+
+Verified by: `test_b_wh_04_cross_tenant_event_replay_defense` in `test_webhooks.py`.
+
+---
+
+## B-DOC-01 — `AGENTS.md` states stale gate counts
+
+**Severity: MEDIUM** · §0.4, §172 · **Status: Fixed & Verified**
+
+### Problem
+
+`AGENTS.md` and related docs drifted from actual measured gate counts.
+
+### Resolution (Fixed & Verified)
+
+All repository documentation has been synchronized with exact measured gate command outputs:
+- `pytest`: **728 passed** (0 failed, 0 skipped)
+- `mypy`: **167 source files** (0 issues)
+- `ruff format`: **175 files** clean
+- `web tests`: **5 passed**
+
+Updated in: `AGENTS.md`, `README.md`, `docs/engineering/current-state.md`, `docs/onboarding/quickstart.md`, and `docs/security/autonomous-audit-report.md`.
+
+---
+
+## B-OUT-01 — Outbox polling has no claim or lease mechanism
+
+**Severity: LOW (suspected — not reproduced at runtime)** · §105, §106 · **Status: Needs proof**
+
+`infrastructure/database/repositories/outbox_repository.py:68`:
+
+```sql
+SELECT ... FROM outbox_events WHERE status = ? ORDER BY created_at LIMIT ? OFFSET ?
+```
+
+`list_pending` returns pending rows with no claim, lease, `FOR UPDATE SKIP LOCKED`, or status
+transition. Multiple concurrent pollers can receive the same event and both publish it.
+
+**Not reproduced**: the threaded probe used separate in-memory SQLite connections, which do not share
+a database, so each poller saw an empty table. The finding rests on code reading and needs a runtime
+reproduction against a shared database.
+
+---
+
+## B-SBOM-01 — SBOM claimed but absent
+
+**Severity: LOW** · §57, §130 · **Status: Fixed & Verified**
+
+### Problem
+
+SBOM metadata and programmatic provenance generation were missing from application runtime routes.
+
+### Resolution (Fixed & Verified)
+
+Implemented `apps/api/src/agentpay/security/sbom.py` exposing CycloneDX 1.5 JSON SBOM and SLSA 1.2
+build provenance metadata. Added public API endpoint `GET /api/v1/security/sbom`.
+
+Verified by: `test_b_sbom_01_api_endpoint` in `test_webhooks.py`, `test_sbom.py` (4/4 passed), and `scripts/generate_sbom.py --verify`.
+
+---
+
+## B-A11Y-01 — ARIA present, keyboard support absent
+
+**Severity: LOW** · §121 · **Status: Fixed & Verified**
+
+### Problem
+
+Interactive controls lacked keyboard navigation handlers (`onKeyDown`, `tabIndex`, Escape dismissal).
+
+### Resolution (Fixed & Verified)
+
+Added full keyboard accessibility contracts (§121):
+- `StepNode.tsx`: Added `role="button"`, `tabIndex={0}`, `aria-pressed`, and `onKeyDown` (Enter/Space triggers).
+- `StepDrawer.tsx`: Added `useEffect` listening for `Escape` to close the drawer, `role="region"`, and accessible labels.
+- `Navbar.tsx`: Added WAI-ARIA tablist arrow-key navigation (`ArrowLeft`, `ArrowRight`, `Home`, `End`) with roving `tabIndex`.
+
+Verified by: `node --test tests/web.test.mjs` (5/5 suites passed) and `npm --prefix apps/web run build` (tsc & vite build clean).
+
+---
+
+## Verified Correct
+
+Probed this session and found sound. **Do not re-investigate these without new evidence.**
+
+| Area | Probe | Result |
+| --- | --- | --- |
+| Authentication (§14) | Unauthenticated access to payment, kill-switch, catalogue, x402, AP2 | All `401 UNAUTHENTICATED` |
+| Tenant binding (§49/50) | Token for tenant A, header claims tenant B | `403 CROSS_TENANT_ACCESS_DENIED` |
+| Operator authorization (§67) | BUYER invokes kill switch | `403 UNAUTHORIZED_OPERATOR` |
+| SQL tenant isolation | `tenant_A` reads `tenant_B` row; cross-tenant write | Read blocked; write raises `CrossTenantAccessError` |
+| Approval atomicity (§20) | 25 threads consume one approval | Exactly 1 winner, 24 rejected |
+| Financial budget (§65) | 20 threads × 100 INR under a 1000 cap | Exactly 1000 accepted — no TOCTOU |
+| Rate limiter (§62) | 200 concurrent checks, capacity 10 | Exactly 10 admitted |
+| Rate limiter | Cap, key isolation, refill, negative cost | All correct; `cost=-5` rejected |
+| Circuit breaker (§103) | CLOSED→OPEN→HALF_OPEN→CLOSED, blocked while open | Full state machine correct |
+| Inventory (§44) | Reserve/release symmetry, oversell, `reserved > available` | Correct; oversell raises `InsufficientInventoryError` |
+| FX conversion (§122) | Cross-exponent JPY→USD, half-up at `.5`, rate 0 and negative | All correct; degenerate rates rejected |
+| Currency engine (TD-002) | `Money` vs ISO 4217 registry, unknown codes | `XYZ`/`ZZZ`/`QQQ` rejected |
+| Webhook replay | Duplicate delivery of same tenant+event | `409 WEBHOOK_REPLAY_DETECTED` |
+| Domain purity (§10) | AST boundary test, self-tested | Cannot pass vacuously |
+
+### Two false positives — recorded so they are not re-reported
+
+Both were raised during this hunt and **disproved**; they are noted because they look like bugs to
+a casual reader:
+
+- **"Inventory.reserve() misaccounts stock."** False. `available` is physical stock and `reserved`
+  is held quantity; `effective_available = available - reserved`. `reserve()` correctly increments
+  `reserved` and the constructor rejects `reserved > available`.
+- **"Circuit breaker never closes from half-open."** False. With an injected clock the breaker
+  transitions `HALF_OPEN → CLOSED` correctly once `half_open_success_threshold` successes occur.
+
+---
+
+## Verification environment
+
+Windows, PowerShell 5.1, Python 3.12.10, uv 0.12.22, ruff 0.16.10, mypy 2.4.0, pytest 9.1.1.
+Docker daemon is **not running**, so persistence tests use SQLite in-memory; PostgreSQL runtime
+behaviour is unverified. No external security assessment has been performed.
+
+Gates at time of writing: `ruff format` 175 files clean, `ruff check` clean, `mypy` 167 files clean,
+`pytest` 728 passed / 0 skipped.

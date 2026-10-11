@@ -31,6 +31,26 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: "security", label: "Security & Incidents" },
   ];
 
+  const handleTabKeyDown = (e: React.KeyboardEvent, index: number) => {
+    let targetIndex = -1;
+    if (e.key === "ArrowRight") {
+      targetIndex = (index + 1) % tabs.length;
+    } else if (e.key === "ArrowLeft") {
+      targetIndex = (index - 1 + tabs.length) % tabs.length;
+    } else if (e.key === "Home") {
+      targetIndex = 0;
+    } else if (e.key === "End") {
+      targetIndex = tabs.length - 1;
+    }
+
+    if (targetIndex !== -1) {
+      e.preventDefault();
+      const targetTab = tabs[targetIndex];
+      onTabChange(targetTab.id);
+      document.getElementById(`tab-${targetTab.id}`)?.focus();
+    }
+  };
+
   return (
     <header className="bg-slate-900 border-b border-slate-800 text-white sticky top-0 z-40 shadow-md">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -83,14 +103,16 @@ export const Navbar: React.FC<NavbarProps> = ({
           aria-label="Control Center Dashboard Sections"
           className="flex space-x-1 overflow-x-auto py-2 border-t border-slate-800/80 scrollbar-none"
         >
-          {tabs.map((tab) => (
+          {tabs.map((tab, idx) => (
             <button
               key={tab.id}
               id={`tab-${tab.id}`}
               role="tab"
+              tabIndex={activeTab === tab.id ? 0 : -1}
               aria-selected={activeTab === tab.id}
               aria-controls={`panel-${tab.id}`}
               onClick={() => onTabChange(tab.id)}
+              onKeyDown={(e) => handleTabKeyDown(e, idx)}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all focus:outline-none focus:ring-2 focus:ring-blue-400 ${
                 activeTab === tab.id
                   ? "bg-blue-600 text-white shadow-sm"

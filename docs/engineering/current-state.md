@@ -47,10 +47,10 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            174 files already formatted
+uv run ruff format --check .                                            175 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 166 source files
-uv run pytest                                                           722 passed
+uv run mypy                                                             Success: no issues found in 167 source files
+uv run pytest                                                           728 passed
 node --test tests/web.test.mjs                                          5 passed (incl. live API & §121 accessibility)
 uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed

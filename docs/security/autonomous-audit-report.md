@@ -24,12 +24,12 @@ No claims by the authoring team were accepted on face value. Every boundary, con
 
 ### 1.1 Empirical Verification Corpus
 The audit verified the system across the complete test corpus on Python 3.12.10 (Windows PowerShell 5.1):
-- **714 tests under `apps/api/tests/unit`** passed cleanly with exit code 0 (`uv run pytest`):
+- **728 tests under `apps/api/tests/unit`** passed cleanly with exit code 0 (`uv run pytest`):
   unit, adversarial-threat-harness, failure-engineering, webhook security, ISO 4217 currency exponent, SQLAlchemy relational persistence (`test_database_persistence.py`), SSRF security (`test_ssrf.py`), Resilience circuit breaker & retry policy (`test_resilience.py`), ModelGateway & evaluation dataset (`test_model_gateway.py`, `test_model_evaluation.py`, `test_model_gateway_resilience_challenger.py`), Transactional Outbox & Background Workers (`test_outbox_worker.py`), Abuse Detection & Observability (`test_abuse_observability.py`), protocol boundaries (`test_protocols.py`), and SBOM generator validation (`test_sbom.py`).
 - **Hypothesis property-based tests**: completed full budgets across money, policy monotonicity, currency exponents, and cryptographic audit-chain tamper detection (`--hypothesis-show-statistics`).
 - **5 Web Control Center Test Suites** passed cleanly with exit code 0 (`node --test tests/web.test.mjs`, including §121 ARIA accessibility, live API client, and keyboard contracts).
 - **Strict Architecture Boundaries (§10)** verified by AST analysis (`test_architecture_boundaries.py` passed 7/7 checks, proving 0 forbidden imports in domain even after adding SQLAlchemy 2.0 in `infrastructure/database/` and new domain models).
-- **Code Cleanliness**: 0 formatting violations across 162 files (`ruff format`), 0 lint violations (`ruff check`), 0 type errors across 141 source files (`mypy` strict mode).
+- **Code Cleanliness**: 0 formatting violations across 175 files (`ruff format`), 0 lint violations (`ruff check`), 0 type errors across 167 source files (`mypy` strict mode).
 - **Authentication, Least-Privilege Test Client, & Webhook Replay Boundaries (§14, §61)**: `ApiTestClient` defaults to least-privilege `UserRole.BUYER` (`test_api_client_privilege_challenger.py`, `stress_test_client_privilege.py` 5/5); unauthenticated access to payment, kill-switch, catalogue and protocol routes all return `401 UNAUTHENTICATED`; a BUYER invoking the kill switch returns `403 UNAUTHORIZED_OPERATOR`. Payment webhooks (`POST /api/v1/webhooks/payments`) enforce HMAC-SHA256 constant-time signature verification, 300s timestamp freshness, mutex-guarded replay prevention under 20-thread races, and state-machine guards preventing double inventory release (`test_webhooks.py`, `test_webhook_security_challenger.py`, `stress_test_webhooks.py` 6/6).
 
 ---

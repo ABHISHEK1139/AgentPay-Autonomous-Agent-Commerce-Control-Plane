@@ -157,7 +157,8 @@ class AgentPayApiApp:
             self.idempotency_store = idempotency_store
         elif orchestrator._idempotency_store is not None:
             store = orchestrator._idempotency_store
-            assert isinstance(store, IdempotencyStore)
+            if not isinstance(store, IdempotencyStore):
+                raise TypeError(f"Expected IdempotencyStore, got {type(store).__name__}")
             self.idempotency_store = store
         else:
             self.idempotency_store = InMemoryIdempotencyStore()
@@ -179,6 +180,7 @@ class AgentPayApiApp:
         self._emergency_paused: bool = False
         self._pause_metadata: dict[str, Any] = {}
         self._webhook_lock: threading.Lock = threading.Lock()
+        self._processed_webhook_events: set[str] = set()
         self.acp_adapter = AcpAdapter()
         self.ap2_adapter = Ap2Adapter()
         self.uap_adapter = UapAdapter()
@@ -537,6 +539,7 @@ class AgentPayApiApp:
         path: str,
         headers: dict[str, str],
         body: dict[str, Any] | None = None,
+        raw_body: bytes | None = None,
     ) -> ApiResponse:
         """Synchronous dispatch for hermetic testing and clean request processing."""
         hdrs = {k.lower(): v for k, v in headers.items()}
@@ -553,7 +556,7 @@ class AgentPayApiApp:
         }
         try:
             status_code, resp_data = self._dispatch(
-                method, path, hdrs, body, request_id, tenant_id, trace_id
+                method, path, hdrs, body, request_id, tenant_id, trace_id, raw_body=raw_body
             )
             return ApiResponse(status_code, resp_data, self._last_response_headers)
         except RateLimitExceededError as err:
@@ -599,9 +602,10 @@ class AgentPayApiApp:
         path: str,
         headers: dict[str, str],
         body: dict[str, Any] | None = None,
+        raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         """Dispatch returning explicit 3-tuple (status_code, body, headers)."""
-        resp = self.handle_request(method, path, headers, body)
+        resp = self.handle_request(method, path, headers, body, raw_body=raw_body)
         return resp.status_code, resp.body, resp.headers
 
     def _handle_payment_webhook(
@@ -611,6 +615,7 @@ class AgentPayApiApp:
         request_id: str,
         tenant_id: str,
         trace_id: str,
+        raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any]]:
         """Process incoming provider payment webhook with HMAC validation and replay protection (§61)."""
         if body is None or not isinstance(body, dict):
@@ -628,7 +633,7 @@ class AgentPayApiApp:
                 request_id,
             )
 
-        # 2. Enforce Timestamp Freshness
+        # 2. Enforce Timestamp Freshness & Skew Window (§61)
         ts_str = headers.get("x-webhook-timestamp", "").strip()
         if not ts_str and "timestamp" in body:
             ts_str = str(body["timestamp"]).strip()
@@ -657,34 +662,63 @@ class AgentPayApiApp:
                     request_id,
                 )
 
-        age = abs((datetime.now(UTC) - event_dt).total_seconds())
-        if age > 300.0:
+        age_seconds = (datetime.now(UTC) - event_dt).total_seconds()
+        # Enforce timestamp window: past age > 300s rejected, future skew > 30s rejected (§61)
+        if age_seconds > 300.0 or age_seconds < -30.0:
             return self._error_response(
                 401,
                 "EXPIRED_WEBHOOK_TIMESTAMP",
-                f"Webhook timestamp expired ({int(age)}s exceeds 300s window)",
+                f"Webhook timestamp expired or future skew exceeds tolerance ({int(age_seconds)}s outside -30s..300s window)",
                 request_id,
-                details={"age_seconds": age, "max_age_seconds": 300},
+                details={
+                    "age_seconds": age_seconds,
+                    "max_age_seconds": 300,
+                    "max_future_skew_seconds": 30,
+                },
             )
 
-        # 3. Compute and Verify HMAC-SHA256 Signature
-        raw_json_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
+        # 3. Compute and Verify HMAC-SHA256 Signature (Supports Raw PSP Bytes & Canonical Serialization)
         header_ts = headers.get("x-webhook-timestamp", "").strip()
+        raw_json_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
         canonical = f"{header_ts}.{raw_json_str}" if header_ts else raw_json_str
 
-        expected_sig = hmac.new(
-            self.webhook_secret.encode("utf-8"),
-            canonical.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        candidate_byte_payloads: list[bytes] = []
+        if raw_body:
+            candidate_byte_payloads.append(raw_body)
+            if header_ts:
+                candidate_byte_payloads.append(f"{header_ts}.".encode() + raw_body)
 
-        received_sig = sig_header
-        if received_sig.startswith("sha256="):
-            received_sig = received_sig[7:]
-        elif received_sig.startswith("v1="):
-            received_sig = received_sig[3:]
+        candidate_byte_payloads.append(canonical.encode("utf-8"))
+        candidate_byte_payloads.append(raw_json_str.encode("utf-8"))
 
-        if not hmac.compare_digest(expected_sig, received_sig):
+        received_sigs: list[str] = []
+        if "," in sig_header:
+            for part in sig_header.split(","):
+                part_s = part.strip()
+                if part_s.startswith("v1="):
+                    received_sigs.append(part_s[3:])
+                elif part_s.startswith("sha256="):
+                    received_sigs.append(part_s[7:])
+        else:
+            rec = sig_header
+            if rec.startswith("sha256="):
+                rec = rec[7:]
+            elif rec.startswith("v1="):
+                rec = rec[3:]
+            received_sigs.append(rec)
+
+        secret_bytes = self.webhook_secret.encode("utf-8")
+        signature_valid = False
+        for cand_bytes in candidate_byte_payloads:
+            expected_sig = hmac.new(secret_bytes, cand_bytes, hashlib.sha256).hexdigest()
+            for r_sig in received_sigs:
+                if hmac.compare_digest(expected_sig, r_sig):
+                    signature_valid = True
+                    break
+            if signature_valid:
+                break
+
+        if not signature_valid:
             return self._error_response(
                 401,
                 "INVALID_WEBHOOK_SIGNATURE",
@@ -692,13 +726,20 @@ class AgentPayApiApp:
                 request_id,
             )
 
-        # 4. Enforce Replay Protection via IdempotencyStore
+        # 4. Enforce Replay Protection via Global Event Registry & IdempotencyStore (§42, §61)
         effective_tenant = (
             headers.get("x-tenant-id", "").strip()
             or str(body.get("tenant_id") or "").strip()
             or tenant_id
-            or "tenant_01"
         )
+        if not effective_tenant:
+            return self._error_response(
+                400,
+                "INVALID_PAYLOAD",
+                "Missing tenant identifier in headers or webhook payload",
+                request_id,
+            )
+
         event_id = str(
             body.get("event_id") or headers.get("x-webhook-id") or body.get("id") or ""
         ).strip()
@@ -723,10 +764,20 @@ class AgentPayApiApp:
                 request_id,
             )
 
-        replay_key = f"webhook:{effective_tenant}:{event_id}"
+        replay_key = f"webhook:{event_id}"
         with self._webhook_lock:
+            if event_id in self._processed_webhook_events:
+                return self._error_response(
+                    409,
+                    "WEBHOOK_REPLAY_DETECTED",
+                    f"Webhook event '{event_id}' has already been processed",
+                    request_id,
+                    details={"event_id": event_id, "replay_key": replay_key},
+                )
+
             existing_record = self.idempotency_store.get(effective_tenant, replay_key)
             if existing_record is not None:
+                self._processed_webhook_events.add(event_id)
                 return self._error_response(
                     409,
                     "WEBHOOK_REPLAY_DETECTED",
@@ -770,6 +821,7 @@ class AgentPayApiApp:
                     result_data=reconcile_result,
                 ),
             )
+            self._processed_webhook_events.add(event_id)
 
         return 200, reconcile_result
 
@@ -782,6 +834,7 @@ class AgentPayApiApp:
         request_id: str,
         tenant_id: str,
         trace_id: str = "",
+        raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any]]:
 
         # 1. Health check
@@ -801,6 +854,12 @@ class AgentPayApiApp:
                 "metrics": meter.collect(),
                 "prometheus": meter.to_prometheus(),
             }
+
+        # 1c. Supply Chain Security SBOM & Provenance (§57, §130)
+        if path == "/api/v1/security/sbom" and method == "GET":
+            from agentpay.security.sbom import get_sbom_metadata
+
+            return 200, get_sbom_metadata()
 
         # 2. OpenAPI Specification
         if path == "/openapi.json" and method == "GET":
@@ -828,12 +887,17 @@ class AgentPayApiApp:
                     "/api/v1/webhooks/payments": {
                         "post": {"summary": "Payment Provider Webhook Ingestion"}
                     },
+                    "/api/v1/security/sbom": {
+                        "get": {"summary": "CycloneDX 1.5 SBOM & SLSA Provenance"}
+                    },
                 },
             }
 
         # 2.5 Webhook Ingestion (§61) - Dedicated unauthenticated/signature-verified route!
         if path == "/api/v1/webhooks/payments" and method == "POST":
-            return self._handle_payment_webhook(headers, body, request_id, tenant_id, trace_id)
+            return self._handle_payment_webhook(
+                headers, body, request_id, tenant_id, trace_id, raw_body=raw_body
+            )
 
         # --- AUTHENTICATION ENFORCEMENT (§14) ---
         cred, auth_err = self._authenticate_request(headers, request_id)
@@ -1650,7 +1714,8 @@ class ApiTestClient:
         if role is _DEFAULT_ROLE_SENTINEL:
             effective_role = self.default_role
         else:
-            assert role is None or isinstance(role, UserRole)
+            if role is not None and not isinstance(role, UserRole):
+                raise TypeError(f"Expected UserRole or None, got {type(role).__name__}")
             effective_role = role
 
         if effective_role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
@@ -1686,6 +1751,7 @@ class ApiTestClient:
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         auth: bool = True,
+        raw_body: bytes | None = None,
     ) -> ApiResponse:
         hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
@@ -1694,6 +1760,7 @@ class ApiTestClient:
             "/openapi.json",
             "/api/v1/webhooks/payments",
             "/api/v1/metrics",
+            "/api/v1/security/sbom",
         )
 
         # Explicit authentication management (§14)
@@ -1748,7 +1815,7 @@ class ApiTestClient:
                         "or supply an explicit Authorization or X-API-Key header (§14)."
                     )
 
-        return self.app.handle_request(method, path, hdrs, json_body)
+        return self.app.handle_request(method, path, hdrs, json_body, raw_body=raw_body)
 
     def request_with_headers(
         self,
@@ -1757,8 +1824,11 @@ class ApiTestClient:
         headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
         auth: bool = True,
+        raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
-        resp = self.request(method, path, headers=headers, json_body=json_body, auth=auth)
+        resp = self.request(
+            method, path, headers=headers, json_body=json_body, auth=auth, raw_body=raw_body
+        )
         return resp.status_code, resp.body, resp.headers
 
     def get(
@@ -1787,12 +1857,13 @@ class ApiTestClient:
         timestamp: int | None = None,
         custom_signature: str | None = None,
         headers: dict[str, str] | None = None,
+        raw_body: bytes | None = None,
     ) -> ApiResponse:
         """Submit a signed provider payment webhook event (§61)."""
         full_payload = dict(payload)
         if "event_type" not in full_payload:
             full_payload["event_type"] = event_type
-        if "tenant_id" not in full_payload:
+        if "tenant_id" not in full_payload and tenant_id:
             full_payload["tenant_id"] = tenant_id
 
         ts_int = timestamp if timestamp is not None else int(datetime.now(UTC).timestamp())
@@ -1805,21 +1876,28 @@ class ApiTestClient:
             else getattr(self.app, "webhook_secret", "whsec_test_secret_32bytes_minimum_length")
         )
 
-        hdrs: dict[str, str] = {
-            "x-tenant-id": tenant_id,
-            "x-webhook-timestamp": str(ts_int),
-        }
+        hdrs: dict[str, str] = {}
+        if tenant_id:
+            hdrs["x-tenant-id"] = tenant_id
+        hdrs["x-webhook-timestamp"] = str(ts_int)
 
         if custom_signature == "__OMIT__":
             pass  # omit signature header for testing missing header
         elif custom_signature is not None:
             hdrs["x-webhook-signature"] = custom_signature
         else:
-            hdrs["x-webhook-signature"] = hmac.new(
-                effective_secret.encode("utf-8"),
-                canonical.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
+            if raw_body is not None:
+                hdrs["x-webhook-signature"] = hmac.new(
+                    effective_secret.encode("utf-8"),
+                    raw_body,
+                    hashlib.sha256,
+                ).hexdigest()
+            else:
+                hdrs["x-webhook-signature"] = hmac.new(
+                    effective_secret.encode("utf-8"),
+                    canonical.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
 
         if headers:
             hdrs.update(headers)
@@ -1830,4 +1908,5 @@ class ApiTestClient:
             headers=hdrs,
             json_body=full_payload,
             auth=False,
+            raw_body=raw_body,
         )

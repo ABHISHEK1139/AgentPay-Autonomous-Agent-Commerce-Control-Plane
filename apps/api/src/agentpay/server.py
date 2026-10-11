@@ -90,6 +90,7 @@ def create_request_handler(
             # 3. Read request body if present
             content_length = int(self.headers.get("Content-Length", 0))
             json_body: dict[str, Any] | None = None
+            raw_bytes: bytes | None = None
             if content_length > 0:
                 raw_bytes = self.rfile.read(content_length)
                 try:
@@ -114,7 +115,7 @@ def create_request_handler(
 
             # 5. Dispatch to AgentPay application
             status_code, response_body = app.handle_request(
-                method, self.path, headers_dict, json_body
+                method, self.path, headers_dict, json_body, raw_body=raw_bytes
             )
 
             # 6. Write HTTP response
@@ -131,7 +132,8 @@ def create_request_handler(
             self.wfile.write(resp_bytes)
 
         def _try_serve_static(self, clean_path: str) -> bool:
-            assert static_dir is not None
+            if static_dir is None:
+                return False
             # Normalize path
             relative_path = clean_path.lstrip("/")
             target_file = static_dir / relative_path

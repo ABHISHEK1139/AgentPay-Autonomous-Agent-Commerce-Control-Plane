@@ -151,7 +151,11 @@ class RetryPolicy:
                 delay = self.calculate_delay(attempt)
                 self._sleep_func(delay)
 
-        assert last_error is not None
+        if last_error is None:
+            raise RetryExhaustedError(
+                f"Operation failed after {self._max_retries + 1} attempts without recording error",
+                attempts=self._max_retries + 1,
+            )
         raise RetryExhaustedError(
             f"Operation failed after {self._max_retries + 1} attempts. Last error: {last_error}",
             attempts=self._max_retries + 1,
