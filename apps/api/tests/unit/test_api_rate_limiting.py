@@ -45,7 +45,7 @@ def test_under_limit_actions_succeed_with_rate_limit_headers() -> None:
     """Requests within the token bucket capacity succeed with 200 and include rate limit headers."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=5)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     status, body = client.post(
@@ -73,7 +73,7 @@ def test_high_volume_bursting_triggers_http_429() -> None:
         mutating_agent_capacity=3,
         mutating_agent_refill_rate=1.0,
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # 3 requests succeed
@@ -120,7 +120,7 @@ def test_dual_tier_tenant_exhaustion_triggers_tenant_scope_429() -> None:
         mutating_tenant_capacity=2,
         mutating_tenant_refill_rate=0.5,
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # Agent 1 uses 1 token
@@ -160,7 +160,7 @@ def test_independent_tenant_isolation() -> None:
         mutating_agent_capacity=2,
         mutating_tenant_capacity=2,
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     # Exhaust tenant_01
     for i in range(2):
@@ -197,7 +197,7 @@ def test_independent_agent_isolation_within_same_tenant() -> None:
         mutating_agent_capacity=2,
         mutating_tenant_capacity=10,
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # Agent A exhausts its 2 tokens
@@ -230,7 +230,7 @@ def test_protocol_adapters_rate_limiting() -> None:
     """Protocol endpoints (ACP, AP2, UAP, x402) are subject to mutating rate limits."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=2)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     acp_payload = {
@@ -278,7 +278,7 @@ def test_tool_execution_rate_limiting() -> None:
     """Tool invocation endpoints are throttled under mutating route limits."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=2)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     tool_payload = {"agent_id": "agent_01", "parameters": {"query": "laptop"}}
@@ -309,7 +309,7 @@ def test_read_only_catalog_endpoints_bypass_mutating_limits() -> None:
         mutating_agent_capacity=1,
         read_agent_capacity=50,
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # Exhaust mutating action limit
@@ -346,7 +346,7 @@ def test_health_and_openapi_endpoints_bypass_rate_limiting() -> None:
         mutating_agent_capacity=0,  # zero capacity
         read_agent_capacity=0,
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     status_h, body_h = client.get("/api/v1/health", auth=False)
     assert status_h == 200
@@ -369,7 +369,7 @@ def test_rate_limit_refill_recovery() -> None:
         mutating_agent_capacity=2,
         mutating_agent_refill_rate=1.0,  # 1 token per second
     )
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # Use 2 tokens
@@ -402,7 +402,7 @@ def test_handle_request_with_headers_tuple_return() -> None:
     """handle_request_with_headers returns a 3-tuple (status_code, body, headers)."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=1)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     token = client.get_or_create_token("tenant_01")
     headers = {"x-tenant-id": "tenant_01", "authorization": f"Bearer {token}"}
 
@@ -426,7 +426,7 @@ def test_asgi_429_response_headers() -> None:
     """Raw ASGI dispatch emits [b'retry-after', ...] in http.response.start headers on 429."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=1)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     token = client.get_or_create_token("tenant_01")
 
     async def call_asgi(payload: dict[str, Any]) -> tuple[int, list[list[bytes]], dict[str, Any]]:

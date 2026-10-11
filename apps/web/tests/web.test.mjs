@@ -138,3 +138,142 @@ test("Frontend ARIA and keyboard accessibility contracts per §121", async () =>
   assert.ok(approvalListContent.includes('role="listitem"'), "Approval items must declare role='listitem'");
 });
 
+test("Control Center Live API authenticated integration and fallbacks per §14, §21, §66, §67", async () => {
+  const { ControlCenterApiService } = await import("../src/services/api.ts");
+  const service = new ControlCenterApiService();
+
+  // 1. Initial configuration in demo mode
+  assert.equal(service.isDemoMode, true);
+  assert.equal(service.tenantId, "tenant_01");
+
+  // 2. Configure live API credentials and base URL
+  service.setDemoMode(false);
+  assert.equal(service.isDemoMode, false);
+  service.setBaseUrl("http://localhost:8000/");
+  assert.equal(service.baseUrl, "http://localhost:8000");
+  service.setAuthToken("tok_admin_live_123");
+  service.setTenantId("tenant_live_alpha");
+
+  // 3. Header builder verification (§14, §49)
+  const headers = service.buildHeaders({ "X-Custom": "val" });
+  assert.equal(headers["Content-Type"], "application/json");
+  assert.equal(headers["X-Tenant-ID"], "tenant_live_alpha");
+  assert.equal(headers["Authorization"], "Bearer tok_admin_live_123");
+  assert.equal(headers["X-Custom"], "val");
+
+  // 4. Intercept fetch calls to verify live endpoint routing and header transmission
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url: String(url), options });
+    if (String(url).endsWith("/api/v1/emergency/status")) {
+      return {
+        ok: true,
+        json: async () => ({ status: "healthy", paused: false, emergency_paused: false }),
+      };
+    }
+    if (String(url).endsWith("/api/v1/emergency/pause")) {
+      return {
+        ok: true,
+        json: async () => ({ emergency_paused: true, status: "PAUSED" }),
+      };
+    }
+    if (String(url).endsWith("/api/v1/approvals")) {
+      return {
+        ok: true,
+        json: async () => ({
+          approvals: [
+            {
+              approval_id: "appr_live_99",
+              action_id: "act_live_99",
+              status: "PENDING",
+              amount_minor: 450000,
+              currency: "INR",
+            },
+          ],
+        }),
+      };
+    }
+    if (String(url).includes("/api/v1/approvals/appr_live_99/approve")) {
+      return {
+        ok: true,
+        json: async () => ({ status: "APPROVED", approver_id: "sec_admin_01" }),
+      };
+    }
+    if (String(url).endsWith("/api/v1/metrics")) {
+      return {
+        ok: true,
+        json: async () => ({ status: "healthy", metrics: { http_requests: 42 } }),
+      };
+    }
+    if (String(url).endsWith("/api/v1/actions")) {
+      return {
+        ok: true,
+        json: async () => ({ status: "COMPLETED", decision: "ALLOW", order_id: "ord_live_77" }),
+      };
+    }
+    if (String(url).endsWith("/agent/catalog")) {
+      return {
+        ok: true,
+        json: async () => ({ products: [{ product_id: "prod_01" }] }),
+      };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+
+  try {
+    // Probe emergency status
+    const emState = await service.getEmergencyState();
+    assert.equal(emState.isPaused, false);
+    assert.equal(calls[0].url, "http://localhost:8000/api/v1/emergency/status");
+    assert.equal(calls[0].options.headers["Authorization"], "Bearer tok_admin_live_123");
+    assert.equal(calls[0].options.headers["X-Tenant-ID"], "tenant_live_alpha");
+
+    // Probe emergency pause
+    const pausedState = await service.triggerEmergencyPause("op_test", "live threat containment");
+    assert.equal(pausedState.isPaused, true);
+    assert.equal(calls[1].url, "http://localhost:8000/api/v1/emergency/pause");
+    assert.equal(calls[1].options.method, "POST");
+
+    // Probe approvals queue
+    const approvals = await service.getApprovals();
+    assert.ok(approvals.length >= 1);
+    assert.equal(calls[2].url, "http://localhost:8000/api/v1/approvals");
+
+    // Probe metrics
+    const metrics = await service.getMetrics();
+    assert.equal(metrics.status, "healthy");
+    assert.equal(calls[3].url, "http://localhost:8000/api/v1/metrics");
+
+    // Probe action execution
+    const actionResult = await service.executeAction({ action_id: "act_test" });
+    assert.equal(actionResult.status, "COMPLETED");
+
+    // Probe catalog
+    const catalog = await service.getCatalog();
+    assert.equal(catalog.products.length, 1);
+  } finally {
+    // Restore fetch
+    globalThis.fetch = originalFetch;
+  }
+
+  // 5. Test resilient fallback when backend is completely unreachable
+  globalThis.fetch = async () => {
+    throw new Error("Network connection refused");
+  };
+
+  try {
+    const fallbackStatus = await service.getEmergencyState();
+    assert.ok(typeof fallbackStatus.isPaused === "boolean");
+
+    const fallbackApprovals = await service.getApprovals();
+    assert.ok(Array.isArray(fallbackApprovals));
+    assert.ok(fallbackApprovals.length > 0);
+
+    const fallbackMetrics = await service.getMetrics();
+    assert.ok(fallbackMetrics.demo === true || fallbackMetrics.status === "healthy");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+

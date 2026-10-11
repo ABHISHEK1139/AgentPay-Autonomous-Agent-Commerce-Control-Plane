@@ -179,7 +179,8 @@ def build_hardened_system() -> tuple[AgentPayApiApp, InMemoryAuditLedger]:
 class SimpleApiClient(ApiTestClient):
     """Helper client invoking ASGI application handles directly with automated test auth."""
 
-    pass
+    def __init__(self, app: AgentPayApiApp, default_tenant: str = "tenant_alpha") -> None:
+        super().__init__(app=app, default_tenant=default_tenant, auth_mode="buyer")
 
 
 def test_e2e_autonomous_acp_purchase_and_audit_chain() -> None:

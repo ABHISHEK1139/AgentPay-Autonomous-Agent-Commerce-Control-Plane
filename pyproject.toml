@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "AgentPay - agent action-control and transaction platform"
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.20.0",
     "sqlalchemy>=2.1.4",
 ]
 

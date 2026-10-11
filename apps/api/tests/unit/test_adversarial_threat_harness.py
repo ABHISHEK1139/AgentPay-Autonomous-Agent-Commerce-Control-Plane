@@ -844,7 +844,7 @@ def test_vector_13_silent_failure_unexpected_error_standard_500_envelope() -> No
     """Vector 13: Unexpected exceptions return standardized §13 HTTP 500 error envelopes without traceback leaks."""
     orch, _, _, _, _, _, _, _, _, _, _ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     # 1. Inject unexpected internal runtime error into orchestrator
     orch.execute_purchase = MagicMock(side_effect=ZeroDivisionError("simulated internal bug"))  # type: ignore[method-assign]

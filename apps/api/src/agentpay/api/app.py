@@ -1476,23 +1476,28 @@ class AgentPayApiApp:
 _DEFAULT_ROLE_SENTINEL = object()
 
 
+class UnconfiguredClientAuthError(RuntimeError):
+    """Raised when ApiTestClient makes a request requiring authentication without an explicit caller persona or credentials (§14)."""
+
+
 class ApiTestClient:
-    """Fast, synchronous client for testing the AgentPay HTTP API with automated test authentication."""
+    """Fast, synchronous client for testing the AgentPay HTTP API with explicit test authentication."""
 
     def __init__(
         self,
         app: AgentPayApiApp,
         default_tenant: str = "tenant_01",
-        default_role: UserRole = UserRole.BUYER,
+        default_role: UserRole | None = None,
+        auth_mode: str = "unconfigured",
     ) -> None:
         self.app = app
         self.default_tenant = default_tenant
         self.default_role = default_role
         self._tokens_by_tenant: dict[str, str] = {}
         self._api_keys_by_tenant: dict[str, str] = {}
-        self._auth_mode: str = "default"
+        self._auth_mode: str = auth_mode
         self._active_principal: str | None = None
-        self._active_role: UserRole | None = None
+        self._active_role: UserRole | None = default_role
 
     def _clone(self) -> ApiTestClient:
         """Create an immutable context clone sharing app and token caches."""
@@ -1500,10 +1505,10 @@ class ApiTestClient:
             app=self.app,
             default_tenant=self.default_tenant,
             default_role=self.default_role,
+            auth_mode=self._auth_mode,
         )
         clone._tokens_by_tenant = self._tokens_by_tenant
         clone._api_keys_by_tenant = self._api_keys_by_tenant
-        clone._auth_mode = self._auth_mode
         clone._active_principal = self._active_principal
         clone._active_role = self._active_role
         return clone
@@ -1513,6 +1518,7 @@ class ApiTestClient:
         clone = self._clone()
         clone.default_tenant = tenant_id or self.default_tenant
         clone._auth_mode = "admin"
+        clone.default_role = UserRole.ADMIN
         clone._active_principal = "usr_test_admin"
         clone._active_role = UserRole.ADMIN
         return clone
@@ -1526,6 +1532,7 @@ class ApiTestClient:
         clone = self._clone()
         clone.default_tenant = tenant_id or self.default_tenant
         clone._auth_mode = "agent"
+        clone.default_role = None
         clone._active_principal = agent_id
         clone._active_role = None
         return clone
@@ -1534,13 +1541,17 @@ class ApiTestClient:
         """Return a client context with credential auto-injection explicitly disabled (§14)."""
         clone = self._clone()
         clone._auth_mode = "unauthenticated"
+        clone.default_role = None
+        clone._active_principal = None
+        clone._active_role = None
         return clone
 
     def as_buyer(self, tenant_id: str | None = None) -> ApiTestClient:
         """Return a client context configured with standard buyer credentials (§14)."""
         clone = self._clone()
         clone.default_tenant = tenant_id or self.default_tenant
-        clone._auth_mode = "default"
+        clone._auth_mode = "buyer"
+        clone.default_role = UserRole.BUYER
         clone._active_principal = "usr_test_buyer"
         clone._active_role = UserRole.BUYER
         return clone
@@ -1678,54 +1689,64 @@ class ApiTestClient:
     ) -> ApiResponse:
         hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
-        # Auto-inject default authentication unless explicitly disabled or already provided
-        if (
-            auth
-            and self._auth_mode != "unauthenticated"
-            and "authorization" not in hdrs
-            and "x-api-key" not in hdrs
-            and path not in ("/api/v1/health", "/openapi.json", "/api/v1/webhooks/payments")
-        ):
-            target_tenant = (
-                hdrs.get("x-tenant-id")
-                or self.app._extract_protocol_tenant(path, json_body)
-                or self.default_tenant
-            )
-            if self._auth_mode == "admin":
-                token = self.get_or_create_token(
-                    tenant_id=target_tenant,
-                    role=UserRole.ADMIN,
-                    principal_id=self._active_principal or "usr_test_admin",
-                    scopes=("admin", "operator", "commerce:read", "commerce:write"),
-                )
-            elif self._auth_mode == "agent":
-                token = self.get_or_create_token(
-                    tenant_id=target_tenant,
-                    role=None,
-                    principal_id=self._active_principal or "agent_01",
-                    scopes=("agent", "commerce:read", "commerce:write"),
-                )
-            else:
-                effective_role = self._active_role or self.default_role
-                if effective_role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
-                    effective_pid = self._active_principal or "usr_test_admin"
-                    effective_scopes: tuple[str, ...] = (
-                        "admin",
-                        "operator",
-                        "commerce:read",
-                        "commerce:write",
-                    )
-                else:
-                    effective_pid = self._active_principal or "usr_test_buyer"
-                    effective_scopes = ("commerce:read", "commerce:write")
+        is_public_path = path in (
+            "/api/v1/health",
+            "/openapi.json",
+            "/api/v1/webhooks/payments",
+            "/api/v1/metrics",
+        )
 
-                token = self.get_or_create_token(
-                    tenant_id=target_tenant,
-                    role=effective_role,
-                    principal_id=effective_pid,
-                    scopes=effective_scopes,
-                )
-            hdrs["authorization"] = f"Bearer {token}"
+        # Explicit authentication management (§14)
+        if auth and not is_public_path:
+            has_explicit_auth = "authorization" in hdrs or "x-api-key" in hdrs
+            if not has_explicit_auth:
+                if self._auth_mode == "unauthenticated":
+                    pass  # Explicitly stripped credentials; hits endpoint unauthenticated
+                elif self._auth_mode == "admin":
+                    target_tenant = (
+                        hdrs.get("x-tenant-id")
+                        or self.app._extract_protocol_tenant(path, json_body)
+                        or self.default_tenant
+                    )
+                    token = self.get_or_create_token(
+                        tenant_id=target_tenant,
+                        role=UserRole.ADMIN,
+                        principal_id=self._active_principal or "usr_test_admin",
+                        scopes=("admin", "operator", "commerce:read", "commerce:write"),
+                    )
+                    hdrs["authorization"] = f"Bearer {token}"
+                elif self._auth_mode == "agent":
+                    target_tenant = (
+                        hdrs.get("x-tenant-id")
+                        or self.app._extract_protocol_tenant(path, json_body)
+                        or self.default_tenant
+                    )
+                    token = self.get_or_create_token(
+                        tenant_id=target_tenant,
+                        role=None,
+                        principal_id=self._active_principal or "agent_01",
+                        scopes=("agent", "commerce:read", "commerce:write"),
+                    )
+                    hdrs["authorization"] = f"Bearer {token}"
+                elif self._auth_mode in ("buyer", "default"):
+                    target_tenant = (
+                        hdrs.get("x-tenant-id")
+                        or self.app._extract_protocol_tenant(path, json_body)
+                        or self.default_tenant
+                    )
+                    token = self.get_or_create_token(
+                        tenant_id=target_tenant,
+                        role=UserRole.BUYER,
+                        principal_id=self._active_principal or "usr_test_buyer",
+                        scopes=("commerce:read", "commerce:write"),
+                    )
+                    hdrs["authorization"] = f"Bearer {token}"
+                elif self._auth_mode == "unconfigured":
+                    raise UnconfiguredClientAuthError(
+                        f"ApiTestClient requires explicit caller persona on protected endpoint '{path}'. "
+                        "Use .as_buyer(), .as_admin(), .as_agent(), or .as_unauthenticated(), "
+                        "or supply an explicit Authorization or X-API-Key header (§14)."
+                    )
 
         return self.app.handle_request(method, path, hdrs, json_body)
 

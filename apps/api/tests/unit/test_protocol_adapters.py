@@ -484,7 +484,7 @@ def test_x402_adapter_validation_errors() -> None:
 def test_api_acp_checkout_endpoint_success_and_errors() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # 1. Successful under-limit checkout
@@ -567,7 +567,7 @@ def test_api_acp_checkout_endpoint_success_and_errors() -> None:
 def test_api_ap2_mandates_endpoint_under_and_over_limit() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # 1. Under-limit mandate (autonomous execution)
@@ -621,7 +621,7 @@ def test_api_ap2_mandates_endpoint_under_and_over_limit() -> None:
 def test_api_uap_rpc_endpoint() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     payload = {
@@ -672,7 +672,7 @@ def test_api_uap_rpc_endpoint() -> None:
 def test_api_x402_pay_endpoint() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     payload = {
@@ -705,7 +705,7 @@ def test_api_x402_pay_endpoint() -> None:
 def test_emergency_kill_switch_blocks_all_protocol_endpoints() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     # Activate emergency kill switch (§21, §67)

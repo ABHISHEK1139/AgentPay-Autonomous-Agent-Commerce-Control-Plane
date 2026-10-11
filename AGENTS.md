@@ -18,12 +18,13 @@
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (154 files), `ruff check` (clean), `mypy --strict`
-  (136 files, clean), `pytest` (**675 passed, 0 failed, 0 skipped**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (160 files), `ruff check` (clean), `mypy --strict`
+  (140 files, clean), `pytest` (**684 passed, 0 failed, 0 skipped**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
-- **Auxiliary suites, all green:** 4 node web tests (`node --test tests/web.test.mjs`, including §121
-  ARIA accessibility and keyboard contracts), 42/42 protocol adversarial probes, 4/4 concurrency probes,
-  5/5 test-client privilege probes, 6/6 currency/money probes, 6/6 webhook replay/concurrency probes,
+- **Auxiliary suites, all green:** 5 node web tests (`node --test tests/web.test.mjs`, including §121
+  ARIA accessibility, keyboard contracts, and authenticated live API client integration), 42/42 protocol
+  adversarial probes, 4/4 concurrency probes, 6/6 test-client privilege probes (including strict unconfigured
+  fail-closed verification), 6/6 currency/money probes, 6/6 webhook replay/concurrency probes,
   9/9 SSRF & circuit breaker probes, 6/6 model gateway resilience probes, audit-chain verifier CLI
   (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
   (`scripts/generate_sbom.py --verify`).
@@ -37,13 +38,15 @@ This section is the map of what actually exists:
   structured zero-dependency observability (`Tracer`, `Meter`, `GET /api/v1/metrics`), and an
   in-process API app (`AgentPayApiApp`, `/api/v1/*`, including `POST /api/v1/webhooks/payments`
   with HMAC-SHA256 verification and replay locking) exercised through a least-privilege in-process
-  test client (`ApiTestClient`, defaulting to `UserRole.BUYER`).
+  test client (`ApiTestClient`, strictly requiring explicit caller personas or bearer credentials).
 - **Adapters confirmed present:** tenant-partitioned, lock-guarded in-memory repositories AND
   SQLAlchemy 2.0 relational models/repositories (`infrastructure/database/`, verified against
-  in-memory SQLite); `MockPaymentProvider`; `MockDecisionEngine`; protocol adapters
-  ACP/AP2/UAP/x402; atomic single-use approval consumption; idempotency store that raises on
-  payload mismatch; in-process emergency-pause flag returning `EMERGENCY_PAUSE_ACTIVE` on mutating
-  paths.
+  in-memory SQLite and Alembic migrations `0001_initial_schema` covering all 17 relational tables);
+  `StripePaymentProvider` and `RazorpayPaymentProvider` with cryptographic HMAC-SHA256 signature
+  verification, timestamp tolerance windows, and webhook event normalization; `MockPaymentProvider`;
+  `MockDecisionEngine`; protocol adapters ACP/AP2/UAP/x402; atomic single-use approval consumption;
+  idempotency store that raises on payload mismatch; in-process emergency-pause flag returning
+  `EMERGENCY_PAUSE_ACTIVE` on mutating paths.
 - **Frontend confirmed present:** React/TypeScript control center (`apps/web/`) with all 8 demo
   scenarios of §112 in `scenarioData.ts`, approval context view, kill-switch UI, and full ARIA
   landmarks/roles and keyboard navigation (§121).

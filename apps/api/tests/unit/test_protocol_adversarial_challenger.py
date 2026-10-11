@@ -38,7 +38,7 @@ from agentpay.domain.policy import SpendingLimits
 def api_fixture() -> tuple[ApiTestClient, AgentPayApiApp, Any]:
     orch, _tenant_repo, agent_repo, perms_repo, *_ = setup_orchestrator(tenant_id="tenant_01")
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     now = datetime.now(UTC)
     active_agent = Agent(

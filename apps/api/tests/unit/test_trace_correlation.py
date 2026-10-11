@@ -47,7 +47,7 @@ def test_incoming_trace_id_propagated_to_headers_and_body() -> None:
     """X-Trace-ID header is preserved and returned in HTTP headers and response body."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     trace_id = "trc_custom_inbound_987654"
     headers = {
@@ -71,7 +71,7 @@ def test_omitted_trace_id_auto_generates_valid_trace_id() -> None:
     """When X-Trace-ID is omitted, app generates a trc_* ID returned in headers and body."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     headers = {"x-tenant-id": "tenant_01"}
     resp = client.post(
@@ -95,7 +95,7 @@ def test_trace_id_in_error_responses() -> None:
     """Standardized error responses carry trace_id in headers and error envelope."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     custom_trace = "trc_err_boundary_test_42"
     headers = {
@@ -114,7 +114,7 @@ def test_trace_id_in_tool_execution() -> None:
     """Tool invocation propagates trace_id to response body, headers, and audit ledger."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     custom_trace = "trc_tool_search_11"
     headers = {
@@ -143,7 +143,7 @@ def test_trace_id_in_protocol_adapters() -> None:
     """Protocol adapter endpoints propagate trace_id to response headers and body."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     custom_trace = "trc_proto_acp_77"
     headers = {

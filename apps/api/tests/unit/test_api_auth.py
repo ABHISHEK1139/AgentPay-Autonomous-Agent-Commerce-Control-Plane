@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from test_purchase_flow import setup_orchestrator
 
-from agentpay.api.app import AgentPayApiApp, ApiTestClient
+from agentpay.api.app import AgentPayApiApp, ApiTestClient, UnconfiguredClientAuthError
 from agentpay.domain.identity import (
     Credential,
     CredentialStatus,
@@ -532,20 +532,19 @@ def test_both_bearer_and_api_key_provided_prefers_bearer(api_client: ApiTestClie
 def test_existing_test_pattern_without_explicit_auth_passes_cleanly(
     api_client: ApiTestClient,
 ) -> None:
-    """Proves legacy test calling syntax without credentials continues to function seamlessly."""
-    status, body = api_client.get(
-        "/agent/catalog",
-        headers={"x-tenant-id": "tenant_01"},
-    )
-    assert status == 200
-    assert "products" in body
+    """Unconfigured client without persona or explicit credentials is rejected (§14)."""
+    with pytest.raises(UnconfiguredClientAuthError):
+        api_client.get(
+            "/agent/catalog",
+            headers={"x-tenant-id": "tenant_01"},
+        )
 
 
 def test_unprivileged_default_client_accessing_emergency_pause_returns_403(
     api_client: ApiTestClient,
 ) -> None:
     """An unprivileged default client (BUYER role) cannot trigger emergency pause (§14, §67)."""
-    status, body = api_client.post(
+    status, body = api_client.as_buyer().post(
         "/api/v1/emergency/pause",
         json_body={"operator_id": "buyer_01", "reason": "unauthorized attempt"},
     )
@@ -611,9 +610,9 @@ def test_fluent_helpers_immutability_and_chaining(
     agent_client = api_client.as_agent("agent_01")
     buyer_client = api_client.as_buyer()
 
-    # Base client remains BUYER
-    assert api_client.default_role == UserRole.BUYER
-    assert api_client._auth_mode == "default"
+    # Base client remains unconfigured
+    assert api_client.default_role is None
+    assert api_client._auth_mode == "unconfigured"
 
     # Admin client succeeds on emergency
     s_admin, _ = admin_client.get("/api/v1/emergency/status")
@@ -631,9 +630,9 @@ def test_fluent_helpers_immutability_and_chaining(
     s_buyer, _ = buyer_client.get("/api/v1/emergency/status")
     assert s_buyer == 403
 
-    # Base client rejected with 403 (unprivileged BUYER)
-    s_base, _ = api_client.get("/api/v1/emergency/status")
-    assert s_base == 403
+    # Base unconfigured client is rejected when calling protected endpoints
+    with pytest.raises(UnconfiguredClientAuthError):
+        api_client.get("/api/v1/emergency/status")
 
 
 def test_token_cache_partitioned_by_tenant_principal_and_role(

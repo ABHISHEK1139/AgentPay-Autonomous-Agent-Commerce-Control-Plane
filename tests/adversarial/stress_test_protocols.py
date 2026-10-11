@@ -48,7 +48,7 @@ def run_tests() -> dict[str, Any]:
     ap2 = AP2Adapter()
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     results: dict[str, list[dict[str, Any]]] = {
         "negative_amounts": [],

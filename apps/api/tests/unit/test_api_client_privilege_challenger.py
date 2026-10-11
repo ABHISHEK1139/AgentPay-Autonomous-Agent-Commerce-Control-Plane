@@ -13,21 +13,56 @@ from __future__ import annotations
 import concurrent.futures
 import threading
 
+import pytest
 from test_purchase_flow import setup_orchestrator
 
-from agentpay.api.app import AgentPayApiApp, ApiTestClient
+from agentpay.api.app import AgentPayApiApp, ApiTestClient, UnconfiguredClientAuthError
 from agentpay.domain.identity import UserRole
 
 
-def test_adversarial_base_client_emergency_fail_closed() -> None:
-    """Empirical probe: Base ApiTestClient receives 403 UNAUTHORIZED_OPERATOR across all emergency endpoints."""
+def test_adversarial_unconfigured_client_raises_on_protected_endpoints() -> None:
+    """Unconfigured client without persona or headers immediately raises UnconfiguredClientAuthError (§14)."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
     client = ApiTestClient(app)
 
+    assert client._auth_mode == "unconfigured"
+    assert client.default_role is None
+
+    # Public endpoint succeeds without auth
+    s_health, _ = client.get("/api/v1/health")
+    assert s_health == 200
+
+    # Protected endpoint without explicit persona raises UnconfiguredClientAuthError
+    with pytest.raises(UnconfiguredClientAuthError) as exc_info:
+        client.get("/agent/catalog", headers={"x-tenant-id": "tenant_01"})
+    assert "explicit caller persona" in str(exc_info.value)
+
+    # Emergency route without explicit persona raises UnconfiguredClientAuthError
+    with pytest.raises(UnconfiguredClientAuthError):
+        client.post("/api/v1/emergency/pause", json_body={"operator_id": "op", "reason": "test"})
+
+    # Explicit auth=False passes through without error to auth layer
+    s_unauth, _ = client.get("/agent/catalog", headers={"x-tenant-id": "tenant_01"}, auth=False)
+    assert s_unauth == 401
+
+    # Explicit header passes through without error
+    s_token, _ = client.get(
+        "/agent/catalog",
+        headers={"x-tenant-id": "tenant_01", "Authorization": "Bearer bad"},
+    )
+    assert s_token == 401
+
+
+def test_adversarial_base_client_emergency_fail_closed() -> None:
+    """Empirical probe: Base ApiTestClient (.as_buyer()) receives 403 UNAUTHORIZED_OPERATOR across all emergency endpoints."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app).as_buyer()
+
     # Invariant: default role is BUYER
     assert client.default_role == UserRole.BUYER
-    assert client._auth_mode == "default"
+    assert client._auth_mode == "buyer"
 
     # 1. GET /api/v1/emergency/status
     s_stat, b_stat = client.get("/api/v1/emergency/status")
@@ -134,7 +169,7 @@ def test_adversarial_immutability_and_anti_escalation() -> None:
     """Empirical probe: Calling .as_admin() does NOT mutate or elevate original client."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    base_client = ApiTestClient(app)
+    base_client = ApiTestClient(app).as_buyer()
 
     # Clone identity separation
     admin_client = base_client.as_admin()
@@ -142,9 +177,9 @@ def test_adversarial_immutability_and_anti_escalation() -> None:
 
     # Base client invariants
     assert base_client.default_role == UserRole.BUYER
-    assert base_client._auth_mode == "default"
-    assert base_client._active_principal is None
-    assert base_client._active_role is None
+    assert base_client._auth_mode == "buyer"
+    assert base_client._active_principal == "usr_test_buyer"
+    assert base_client._active_role == UserRole.BUYER
 
     # Pause via admin_client
     s_pause, _ = admin_client.post(
@@ -194,7 +229,7 @@ def test_adversarial_multithreaded_concurrency_race_condition() -> None:
     """Empirical probe: 50 concurrent threads racing base vs admin client calls simultaneously."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    shared_base_client = ApiTestClient(app)
+    shared_base_client = ApiTestClient(app).as_buyer()
 
     num_threads = 50
     barrier = threading.Barrier(num_threads)

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path("apps/api/tests/unit").resolve()))
 
 from test_purchase_flow import setup_orchestrator  # type: ignore[import-not-found]
 
-from agentpay.api.app import AgentPayApiApp, ApiTestClient
+from agentpay.api.app import AgentPayApiApp, ApiTestClient, UnconfiguredClientAuthError
 from agentpay.domain.identity import UserRole
 
 
@@ -33,21 +33,66 @@ def log(msg: str) -> None:
 
 
 # ===========================================================================
-# Probe 1: Base Unprivileged Client on Emergency Endpoints
+# Probe 0: Unconfigured Client Fail Closed
 # ===========================================================================
-def probe_base_client_emergency_fail_closed() -> dict[str, Any]:
-    """Verify base ApiTestClient receives 403 UNAUTHORIZED_OPERATOR on all emergency endpoints."""
+def probe_unconfigured_client_fail_closed() -> dict[str, Any]:
+    """Verify unconfigured client raises UnconfiguredClientAuthError on protected endpoints (§14)."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
     client = ApiTestClient(app)
+
+    violations: list[str] = []
+    if client._auth_mode != "unconfigured":
+        violations.append(f"Expected unconfigured auth_mode, got {client._auth_mode}")
+    if client.default_role is not None:
+        violations.append(f"Expected None default_role, got {client.default_role}")
+
+    # Public endpoint succeeds
+    s_h, _ = client.get("/api/v1/health")
+    if s_h != 200:
+        violations.append(f"Health check failed with {s_h}")
+
+    # Protected endpoint without explicit persona raises UnconfiguredClientAuthError
+    try:
+        client.get("/agent/catalog", headers={"x-tenant-id": "tenant_01"})
+        violations.append("Protected endpoint did NOT raise UnconfiguredClientAuthError!")
+    except UnconfiguredClientAuthError:
+        pass
+    except Exception as e:
+        violations.append(f"Expected UnconfiguredClientAuthError, got {type(e).__name__}: {e}")
+
+    # Emergency route without explicit persona raises UnconfiguredClientAuthError
+    try:
+        client.post("/api/v1/emergency/pause", json_body={"operator_id": "op", "reason": "test"})
+        violations.append("Emergency route did NOT raise UnconfiguredClientAuthError!")
+    except UnconfiguredClientAuthError:
+        pass
+    except Exception as e:
+        violations.append(f"Expected UnconfiguredClientAuthError, got {type(e).__name__}: {e}")
+
+    return {
+        "probe": "probe_unconfigured_client_fail_closed",
+        "passed": len(violations) == 0,
+        "violations": violations,
+    }
+
+
+# ===========================================================================
+# Probe 1: Base Unprivileged Client on Emergency Endpoints
+# ===========================================================================
+def probe_base_client_emergency_fail_closed() -> dict[str, Any]:
+    """Verify base ApiTestClient (.as_buyer()) receives 403 UNAUTHORIZED_OPERATOR on all emergency endpoints."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app).as_buyer()
 
     violations: list[str] = []
 
     # 1. Base client default role invariant
     if client.default_role != UserRole.BUYER:
         violations.append(f"Expected default_role BUYER, got {client.default_role}")
-    if client._auth_mode != "default":
-        violations.append(f"Expected _auth_mode 'default', got {client._auth_mode}")
+    if client._auth_mode != "buyer":
+        violations.append(f"Expected _auth_mode 'buyer', got {client._auth_mode}")
 
     # 2. GET /api/v1/emergency/status
     s_stat, b_stat = client.get("/api/v1/emergency/status")
@@ -230,7 +275,7 @@ def probe_immutability_and_anti_escalation() -> dict[str, Any]:
     """Verify calling .as_admin() does NOT mutate, elevate, or pollute the original client."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    base_client = ApiTestClient(app)
+    base_client = ApiTestClient(app).as_buyer()
 
     violations: list[str] = []
 
@@ -244,13 +289,13 @@ def probe_immutability_and_anti_escalation() -> dict[str, Any]:
     # 2. Original client attribute invariants
     if base_client.default_role != UserRole.BUYER:
         violations.append(f"base_client default_role mutated to {base_client.default_role}")
-    if base_client._auth_mode != "default":
+    if base_client._auth_mode != "buyer":
         violations.append(f"base_client _auth_mode mutated to {base_client._auth_mode}")
-    if base_client._active_principal is not None:
+    if base_client._active_principal != "usr_test_buyer":
         violations.append(
             f"base_client _active_principal mutated to {base_client._active_principal}"
         )
-    if base_client._active_role is not None:
+    if base_client._active_role != UserRole.BUYER:
         violations.append(f"base_client _active_role mutated to {base_client._active_role}")
 
     # 3. Successful administrative action on admin_client
@@ -304,7 +349,7 @@ def probe_immutability_and_anti_escalation() -> dict[str, Any]:
         )
 
     # 7. Deep multi-branch cloning isolation
-    c_base = ApiTestClient(app)
+    c_base = ApiTestClient(app).as_buyer()
     c_admin = c_base.as_admin()
     c_buyer = c_admin.as_buyer()
     c_agent = c_admin.as_agent("agent_isolated")
@@ -335,7 +380,7 @@ def probe_multithreaded_concurrency_race_condition() -> dict[str, Any]:
     """Test 50 threads racing base unprivileged vs admin client calls simultaneously."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    shared_base_client = ApiTestClient(app)
+    shared_base_client = ApiTestClient(app).as_buyer()
 
     num_threads = 50
     barrier = threading.Barrier(num_threads)
@@ -404,6 +449,7 @@ def main() -> None:
     log("==================================================================")
 
     probes = [
+        probe_unconfigured_client_fail_closed,
         probe_base_client_emergency_fail_closed,
         probe_unauthenticated_client_fail_closed,
         probe_agent_client_fail_closed,

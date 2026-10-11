@@ -30,10 +30,10 @@ mypy 2.4.0, pytest 9.1.1.
 | Supply Chain & Provenance | implemented | CycloneDX 1.5 JSON SBOM & SLSA 1.2 build provenance attestation CLI generator (`scripts/generate_sbom.py`, §57, §130) |
 | Protocol Adapters | implemented | ACP, AP2, UAP, x402 adapters mapping to canonical `ActionRequest` (§107, §108) |
 | Developer SDK | implemented | Thin typed Python client (`from agentpay import AgentPay`, §109) |
-| Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, approval UI (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
-| Ports & Adapters | implemented | Thread-safe in-memory repositories & mock payment/decision adapters |
-| Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), verified on in-memory SQLite (`test_database_persistence.py`) |
-| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.1, HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), least-privilege `ApiTestClient` |
+| Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, live API client integration (§14, §21, §66, §67), approval UI (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
+| Ports & Adapters | implemented | Thread-safe in-memory repositories, Stripe & Razorpay payment adapters with HMAC-SHA256 signature verification and anti-replay windows, mock JEV decision engine |
+| Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), Alembic migrations `0001_initial_schema` covering all 17 tables, verified on in-memory SQLite and offline SQL DDL generation |
+| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.1, HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
 | Operational Runbooks | implemented | All 9 named runbooks in `docs/runbooks/` (§133) |
 | Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-006 (§87) |
 | Security Assurance | implemented | OWASP ASVS v4.0.3 verification matrix, YAML index, exceptions in `security/asvs/` (§53) |
@@ -44,14 +44,14 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            154 files already formatted
+uv run ruff format --check .                                            160 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 136 source files
-uv run pytest                                                           675 passed in 7.31s
-node --test tests/web.test.mjs                                          4 passed in 121ms (incl. §121 accessibility)
+uv run mypy                                                             Success: no issues found in 140 source files
+uv run pytest                                                           684 passed in 10.18s
+node --test tests/web.test.mjs                                          5 passed in 262ms (incl. live API & §121 accessibility)
 uv run python tests/adversarial/stress_test_protocols.py                42/42 passed
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
-uv run python tests/adversarial/stress_test_client_privilege.py          5/5 passed
+uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed
 uv run python tests/adversarial/stress_test_webhooks.py                 6/6 passed
 uv run python tests/adversarial/stress_test_ssrf_resilience.py          9/9 passed

@@ -27,7 +27,7 @@ def test_api_health_and_openapi() -> None:
 def test_missing_tenant_header_returns_standard_error_envelope() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
 
     # Calling tenant-scoped endpoint without X-Tenant-ID
     status_code, body = client.get("/agent/catalog")
@@ -41,7 +41,7 @@ def test_missing_tenant_header_returns_standard_error_envelope() -> None:
 def test_agent_catalog_and_product_lookup() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     status_code, body = client.get("/agent/catalog", headers=headers)
@@ -65,7 +65,7 @@ def test_agent_catalog_and_product_lookup() -> None:
 def test_action_execution_autonomous_allow() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     payload = {
@@ -90,7 +90,7 @@ def test_action_execution_autonomous_allow() -> None:
 def test_emergency_kill_switch_lifecycle() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     admin_client = client.as_admin()
     headers = {"x-tenant-id": "tenant_01"}
 
@@ -136,7 +136,7 @@ def test_emergency_kill_switch_lifecycle() -> None:
 def test_approval_flow_via_http() -> None:
     orch, *_, variant_repo, inv_repo, _, _, _approval_repo = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
+    client = ApiTestClient(app).as_buyer()
     headers = {"x-tenant-id": "tenant_01"}
 
     from agentpay.domain.commerce import Inventory, ProductVariant
