@@ -47,6 +47,8 @@ class PaymentProviderType(StrEnum):
     IN_MEMORY_RAZORPAY = "in_memory_razorpay"
     IN_MEMORY_STRIPE = "in_memory_stripe"
     RAZORPAY_SANDBOX = "razorpay_sandbox"
+    RAZORPAY = "razorpay"
+    STRIPE = "stripe"
 
 
 class DecisionEngineType(StrEnum):
@@ -152,7 +154,11 @@ class AppConfig:
                 )
 
         # 3. Sandbox credential validation
-        if self.payment_provider == PaymentProviderType.RAZORPAY_SANDBOX:
+        if (
+            self.payment_provider
+            in (PaymentProviderType.RAZORPAY_SANDBOX, PaymentProviderType.RAZORPAY)
+            and self.environment == Environment.SANDBOX
+        ) or self.payment_provider == PaymentProviderType.RAZORPAY_SANDBOX:
             if is_placeholder_secret(self.razorpay_key_id):
                 raise ConfigValidationError(
                     "RAZORPAY_KEY_ID is missing or a placeholder string in sandbox mode."
@@ -202,12 +208,21 @@ class AppConfig:
                 "Live payments are disabled by default. Autonomous live transactions are "
                 "prohibited under current milestone (§151)."
             )
+        normalized_provider = raw_provider
+        if raw_provider == "razorpay":
+            if environment == Environment.SANDBOX:
+                normalized_provider = "razorpay_sandbox"
+            else:
+                normalized_provider = "in_memory_razorpay"
+        elif raw_provider == "stripe":
+            normalized_provider = "in_memory_stripe"
+
         try:
-            payment_provider = PaymentProviderType(raw_provider)
+            payment_provider = PaymentProviderType(normalized_provider)
         except ValueError as exc:
             raise ConfigValidationError(
                 f"Invalid AGENTPAY_PAYMENT_PROVIDER '{raw_provider}'. Must be one of: "
-                f"{[p.value for p in PaymentProviderType]}"
+                f"{[p.value for p in PaymentProviderType]} or aliases ['razorpay', 'stripe']"
             ) from exc
 
         # 3. Decision Engine
@@ -231,11 +246,15 @@ class AppConfig:
         rzp_key_id = e.get("RAZORPAY_KEY_ID")
         rzp_key_secret = e.get("RAZORPAY_KEY_SECRET")
         rzp_wh_secret = (
-            e.get("RAZORPAY_WEBHOOK_SECRET") or "whsec_agentpay_default_secure_secret_32bytes"
+            e.get("RAZORPAY_WEBHOOK_SECRET")
+            or e.get("AGENTPAY_WEBHOOK_SECRET")
+            or "whsec_agentpay_default_secure_secret_32bytes"
         )
         stripe_key = e.get("STRIPE_API_KEY")
         stripe_wh_secret = (
-            e.get("STRIPE_WEBHOOK_SECRET") or "whsec_agentpay_default_secure_secret_32bytes"
+            e.get("STRIPE_WEBHOOK_SECRET")
+            or e.get("AGENTPAY_WEBHOOK_SECRET")
+            or "whsec_agentpay_default_secure_secret_32bytes"
         )
 
         # 6. Observability & AI

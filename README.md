@@ -31,10 +31,10 @@ As AI agents gain the capability to browse the web, compare tools, negotiate pri
 ```text
 ┌────────────────┐      ┌─────────────────────────┐      ┌────────────────────┐
 │ Autonomous AI  │ ───► │   AgentPay Control Plane │ ───► │ Payment Rails &    │
-│ Agent (Untrusted)│      │  (Deterministic AuthZ)  │      │ Sandbox Providers  │
-└────────────────┘      └─────────────────────────┘      │ (Razorpay/Stripe)  │
-                                     │                   └────────────────────┘
-                                     ▼
+│ Agent (Untrusted)│      │  (Deterministic AuthZ)  │      │ Providers          │
+└────────────────┘      └─────────────────────────┘      │ (Razorpay Sandbox/ │
+                                     │                   │  Stripe Simulator) │
+                                     ▼                   └────────────────────┘
                         ┌─────────────────────────┐
                         │ Human-in-the-Loop       │
                         │ Cryptographic Approvals │
@@ -190,7 +190,7 @@ uv run mypy
 uv run pytest
 
 # 5. Web Control Center test suite (5 passed, ARIA §121 & live client)
-node --test tests/web.test.mjs
+npx --yes tsx --test tests/web.test.mjs
 ```
 
 ### Dedicated Adversarial Stress Suites (17 Suites)
@@ -248,7 +248,7 @@ agentpay/
 │   │   ├── application/     # Use cases, purchase orchestrator, reconciliation, outbox
 │   │   ├── api/             # HTTP routing, error envelopes, webhooks, emergency controls
 │   │   ├── infrastructure/  # SQLAlchemy 2.0 models, migrations (0001-0004), tenant-scoped repos
-│   │   ├── adapters/        # In-memory repositories, Stripe & Razorpay sandbox adapters, mock JEV
+│   │   ├── adapters/        # In-memory repositories, Razorpay sandbox adapter, Stripe simulator, mock JEV
 │   │   ├── adapters/protocols/ # ACP, AP2, UAP, x402 protocol adapters
 │   │   ├── server.py        # Pure standard-library multi-threaded HTTP server
 │   │   └── cli.py           # CLI runner (agentpay serve, worker, health, migrate)

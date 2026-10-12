@@ -235,12 +235,14 @@ class AgentPayApiApp:
         self.razorpay_webhook_secret: str = (
             razorpay_webhook_secret
             or os.environ.get("RAZORPAY_WEBHOOK_SECRET")
+            or os.environ.get("AGENTPAY_WEBHOOK_SECRET")
             or getattr(getattr(self.reconciler, "_provider", None), "webhook_secret", None)
             or webhook_secret
         )
         self.stripe_webhook_secret: str = (
             stripe_webhook_secret
             or os.environ.get("STRIPE_WEBHOOK_SECRET")
+            or os.environ.get("AGENTPAY_WEBHOOK_SECRET")
             or getattr(getattr(self.reconciler, "_provider", None), "webhook_secret", None)
             or webhook_secret
         )

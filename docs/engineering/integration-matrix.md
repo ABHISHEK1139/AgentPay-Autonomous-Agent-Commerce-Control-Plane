@@ -2,17 +2,18 @@
 
 > **Document Status**: Production Reference Specification  
 > **Governing Specifications**: `AgentPay_Implementation_Remediation_Report.md` (§4 Deliverable 1), `AGENTS.md` (§8, §10, §39, §49, §151)  
-> **Last Verified**: Remediation Sprint (Commit `39e08b7`)
+> **Last Verified**: Oct 12, 2026 (Live Sandbox Re-Verification)
 
 ---
 
 ## 1. Overview & Vocabulary
 
-Per the remediation plan and `AGENTS.md`, status claims are strictly categorized:
-- **Implemented**: Code exists in `src/agentpay`.
-- **Unit-Tested**: Exercised in isolated unit test harnesses.
-- **Integration-Tested**: Inter-component communication verified in memory or on local SQLite.
-- **Sandbox-Verified**: Real external or mock-simulated provider contract exercised with authoritative queries and webhooks.
+Per the remediation plan and `AGENTS.md`, status claims are strictly categorized to avoid confusing simulated test doubles with live external network execution:
+
+- **Implemented**: Code exists in `src/agentpay` and satisfies static types (`mypy --strict`).
+- **Unit-Tested**: Exercised in isolated hermetic unit test harnesses.
+- **Simulated Integration-Tested (Hermetic CI)**: Component-to-component interaction verified in memory or against local SQLite with simulated gateway responses. Guarantees 100% reproducible, network-independent CI execution.
+- **Externally Sandbox-Verified (Live External Gateway)**: Exercised over live outbound HTTPS against the real payment gateway sandbox environment (`https://api.razorpay.com/v1`) using active test API credentials (`rzp_test_...`), verifying real order creation, receipt hashing, authoritative order retrieval, and HMAC-SHA256 signature verification.
 - **Production-Ready**: Ready for production deployment with fail-closed security controls (Note: Live-money processing remains disabled per §151).
 
 ---
@@ -21,9 +22,9 @@ Per the remediation plan and `AGENTS.md`, status claims are strictly categorized
 
 | Component | Subsystem | Supported Modes | Real External Dependencies | Interface / Port | Current Status | Verification Evidence | Owner |
 |---|---|---|---|---|---|---|---|
-| **Razorpay Sandbox Provider** | Payments | `sandbox` | Razorpay Sandbox API (`https://api.razorpay.com/v1`) | `PaymentProvider` | Sandbox-Verified (AP-004, AP-017) | `apps/api/tests/unit/test_payment_providers.py`<br>`tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py` | Payments / SAGA |
-| **Razorpay Mock Provider** | Payments | `mock` | None (In-memory simulation) | `PaymentProvider` | Unit-Tested & Integration-Tested | `apps/api/tests/unit/test_payment_providers.py`<br>`apps/api/tests/unit/test_webhooks.py` | Payments Core |
-| **Stripe Mock Provider** | Payments | `mock` | None (In-memory simulation) | `PaymentProvider` | Unit-Tested & Integration-Tested | `apps/api/tests/unit/test_payment_providers.py`<br>`apps/api/tests/unit/test_webhooks.py` | Payments Core |
+| **Razorpay Sandbox Provider** | Payments | `sandbox` | Razorpay Sandbox API (`https://api.razorpay.com/v1`) | `PaymentProvider` | **Hermetic Tested & Externally Sandbox-Verified** (AP-004, AP-017) | Hermetic: `test_m8_sandbox_e2e_reconciliation.py`<br>Live Opt-In: `test_razorpay_sandbox_live_api_order_and_query`<br>Empirical Live Orders: `order_TmxcbPeXFnAdoT`, `order_Tmy5yTfR8ePjXm` | Payments / SAGA |
+| **Razorpay Mock Provider** | Payments | `mock`, `development` | None (In-memory simulation) | `PaymentProvider` | Unit-Tested & In-Memory Tested | `apps/api/tests/unit/test_payment_providers.py`<br>`apps/api/tests/unit/test_webhooks.py` | Payments Core |
+| **Stripe Simulator** | Payments | `mock`, `development` | None (In-memory simulation; external Stripe sandbox planned) | `PaymentProvider` | Unit-Tested & In-Memory Tested | `apps/api/tests/unit/test_payment_providers.py`<br>`apps/api/tests/unit/test_webhooks.py` | Payments Core |
 | **Webhook Ingress & Verifier** | Payments / Security | `mock`, `sandbox` | HTTP transport, raw bytes | Direct route `/api/v1/webhooks/payments` | Unit-Tested & Adversarial-Verified (AP-001, AP-002) | `apps/api/tests/unit/test_webhooks.py`<br>`tests/adversarial/stress_test_webhook_crypto.py` | Security Core |
 | **Durable Webhook Event Store** | Persistence / Deduplication | `mock`, `sandbox` | SQLite (verified), PostgreSQL (target) | `WebhookEventRepository` | Integration-Tested (AP-003) | `tests/adversarial/stress_test_m2_durable_webhooks.py`<br>Migration `0002_add_provider_webhook_events.py` | Persistence / DB |
 | **Provider Transaction Mapping** | Persistence / Mapping | `mock`, `sandbox` | SQLite (verified), PostgreSQL (target) | `ProviderMappingRepository` | Integration-Tested (AP-001, AP-004) | `tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py`<br>Table `provider_mappings` | Payments / DB |
@@ -40,18 +41,19 @@ Per the remediation plan and `AGENTS.md`, status claims are strictly categorized
 
 ## 3. Operational Guarantees by Environment Mode
 
-### 3.1 `mock` Environment
+### 3.1 `mock` / `development` Environment
 - Default local developer setup (`AGENTPAY_ENVIRONMENT=development`, `AGENTPAY_PAYMENT_PROVIDER=mock`).
-- Zero network calls to external payment processors.
+- Zero outbound network calls to external payment processors.
 - Simulated payment outcomes, deterministically seeded test catalogs, in-memory or SQLite persistence.
-- Fast execution for local development and CI unit tests.
+- Fast, hermetic execution for local development and CI quality gates.
 
 ### 3.2 `sandbox` Environment
-- Dedicated testbed setup (`AGENTPAY_ENVIRONMENT=sandbox`, `AGENTPAY_PAYMENT_PROVIDER=razorpay`).
+- Dedicated testbed setup (`AGENTPAY_ENVIRONMENT=sandbox`, `AGENTPAY_PAYMENT_PROVIDER=razorpay` or `razorpay_sandbox`).
 - Requires valid, non-placeholder credentials (`RAZORPAY_KEY_ID=rzp_test_...`, `RAZORPAY_KEY_SECRET=...`).
-- Fails startup closed if credentials are missing or default demo secrets are detected.
-- Outbound network requests to provider sandbox APIs with strict connect (5.0s) and read (10.0s) timeouts.
+- Fails startup closed if credentials are missing, malformed, or contain default placeholder substrings.
+- Real outbound HTTPS network requests to `https://api.razorpay.com/v1` with strict connect (5.0s) and read (10.0s) timeouts.
 - Authoritative query on timeout before state transitions; SAGA compensation rollbacks on decline/failure.
+- Note: External Stripe sandbox adapter is planned for future milestones; currently Stripe uses an in-memory simulator.
 
 ### 3.3 `production` Environment (§151 Notice)
 - `AGENTPAY_ENVIRONMENT=production`.

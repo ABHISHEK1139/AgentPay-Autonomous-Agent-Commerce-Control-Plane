@@ -387,3 +387,35 @@ def test_production_succeeds_on_migrated_database() -> None:
     )
     app = create_app(config=app_cfg)
     assert app is not None
+
+
+def test_documented_sandbox_runbook_configuration() -> None:
+    """Documented configuration variables in docs/operations/sandbox-runbook.md construct AppConfig cleanly.
+
+    Verifies:
+    - AGENTPAY_ENVIRONMENT=sandbox
+    - AGENTPAY_PAYMENT_PROVIDER=razorpay (alias normalized to razorpay_sandbox)
+    - RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET with valid rzp_test_ prefixes
+    - AGENTPAY_WEBHOOK_SECRET correctly parsed as razorpay webhook secret
+    - factory.create_app wires a RazorpaySandboxProvider instance
+    """
+    from agentpay.adapters.razorpay_sandbox_provider import RazorpaySandboxProvider
+
+    env = {
+        "AGENTPAY_ENVIRONMENT": "sandbox",
+        "AGENTPAY_PAYMENT_PROVIDER": "razorpay",
+        "RAZORPAY_KEY_ID": "rzp_test_documented123",
+        "RAZORPAY_KEY_SECRET": "sec_documented_secret_32bytes",
+        "AGENTPAY_WEBHOOK_SECRET": "whsec_runbook_documented_secret",
+        "AGENTPAY_SEED_DEMO_DATA": "false",
+    }
+    cfg = AppConfig.from_env(env)
+    assert cfg.environment == Environment.SANDBOX
+    assert cfg.payment_provider == PaymentProviderType.RAZORPAY_SANDBOX
+    assert cfg.razorpay_key_id == "rzp_test_documented123"
+    assert cfg.razorpay_key_secret == "sec_documented_secret_32bytes"
+    assert cfg.razorpay_webhook_secret == "whsec_runbook_documented_secret"
+
+    app = create_app(config=cfg)
+    assert isinstance(app.orchestrator._payment_provider, RazorpaySandboxProvider)
+    assert app.razorpay_webhook_secret == "whsec_runbook_documented_secret"

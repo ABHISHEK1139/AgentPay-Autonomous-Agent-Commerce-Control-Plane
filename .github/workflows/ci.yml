@@ -29,7 +29,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install locked dependencies
         run: uv sync --frozen
@@ -47,7 +47,7 @@ jobs:
         run: uv run pytest
 
       - name: Web UI & Accessibility tests
-        run: node --test tests/web.test.mjs
+        run: npx --yes tsx --test tests/web.test.mjs
 
       - name: Database migrations integrity
         run: uv run pytest apps/api/tests/unit/test_database_migrations.py

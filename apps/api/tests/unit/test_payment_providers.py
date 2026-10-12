@@ -641,3 +641,64 @@ def test_razorpay_sandbox_refund_validation_invariants() -> None:
     assert ref.refund_id == "rfnd_test_ok"
     assert ref.amount == Money(5000, "INR")
     assert ref.tenant_id == "tenant_01"
+
+
+def test_razorpay_sandbox_live_api_order_and_query() -> None:
+    """Opt-in live verification against external Razorpay Sandbox (https://api.razorpay.com/v1).
+
+    Runs only when valid test credentials are provided via environment variables:
+    RAZORPAY_KEY_ID (starts with 'rzp_test_') and RAZORPAY_KEY_SECRET.
+    Skips cleanly in hermetic CI when external credentials are not present.
+
+    Verifies:
+    1. Real outbound order creation at https://api.razorpay.com/v1/orders
+    2. Real authoritative order fetch and status reconciliation
+    3. Proper integer minor unit amount (149900 INR)
+    4. Receipt length bounded to <= 40 chars
+    5. Real HMAC-SHA256 signature verification over webhook payload
+    """
+    import hashlib
+    import hmac
+    import os
+
+    key_id = os.environ.get("RAZORPAY_KEY_ID")
+    key_sec = os.environ.get("RAZORPAY_KEY_SECRET")
+    if (
+        not key_id
+        or not key_sec
+        or not key_id.startswith("rzp_test_")
+        or "placeholder" in key_id
+        or "EXAMPLE" in key_id
+    ):
+        pytest.skip("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET with valid rzp_test_ prefix not set")
+
+    provider = RazorpaySandboxProvider(key_id=key_id, key_secret=key_sec, auto_capture=False)
+    amount = Money(149900, "INR")
+    attempt = provider.create_payment(
+        tenant_id="tenant_live_sandbox",
+        intent_id="intent_live_01",
+        amount=amount,
+        idempotency_key="live_idem_01",
+    )
+    assert attempt.provider_payment_id is not None
+    assert attempt.provider_payment_id.startswith("order_")
+    assert attempt.status == PaymentStatus.AUTHORIZED
+    assert attempt.amount == amount
+
+    # Query authoritative status from external sandbox
+    queried = provider.get_payment("tenant_live_sandbox", attempt.provider_payment_id)
+    assert queried.provider_payment_id == attempt.provider_payment_id
+    assert queried.amount == amount
+    assert queried.status == PaymentStatus.AUTHORIZED
+
+    # Verify HMAC signature calculation on mock webhook payload using secret
+    test_payload = b'{"entity":"event","event":"order.paid"}'
+    test_sig = hmac.new(key_sec.encode("utf-8"), test_payload, hashlib.sha256).hexdigest()
+    assert (
+        provider.verify_webhook_signature(
+            payload=test_payload,
+            signature=test_sig,
+            secret=key_sec,
+        )
+        is True
+    )

@@ -51,6 +51,7 @@ from agentpay.config.config import (
     AppConfig,
     ConfigValidationError,
     DecisionEngineType,
+    Environment,
     PaymentProviderType,
 )
 from agentpay.domain.commerce import (
@@ -426,21 +427,30 @@ def create_app(
     if payment_provider is None:
         if cfg.payment_provider == PaymentProviderType.MOCK:
             payment_provider = MockPaymentProvider()
-        elif cfg.payment_provider == PaymentProviderType.IN_MEMORY_RAZORPAY:
-            payment_provider = InMemoryRazorpaySimulator(
-                key_id=cfg.razorpay_key_id or "rzp_test_placeholder_id",
-                key_secret=cfg.razorpay_key_secret or "rzp_test_placeholder_secret",
-                webhook_secret=cfg.razorpay_webhook_secret,
-            )
-        elif cfg.payment_provider == PaymentProviderType.IN_MEMORY_STRIPE:
+        elif cfg.payment_provider in (
+            PaymentProviderType.IN_MEMORY_STRIPE,
+            PaymentProviderType.STRIPE,
+        ):
             payment_provider = InMemoryStripeSimulator(
                 api_key=cfg.stripe_api_key or "sk_test_placeholder_key_for_testing",
                 webhook_secret=cfg.stripe_webhook_secret,
             )
-        elif cfg.payment_provider == PaymentProviderType.RAZORPAY_SANDBOX:
+        elif cfg.payment_provider == PaymentProviderType.RAZORPAY_SANDBOX or (
+            cfg.environment == Environment.SANDBOX
+            and cfg.payment_provider == PaymentProviderType.RAZORPAY
+        ):
             payment_provider = RazorpaySandboxProvider(
                 key_id=cfg.razorpay_key_id or "",
                 key_secret=cfg.razorpay_key_secret or "",
+                webhook_secret=cfg.razorpay_webhook_secret,
+            )
+        elif cfg.payment_provider in (
+            PaymentProviderType.IN_MEMORY_RAZORPAY,
+            PaymentProviderType.RAZORPAY,
+        ):
+            payment_provider = InMemoryRazorpaySimulator(
+                key_id=cfg.razorpay_key_id or "rzp_test_placeholder_id",
+                key_secret=cfg.razorpay_key_secret or "rzp_test_placeholder_secret",
                 webhook_secret=cfg.razorpay_webhook_secret,
             )
         else:

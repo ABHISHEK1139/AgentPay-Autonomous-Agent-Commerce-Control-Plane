@@ -42,13 +42,17 @@ Configure environment variables via shell or secret manager:
 
 ```powershell
 # Set Sandbox Mode and Razorpay Provider
+# (Both "razorpay" and "razorpay_sandbox" are accepted; "razorpay" normalizes to "razorpay_sandbox" in sandbox mode)
 $env:AGENTPAY_ENVIRONMENT="sandbox"
 $env:AGENTPAY_PAYMENT_PROVIDER="razorpay"
 
-# Razorpay Test Credentials
+# Razorpay Test Credentials (requires valid test keys from dashboard.razorpay.com)
 $env:RAZORPAY_KEY_ID="rzp_test_EXAMPLE12345"
 $env:RAZORPAY_KEY_SECRET="your_test_secret_here"
-$env:AGENTPAY_WEBHOOK_SECRET="your_webhook_secret_here"
+
+# Webhook Secret (RAZORPAY_WEBHOOK_SECRET or AGENTPAY_WEBHOOK_SECRET fallback)
+$env:RAZORPAY_WEBHOOK_SECRET="your_webhook_secret_here"
+# Note: $env:AGENTPAY_WEBHOOK_SECRET="your_webhook_secret_here" is also supported as an alias
 
 # Database Connection (SQLite or PostgreSQL)
 $env:DATABASE_URL="sqlite:///agentpay_sandbox.db"
@@ -76,9 +80,11 @@ Expected response confirms sandbox mode:
 ```json
 {
   "status": "healthy",
+  "emergency_paused": false,
+  "version": "1.0.0-mvp",
   "environment": "sandbox",
-  "payment_provider": "razorpay",
-  "version": "0.1.0"
+  "payment_provider": "razorpay_sandbox",
+  "decision_engine": "mock"
 }
 ```
 
