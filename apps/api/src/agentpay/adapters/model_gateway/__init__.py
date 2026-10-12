@@ -8,6 +8,7 @@ from agentpay.adapters.model_gateway.model_gateway import (
 )
 from agentpay.adapters.model_gateway.openai_compatible_provider import (
     OpenAiCompatibleModelProvider,
+    OpenRouterModelProvider,
     OrcaRouterModelProvider,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "ModelGateway",
     "ModelProvider",
     "OpenAiCompatibleModelProvider",
+    "OpenRouterModelProvider",
     "OrcaRouterModelProvider",
     "TokenBudgetTracker",
 ]

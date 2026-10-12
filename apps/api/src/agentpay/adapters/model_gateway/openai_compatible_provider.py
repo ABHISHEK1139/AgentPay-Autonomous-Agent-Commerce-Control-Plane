@@ -49,6 +49,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
         model: str = "orcarouter/auto",
         provider_name: str = "orcarouter",
         timeout_seconds: float = 5.0,
+        extra_headers: dict[str, str] | None = None,
         transport: (
             Callable[[urllib.request.Request], tuple[int, bytes, dict[str, str]]] | None
         ) = None,
@@ -71,6 +72,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
         )
         self.provider_name = provider_name
         self.timeout_seconds = timeout_seconds
+        self.extra_headers = dict(extra_headers) if extra_headers else {}
         self._transport = transport
         self.resolve_dns = resolve_dns
 
@@ -149,6 +151,8 @@ class OpenAiCompatibleModelProvider(ModelProvider):
             "Accept": "application/json",
             "User-Agent": "AgentPay-ModelGateway/1.0",
         }
+        if self.extra_headers:
+            headers.update(self.extra_headers)
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -374,5 +378,53 @@ class OrcaRouterModelProvider(OpenAiCompatibleModelProvider):
             base_url=base_url,
             model=model,
             provider_name="orcarouter",
+            **kwargs,
+        )
+
+
+class OpenRouterModelProvider(OpenAiCompatibleModelProvider):
+    """Specialized OpenRouter Advisory Model Provider (§23, §28).
+
+    Pre-configured for OpenRouter (https://openrouter.ai/api/v1) with support for free and paid models
+    (such as apodex/apodex-1.1-mini:free). In accordance with OpenRouter guidelines, sends
+    HTTP-Referer and X-Title headers for platform identification.
+    """
+
+    def __init__(
+        self,
+        api_key: str = "",
+        base_url: str = "https://openrouter.ai/api/v1",
+        model: str = "apodex/apodex-1.1-mini:free",
+        extra_headers: dict[str, str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        resolved_api_key = (
+            api_key.strip()
+            if api_key
+            else os.environ.get("OPENROUTER_API_KEY", os.environ.get("LLM_API_KEY", "")).strip()
+        )
+        resolved_base_url = (
+            base_url.rstrip("/")
+            if base_url
+            else os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        )
+        resolved_model = (
+            model.strip()
+            if model
+            else os.environ.get("OPENROUTER_MODEL", "apodex/apodex-1.1-mini:free").strip()
+        )
+        headers = {
+            "HTTP-Referer": "https://agentpay.dev",
+            "X-Title": "AgentPay Autonomous Commerce Control Plane",
+        }
+        if extra_headers:
+            headers.update(extra_headers)
+
+        super().__init__(
+            api_key=resolved_api_key,
+            base_url=resolved_base_url,
+            model=resolved_model,
+            provider_name="openrouter",
+            extra_headers=headers,
             **kwargs,
         )

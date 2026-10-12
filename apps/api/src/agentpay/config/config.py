@@ -56,6 +56,7 @@ class DecisionEngineType(StrEnum):
     MODEL_GATEWAY = "model_gateway"
     ORCAROUTER = "orcarouter"
     OPENAI_COMPATIBLE = "openai_compatible"
+    OPENROUTER = "openrouter"
 
 
 PLACEHOLDER_SUBSTRINGS: Final[tuple[str, ...]] = (
@@ -115,11 +116,14 @@ class AppConfig:
     log_level: str = "INFO"
     cors_allowed_origins: tuple[str, ...] = ("*",)
 
-    # Model / AI gateway credentials & OrcaRouter (§23)
+    # Model / AI gateway credentials, OrcaRouter & OpenRouter (§23)
     llm_api_key: str | None = None
     orcarouter_api_key: str | None = None
     orcarouter_base_url: str = "https://api.orcarouter.ai/v1"
     orcarouter_model: str = "orcarouter/auto"
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_model: str = "apodex/apodex-1.1-mini:free"
 
     # Live payments safety flag (§151)
     live_payments_enabled: bool = False
@@ -198,6 +202,14 @@ class AppConfig:
         ) and is_placeholder_secret(self.orcarouter_api_key):
             raise ConfigValidationError(
                 f"ORCAROUTER_API_KEY is missing or a placeholder string when decision_engine is '{self.decision_engine.value}'."
+            )
+
+        # 6. Advisory AI / OpenRouter credential validation (§23)
+        if self.decision_engine == DecisionEngineType.OPENROUTER and is_placeholder_secret(
+            self.openrouter_api_key
+        ):
+            raise ConfigValidationError(
+                "OPENROUTER_API_KEY is missing or a placeholder string when decision_engine is 'openrouter'."
             )
 
     @classmethod
@@ -286,6 +298,9 @@ class AppConfig:
         orcarouter_key = e.get("ORCAROUTER_API_KEY") or llm_key
         orcarouter_base = (e.get("ORCAROUTER_BASE_URL") or "https://api.orcarouter.ai/v1").strip()
         orcarouter_model = (e.get("ORCAROUTER_MODEL") or "orcarouter/auto").strip()
+        openrouter_key = e.get("OPENROUTER_API_KEY") or llm_key
+        openrouter_base = (e.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").strip()
+        openrouter_model = (e.get("OPENROUTER_MODEL") or "apodex/apodex-1.1-mini:free").strip()
 
         # 7. Live safety flag (§151)
         live_flag = _parse_bool(
@@ -313,6 +328,9 @@ class AppConfig:
             orcarouter_api_key=orcarouter_key,
             orcarouter_base_url=orcarouter_base,
             orcarouter_model=orcarouter_model,
+            openrouter_api_key=openrouter_key,
+            openrouter_base_url=openrouter_base,
+            openrouter_model=openrouter_model,
             live_payments_enabled=live_flag,
         )
 
@@ -340,6 +358,9 @@ class AppConfig:
                 "model_gateway_enabled": self.decision_engine != DecisionEngineType.MOCK,
                 "orcarouter_configured": bool(
                     self.orcarouter_api_key and not is_placeholder_secret(self.orcarouter_api_key)
+                ),
+                "openrouter_configured": bool(
+                    self.openrouter_api_key and not is_placeholder_secret(self.openrouter_api_key)
                 ),
             },
         }

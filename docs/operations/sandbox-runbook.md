@@ -58,7 +58,21 @@ $env:RAZORPAY_WEBHOOK_SECRET="your_webhook_secret_here"
 $env:DATABASE_URL="sqlite:///agentpay_sandbox.db"
 ```
 
-### Startup Health Verification
+### 3.2 Advisory AI Intelligence Configuration (OpenRouter / OrcaRouter)
+
+AgentPay supports external OpenAI-compatible advisory decision routers, including **OpenRouter** (e.g. `apodex/apodex-1.1-mini:free`) and **OrcaRouter** (`orcarouter/auto`). Model evaluations are strictly advisory and sit below the deterministic policy boundary (§2.1, §23):
+
+```powershell
+# OpenRouter configuration (defaults to apodex/apodex-1.1-mini:free)
+$env:AGENTPAY_DECISION_ENGINE="openrouter"
+$env:OPENROUTER_API_KEY="sk-or-v1-..."
+
+# Optional overrides:
+# $env:OPENROUTER_MODEL="apodex/apodex-1.1-mini:free"
+# $env:OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+```
+
+### 3.3 Startup Health Verification
 
 Launch AgentPay with database migrations:
 

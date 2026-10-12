@@ -39,6 +39,7 @@ from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.adapters.model_gateway import (
     ModelGateway,
+    OpenRouterModelProvider,
     OrcaRouterModelProvider,
 )
 from agentpay.adapters.razorpay_payment_provider import InMemoryRazorpaySimulator
@@ -464,24 +465,42 @@ def create_app(
     if decision_engine is None:
         if cfg.decision_engine == DecisionEngineType.MOCK:
             decision_engine = MockDecisionEngine()
+        elif cfg.decision_engine == DecisionEngineType.OPENROUTER:
+            decision_engine = ModelGateway(
+                provider=OpenRouterModelProvider(
+                    api_key=cfg.openrouter_api_key or "",
+                    base_url=cfg.openrouter_base_url,
+                    model=cfg.openrouter_model,
+                )
+            )
         elif cfg.decision_engine in (
             DecisionEngineType.ORCAROUTER,
             DecisionEngineType.OPENAI_COMPATIBLE,
         ):
-            provider = OrcaRouterModelProvider(
-                api_key=cfg.orcarouter_api_key or "",
-                base_url=cfg.orcarouter_base_url,
-                model=cfg.orcarouter_model,
-            )
-            decision_engine = ModelGateway(provider=provider)
-        elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
-            if cfg.orcarouter_api_key and not is_placeholder_secret(cfg.orcarouter_api_key):
-                provider = OrcaRouterModelProvider(
-                    api_key=cfg.orcarouter_api_key,
+            decision_engine = ModelGateway(
+                provider=OrcaRouterModelProvider(
+                    api_key=cfg.orcarouter_api_key or "",
                     base_url=cfg.orcarouter_base_url,
                     model=cfg.orcarouter_model,
                 )
-                decision_engine = ModelGateway(provider=provider)
+            )
+        elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
+            if cfg.openrouter_api_key and not is_placeholder_secret(cfg.openrouter_api_key):
+                decision_engine = ModelGateway(
+                    provider=OpenRouterModelProvider(
+                        api_key=cfg.openrouter_api_key,
+                        base_url=cfg.openrouter_base_url,
+                        model=cfg.openrouter_model,
+                    )
+                )
+            elif cfg.orcarouter_api_key and not is_placeholder_secret(cfg.orcarouter_api_key):
+                decision_engine = ModelGateway(
+                    provider=OrcaRouterModelProvider(
+                        api_key=cfg.orcarouter_api_key,
+                        base_url=cfg.orcarouter_base_url,
+                        model=cfg.orcarouter_model,
+                    )
+                )
             else:
                 decision_engine = ModelGateway()
         else:
