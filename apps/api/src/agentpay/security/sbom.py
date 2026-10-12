@@ -21,17 +21,25 @@ def get_repo_root() -> Path:
 
 def get_cyclonedx_sbom(repo_root: Path | None = None) -> dict[str, Any]:
     """Retrieve CycloneDX 1.5 JSON Software Bill of Materials."""
-    from scripts.generate_sbom import generate_cyclonedx_sbom
+    import sys
 
     root = repo_root or get_repo_root()
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from scripts.generate_sbom import generate_cyclonedx_sbom
+
     return generate_cyclonedx_sbom(root)
 
 
 def get_slsa_provenance(repo_root: Path | None = None) -> dict[str, Any]:
     """Retrieve SLSA 1.2 Build Provenance attestation."""
-    from scripts.generate_sbom import generate_cyclonedx_sbom, generate_slsa_provenance
+    import sys
 
     root = repo_root or get_repo_root()
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from scripts.generate_sbom import generate_cyclonedx_sbom, generate_slsa_provenance
+
     sbom = generate_cyclonedx_sbom(root)
     return generate_slsa_provenance(root, sbom)
 
