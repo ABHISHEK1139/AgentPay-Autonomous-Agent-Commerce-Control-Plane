@@ -54,6 +54,8 @@ class PaymentProviderType(StrEnum):
 class DecisionEngineType(StrEnum):
     MOCK = "mock"
     MODEL_GATEWAY = "model_gateway"
+    ORCAROUTER = "orcarouter"
+    OPENAI_COMPATIBLE = "openai_compatible"
 
 
 PLACEHOLDER_SUBSTRINGS: Final[tuple[str, ...]] = (
@@ -113,8 +115,11 @@ class AppConfig:
     log_level: str = "INFO"
     cors_allowed_origins: tuple[str, ...] = ("*",)
 
-    # Model / AI gateway credentials
+    # Model / AI gateway credentials & OrcaRouter (§23)
     llm_api_key: str | None = None
+    orcarouter_api_key: str | None = None
+    orcarouter_base_url: str = "https://api.orcarouter.ai/v1"
+    orcarouter_model: str = "orcarouter/auto"
 
     # Live payments safety flag (§151)
     live_payments_enabled: bool = False
@@ -184,6 +189,15 @@ class AppConfig:
         ):
             raise ConfigValidationError(
                 "Wildcard CORS ('*') is prohibited in production mode. Set AGENTPAY_CORS_ALLOWED_ORIGINS to explicit origins (§62, AP-010)."
+            )
+
+        # 5. Advisory AI / OrcaRouter credential validation (§23)
+        if self.decision_engine in (
+            DecisionEngineType.ORCAROUTER,
+            DecisionEngineType.OPENAI_COMPATIBLE,
+        ) and is_placeholder_secret(self.orcarouter_api_key):
+            raise ConfigValidationError(
+                f"ORCAROUTER_API_KEY is missing or a placeholder string when decision_engine is '{self.decision_engine.value}'."
             )
 
     @classmethod
@@ -269,6 +283,9 @@ class AppConfig:
         else:
             cors_origins = ("*",)
         llm_key = e.get("LLM_API_KEY")
+        orcarouter_key = e.get("ORCAROUTER_API_KEY") or llm_key
+        orcarouter_base = (e.get("ORCAROUTER_BASE_URL") or "https://api.orcarouter.ai/v1").strip()
+        orcarouter_model = (e.get("ORCAROUTER_MODEL") or "orcarouter/auto").strip()
 
         # 7. Live safety flag (§151)
         live_flag = _parse_bool(
@@ -293,6 +310,9 @@ class AppConfig:
             log_level=log_level,
             cors_allowed_origins=cors_origins,
             llm_api_key=llm_key,
+            orcarouter_api_key=orcarouter_key,
+            orcarouter_base_url=orcarouter_base,
+            orcarouter_model=orcarouter_model,
             live_payments_enabled=live_flag,
         )
 
@@ -317,7 +337,10 @@ class AppConfig:
                 "stripe_configured": bool(
                     self.stripe_api_key and not is_placeholder_secret(self.stripe_api_key)
                 ),
-                "model_gateway_enabled": self.decision_engine == DecisionEngineType.MODEL_GATEWAY,
+                "model_gateway_enabled": self.decision_engine != DecisionEngineType.MOCK,
+                "orcarouter_configured": bool(
+                    self.orcarouter_api_key and not is_placeholder_secret(self.orcarouter_api_key)
+                ),
             },
         }
 

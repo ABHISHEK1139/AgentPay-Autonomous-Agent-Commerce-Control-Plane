@@ -37,7 +37,10 @@ from agentpay.adapters.in_memory.payment_repository import (
 )
 from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
-from agentpay.adapters.model_gateway.model_gateway import ModelGateway
+from agentpay.adapters.model_gateway import (
+    ModelGateway,
+    OrcaRouterModelProvider,
+)
 from agentpay.adapters.razorpay_payment_provider import InMemoryRazorpaySimulator
 from agentpay.adapters.razorpay_sandbox_provider import RazorpaySandboxProvider
 from agentpay.adapters.stripe_payment_provider import InMemoryStripeSimulator
@@ -53,6 +56,7 @@ from agentpay.config.config import (
     DecisionEngineType,
     Environment,
     PaymentProviderType,
+    is_placeholder_secret,
 )
 from agentpay.domain.commerce import (
     Inventory,
@@ -460,8 +464,26 @@ def create_app(
     if decision_engine is None:
         if cfg.decision_engine == DecisionEngineType.MOCK:
             decision_engine = MockDecisionEngine()
+        elif cfg.decision_engine in (
+            DecisionEngineType.ORCAROUTER,
+            DecisionEngineType.OPENAI_COMPATIBLE,
+        ):
+            provider = OrcaRouterModelProvider(
+                api_key=cfg.orcarouter_api_key or "",
+                base_url=cfg.orcarouter_base_url,
+                model=cfg.orcarouter_model,
+            )
+            decision_engine = ModelGateway(provider=provider)
         elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
-            decision_engine = ModelGateway()
+            if cfg.orcarouter_api_key and not is_placeholder_secret(cfg.orcarouter_api_key):
+                provider = OrcaRouterModelProvider(
+                    api_key=cfg.orcarouter_api_key,
+                    base_url=cfg.orcarouter_base_url,
+                    model=cfg.orcarouter_model,
+                )
+                decision_engine = ModelGateway(provider=provider)
+            else:
+                decision_engine = ModelGateway()
         else:
             raise ConfigValidationError(f"Unsupported decision engine: {cfg.decision_engine}")
 
