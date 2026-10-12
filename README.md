@@ -274,11 +274,15 @@ agentpay/
 - **[Quickstart Guide](docs/onboarding/quickstart.md)** — Zero to running in 5 minutes.
 - **[Developer Guide](docs/onboarding/developer.md)** — Workflow, test flags, and contribution tips.
 - **[Architecture Specification](docs/architecture/architecture.md)** — Domain boundaries, ports, and sagas.
-- **[Architecture Decision Records](docs/decisions/)** — ADR-0001 (Modular Monolith), ADR-0004 (Approval 8-field binding).
+- **[Architecture Decision Records](docs/decisions/)** — ADR-0001 (Modular Monolith), ADR-0004 (Approval 8-field binding), ADR-0005 (Sandbox Separation).
 - **[Protocol Adapters Guide](docs/protocols/protocol-adapters.md)** — ACP, AP2, UAP, x402 adapter references.
 - **[Threat Model & Attack Surface](docs/threat-model/threat-model.md)** — STRIDE threat analysis.
 - **[Autonomous Audit Report](docs/security/autonomous-audit-report.md)** — Section 177 threat harness verification.
 - **[Standards Matrix](docs/security/standards-matrix.md)** — Honest mapping of designed/aligned/tested standards.
+- **[Component Integration Matrix](docs/engineering/integration-matrix.md)** — Integration status, contracts, modes, and evidence.
+- **[Webhook Verification Specification](docs/security/webhook-verification.md)** — HMAC raw-byte contracts, durable dedupe, and rotation.
+- **[Razorpay Sandbox Runbook](docs/operations/sandbox-runbook.md)** — Setup, credentials, test transactions, and troubleshooting.
+- **[Release Verification Gates](docs/operations/release-gates.md)** — Verification commands, migration lifecycle, and stop conditions.
 - **[Incident Runbook](docs/operations/incident-runbook.md)** — Emergency pause and operational procedures.
 
 ---

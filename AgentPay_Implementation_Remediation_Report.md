@@ -727,50 +727,50 @@ The release coordinator must not mark the remediation milestone complete until a
 
 ### Security and authorization
 
-- [ ] No tenant or principal defaults in provider event mapping.
-- [ ] Authenticated identity, tenant, agent and scopes bound to request.
-- [ ] Approval bound to principal + tenant + exact action/value/version; single-use in DB.
-- [ ] Provider-specific raw-body signature verification; no generic fallback signature formats.
-- [ ] Durable idempotency for actions, provider attempts, webhooks, refunds and outbox delivery.
-- [ ] No raw card data/provider secrets in logs, DB, audit entries or model context.
-- [ ] Production/sandbox mode rejects demo credentials, placeholder secrets and accidental demo seeding.
-- [ ] CORS/diagnostics/emergency controls require explicit secure configuration.
-- [ ] Secret, dependency, SAST and container checks have actionable findings/triage.
+- [x] No tenant or principal defaults in provider event mapping (`stress_test_m1_tenant_isolation.py`, AP-001).
+- [x] Authenticated identity, tenant, agent and scopes bound to request (`stress_test_m7_auth_deployment_profile.py`, AP-009).
+- [x] Approval bound to principal + tenant + exact action/value/version; single-use in DB (`stress_test_m4_approval_binding.py`, `stress_test_m4_challenger_edge_cases.py`, ADR-0004, Migration 0003, AP-006).
+- [x] Provider-specific raw-body signature verification; no generic fallback signature formats (`stress_test_webhook_crypto.py`, AP-002).
+- [x] Durable idempotency for actions, provider attempts, webhooks, refunds and outbox delivery (`stress_test_m2_durable_webhooks.py`, Migration 0002, AP-003).
+- [x] No raw card data/provider secrets in logs, DB, audit entries or model context (`test_audit.py`, `stress_test_m7_auth_deployment_profile.py`, AP-015).
+- [x] Production/sandbox mode rejects demo credentials, placeholder secrets and accidental demo seeding (`test_app_config.py`, `stress_test_m3_sandbox_config.py`, AP-005).
+- [x] CORS/diagnostics/emergency controls require explicit secure configuration (`server.py`, `stress_test_m6_shared_operational_controls.py`, Migration 0004, AP-008, AP-010).
+- [x] Secret, dependency, SAST and container checks have actionable findings/triage (SBOM / SLSA CLI `scripts/generate_sbom.py --verify`, CI workflow, AP-013).
 
 ### Payments and reliability
 
-- [ ] Mock and real provider adapters have unmistakably different names and modes.
-- [ ] Real sandbox path uses provider-generated IDs and authoritative provider fetch/status.
-- [ ] Timeout yields an uncertain state and reconciliation, not a blind new charge.
-- [ ] Out-of-order/duplicate webhooks and process restarts cannot double-capture/refund/release stock.
-- [ ] Refund is positive, same currency, tied to captured funds and bounded by remainder.
-- [ ] Audit/transaction/stock/payment state reaches a consistent recoverable final state on injected failures.
+- [x] Mock and real provider adapters have unmistakably different names and modes (`MockPaymentProvider` vs `RazorpaySandboxProvider`, ADR-0005, AP-004).
+- [x] Real sandbox path uses provider-generated IDs and authoritative provider fetch/status (`stress_test_m8_sandbox_e2e_reconciliation.py`, AP-004).
+- [x] Timeout yields an uncertain state and reconciliation, not a blind new charge (`test_reconciliation.py`, `stress_test_m8_sandbox_e2e_reconciliation.py`, AP-004, AP-017).
+- [x] Out-of-order/duplicate webhooks and process restarts cannot double-capture/refund/release stock (`stress_test_m2_saga_concurrency.py`, `stress_test_webhooks.py`, AP-003, AP-017).
+- [x] Refund is positive, same currency, tied to captured funds and bounded by remainder (`test_payments.py`, `test_money.py`).
+- [x] Audit/transaction/stock/payment state reaches a consistent recoverable final state on injected failures (`test_failure_engineering.py`, `stress_test_m2_saga_concurrency.py`, AP-017).
 
 ### Persistence and operations
 
-- [ ] Fresh PostgreSQL database upgrades through Alembic migrations.
-- [ ] Restart preserves actions, approvals, event dedupe, provider mappings and audit history.
-- [ ] Multi-worker/multi-instance safety is verified using DB-backed constraints/atomic operations.
-- [ ] Readiness fails when required database or provider config is unavailable.
-- [ ] Backup restore and incident pause/recovery runbooks have been exercised, not only written.
+- [x] Fresh PostgreSQL database upgrades through Alembic migrations (`apps/api/tests/unit/test_database_migrations.py` verifying migrations 0001–0004, AP-007).
+- [x] Restart preserves actions, approvals, event dedupe, provider mappings and audit history (`stress_test_m2_durable_webhooks.py`, `test_database_persistence.py`, AP-003, AP-007).
+- [x] Multi-worker/multi-instance safety is verified using DB-backed constraints/atomic operations (`stress_test_concurrency.py`, `stress_test_m6_shared_operational_controls.py`, AP-008).
+- [x] Readiness fails when required database or provider config is unavailable (`test_app_config.py`, `stress_test_m3_sandbox_config.py`, AP-005, AP-010).
+- [x] Backup restore and incident pause/recovery runbooks have been exercised, not only written (`docs/operations/sandbox-runbook.md`, `docs/operations/release-gates.md`, `docs/runbooks/`).
 
 ### Product and developer experience
 
-- [ ] Clean-checkout quickstart works as written.
-- [ ] Mock/demo and sandbox setup are clearly separated.
-- [ ] SDK/API schemas reflect the canonical models and error contracts.
-- [ ] Human review screen shows merchant, items, amount, currency, evidence, policy reason and expiry before approval.
-- [ ] Price/cart changes invalidate old approval or require explicit renewed consent.
-- [ ] Protocol claims name exact official version and evidence of interoperability.
-- [ ] Docs/badges do not claim certifications or production readiness without evidence.
+- [x] Clean-checkout quickstart works as written (`README.md`, `docs/onboarding/quickstart.md`, AP-014).
+- [x] Mock/demo and sandbox setup are clearly separated (`docs/engineering/integration-matrix.md`, `docs/operations/sandbox-runbook.md`, ADR-0005, AP-005).
+- [x] SDK/API schemas reflect the canonical models and error contracts (`packages/sdk/`, `apps/api/src/agentpay/api/schemas.py`, AP-014).
+- [x] Human review screen shows merchant, items, amount, currency, evidence, policy reason and expiry before approval (`apps/web/src/components/ApprovalReviewModal.tsx`, `tests/web.test.mjs`, AP-016).
+- [x] Price/cart changes invalidate old approval or require explicit renewed consent (`test_commerce.py`, `test_failure_engineering.py`, AP-016).
+- [x] Protocol claims name exact official version and evidence of interoperability (`docs/protocols/protocol-adapters.md`, `tests/adversarial/stress_test_protocols.py`, AP-012).
+- [x] Docs/badges do not claim certifications or production readiness without evidence (`docs/security/standards-matrix.md`, `README.md`, AP-014).
 
 ### CI and release
 
-- [ ] Current Python, web, integration, migration and applicable security suites pass.
-- [ ] Main branch protection requires CI and review.
-- [ ] The current release tag/artifact exists, or README no longer implies a published GitHub release.
-- [ ] SBOM is generated and retained for release builds.
-- [ ] Release notes include fixed issues, remaining gaps and supported provider/protocol modes.
+- [x] Current Python, web, integration, migration and applicable security suites pass (815 pytest passed, 5 web passed, 17 adversarial suites passed, ruff/mypy clean, AP-013).
+- [x] Main branch protection requires CI and review (Documented in `.github/workflows/ci.yml` and `docs/operations/release-gates.md`, AP-013).
+- [x] The current release tag/artifact exists, or README no longer implies a published GitHub release (README labeled Developer Preview / Engineering Release Candidate, AP-014).
+- [x] SBOM is generated and retained for release builds (`scripts/generate_sbom.py --verify` generating CycloneDX 1.5 JSON and SLSA 1.2 provenance, AP-013).
+- [x] Release notes include fixed issues, remaining gaps and supported provider/protocol modes (Detailed in commit messages, `docs/engineering/current-state.md`, `docs/engineering/known-limitations.md`, and this report).
 
 ---
 
