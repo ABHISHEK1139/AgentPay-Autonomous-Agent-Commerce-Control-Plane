@@ -35,8 +35,12 @@ class StripeWebhookSignatureError(InvalidPaymentError):
     code = "STRIPE_WEBHOOK_SIGNATURE_INVALID"
 
 
-class StripePaymentProvider(PaymentProvider):
-    """Stripe implementation of PaymentProvider port with HMAC signature verification."""
+class InMemoryStripeSimulator(PaymentProvider):
+    """Thread-safe in-memory test simulator for Stripe PSP behavior (§39, §41, §42, §61).
+
+    Simulates Stripe PaymentIntent creation, capture, and refunds using local
+    dictionary storage and synthetic IDs. Makes zero outbound network calls.
+    """
 
     def __init__(
         self,
@@ -260,10 +264,8 @@ class StripePaymentProvider(PaymentProvider):
 
         # Extract attempt reference from metadata or object id
         metadata = obj.get("metadata", {})
-        attempt_id = (
-            metadata.get("attempt_id") or obj.get("metadata_attempt_id") or obj.get("id") or ""
-        )
-        tenant_id = metadata.get("tenant_id") or "tenant_01"
+        attempt_id = str(metadata.get("attempt_id") or obj.get("metadata_attempt_id") or "").strip()
+        tenant_id = str(metadata.get("tenant_id") or "").strip()
 
         type_mapping = {
             "payment_intent.succeeded": "payment.captured",
@@ -286,3 +288,13 @@ class StripePaymentProvider(PaymentProvider):
                 "received_at": datetime.now(UTC).isoformat(),
             },
         }
+
+
+# Backward compatibility alias for legacy imports (§39, AP-004)
+StripePaymentProvider = InMemoryStripeSimulator
+
+__all__ = [
+    "InMemoryStripeSimulator",
+    "StripePaymentProvider",
+    "StripeWebhookSignatureError",
+]

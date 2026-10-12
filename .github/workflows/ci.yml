@@ -15,9 +15,9 @@ concurrency:
 
 jobs:
   quality:
-    name: format, lint, typecheck, test
+    name: format, lint, typecheck, test, adversarial, sbom
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -25,6 +25,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
       - name: Install locked dependencies
         run: uv sync --frozen
@@ -38,8 +43,40 @@ jobs:
       - name: Type check
         run: uv run mypy
 
-      - name: Test
+      - name: Test (unit, property, architecture boundaries)
         run: uv run pytest
+
+      - name: Web UI & Accessibility tests
+        run: node --test tests/web.test.mjs
+
+      - name: Database migrations integrity
+        run: uv run pytest apps/api/tests/unit/test_database_migrations.py
+
+      - name: Adversarial Security & Concurrency Suites
+        run: |
+          uv run python tests/adversarial/stress_test_client_privilege.py
+          uv run python tests/adversarial/stress_test_concurrency.py
+          uv run python tests/adversarial/stress_test_m1_tenant_isolation.py
+          uv run python tests/adversarial/stress_test_m2_durable_webhooks.py
+          uv run python tests/adversarial/stress_test_m2_saga_concurrency.py
+          uv run python tests/adversarial/stress_test_m3_sandbox_config.py
+          uv run python tests/adversarial/stress_test_m4_approval_binding.py
+          uv run python tests/adversarial/stress_test_m4_challenger_edge_cases.py
+          uv run python tests/adversarial/stress_test_m6_shared_operational_controls.py
+          uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py
+          uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py
+          uv run python tests/adversarial/stress_test_model_gateway_resilience.py
+          uv run python tests/adversarial/stress_test_money.py
+          uv run python tests/adversarial/stress_test_protocols.py
+          uv run python tests/adversarial/stress_test_ssrf_resilience.py
+          uv run python tests/adversarial/stress_test_webhook_crypto.py
+          uv run python tests/adversarial/stress_test_webhooks.py
+
+      - name: Audit chain CLI verification
+        run: uv run python scripts/verify_audit_chain.py --help
+
+      - name: CycloneDX 1.5 SBOM & SLSA 1.2 provenance verification
+        run: uv run python scripts/generate_sbom.py --verify
 
       - name: Verify the blueprint was not rewritten by tooling
         run: |

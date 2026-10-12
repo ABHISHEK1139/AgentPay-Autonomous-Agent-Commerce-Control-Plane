@@ -23,6 +23,9 @@ from agentpay.infrastructure.database.repositories.commerce_repository import (
 from agentpay.infrastructure.database.repositories.credential_repository import (
     SqlAlchemyCredentialRepository,
 )
+from agentpay.infrastructure.database.repositories.emergency_pause_repository import (
+    SqlAlchemyEmergencyPauseRepository,
+)
 from agentpay.infrastructure.database.repositories.order_repository import (
     SqlAlchemyOrderRepository,
 )
@@ -33,8 +36,14 @@ from agentpay.infrastructure.database.repositories.payment_repository import (
     SqlAlchemyIdempotencyStore,
     SqlAlchemyPaymentRepository,
 )
+from agentpay.infrastructure.database.repositories.provider_mapping_repository import (
+    SqlAlchemyProviderTransactionMappingRepository,
+)
 from agentpay.infrastructure.database.repositories.tenant_repository import (
     SqlAlchemyTenantRepository,
+)
+from agentpay.infrastructure.database.repositories.webhook_event_repository import (
+    SqlAlchemyProviderWebhookEventRepository,
 )
 
 __all__ = [
@@ -44,6 +53,7 @@ __all__ = [
     "SqlAlchemyAuditLedger",
     "SqlAlchemyAuditRepository",
     "SqlAlchemyCredentialRepository",
+    "SqlAlchemyEmergencyPauseRepository",
     "SqlAlchemyEvidenceRepository",
     "SqlAlchemyIdempotencyStore",
     "SqlAlchemyInventoryRepository",
@@ -52,6 +62,8 @@ __all__ = [
     "SqlAlchemyOutboxRepository",
     "SqlAlchemyPaymentRepository",
     "SqlAlchemyProductRepository",
+    "SqlAlchemyProviderTransactionMappingRepository",
+    "SqlAlchemyProviderWebhookEventRepository",
     "SqlAlchemyTenantRepository",
     "SqlAlchemyVariantRepository",
 ]

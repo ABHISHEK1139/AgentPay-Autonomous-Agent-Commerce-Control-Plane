@@ -6,7 +6,7 @@ AgentPay implements a defense-in-depth security model designed specifically for 
 
 - **AI Sits Below the Authorization Boundary (§2, §18, §134)**: LLMs and advisory engines (JEV) can never alter permissions, spending limits, policy rules, or credentials. Deterministic policy engines retain exclusive execution authority.
 - **Fail-Closed Financial Guards (§2.4)**: Whenever uncertainty affects pricing, identity, balance, inventory, or policy, execution halts immediately and fails closed.
-- **7-Field Bound Approvals (§20)**: Human approvals are cryptographically bound to exact action parameters (amount, currency, merchant, action ID, resource, principal, and action version). Single-use tokens prevent replay attacks.
+- **8-Field Bound Approvals (§20)**: Human approvals are cryptographically bound to exact action parameters: action ID, amount, currency, merchant ID, resource, action version, principal, and tenant. Single-use tokens prevent replay attacks.
 - **Section 177 Adversarial Threat Harness**: 14 mandatory attack vectors (prompt injection, SSRF, replay, concurrency race, budget bypass, token forgery, parameter tampering, etc.) are verified across automated stress tests.
 - **HMAC-SHA256 Webhook Signatures**: Raw request bytes are verified against provider secrets with a 300s replay window and mutex-guarded idempotency locks.
 - **Zero Raw Payment Data (§40)**: AgentPay never handles or stores card numbers or CVV.

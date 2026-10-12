@@ -9,6 +9,7 @@ from agentpay.infrastructure.database.repositories import (
     SqlAlchemyAuditLedger,
     SqlAlchemyAuditRepository,
     SqlAlchemyCredentialRepository,
+    SqlAlchemyEmergencyPauseRepository,
     SqlAlchemyEvidenceRepository,
     SqlAlchemyIdempotencyStore,
     SqlAlchemyInventoryRepository,
@@ -16,6 +17,8 @@ from agentpay.infrastructure.database.repositories import (
     SqlAlchemyOrderRepository,
     SqlAlchemyPaymentRepository,
     SqlAlchemyProductRepository,
+    SqlAlchemyProviderTransactionMappingRepository,
+    SqlAlchemyProviderWebhookEventRepository,
     SqlAlchemyTenantRepository,
     SqlAlchemyVariantRepository,
 )
@@ -27,6 +30,7 @@ __all__ = [
     "SqlAlchemyAuditLedger",
     "SqlAlchemyAuditRepository",
     "SqlAlchemyCredentialRepository",
+    "SqlAlchemyEmergencyPauseRepository",
     "SqlAlchemyEvidenceRepository",
     "SqlAlchemyIdempotencyStore",
     "SqlAlchemyInventoryRepository",
@@ -34,6 +38,8 @@ __all__ = [
     "SqlAlchemyOrderRepository",
     "SqlAlchemyPaymentRepository",
     "SqlAlchemyProductRepository",
+    "SqlAlchemyProviderTransactionMappingRepository",
+    "SqlAlchemyProviderWebhookEventRepository",
     "SqlAlchemyTenantRepository",
     "SqlAlchemyVariantRepository",
 ]

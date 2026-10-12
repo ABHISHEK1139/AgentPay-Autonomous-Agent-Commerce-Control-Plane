@@ -26,14 +26,14 @@ from agentpay.infrastructure.database.repositories.base import BaseSqlAlchemyRep
 
 
 class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository):
-    """SQLAlchemy-backed repository for Approval entities with exact 7-field binding."""
+    """SQLAlchemy-backed repository for Approval entities with exact 8-field binding."""
 
     def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
         super().__init__(session_or_factory)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def get(self, tenant_id: str, approval_id: str) -> Approval | None:
-        with self._session() as session:
+        with self._lock, self._session() as session:
             stmt = select(ApprovalModel).where(
                 ApprovalModel.tenant_id == tenant_id,
                 ApprovalModel.approval_id == approval_id,
@@ -49,7 +49,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                 f"Approval tenant '{approval.tenant_id}' does not match context '{tenant_id}'"
             )
 
-        with self._session() as session:
+        with self._lock, self._session() as session:
             model = session.get(ApprovalModel, approval.approval_id)
             if model is None:
                 model = ApprovalModel(
@@ -66,6 +66,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                     approver_id=approval.approver_id,
                     decided_at=approval.decided_at,
                     reason=approval.reason,
+                    principal_id=approval.binding.principal_id,
                 )
                 session.add(model)
             else:
@@ -80,7 +81,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
             session.commit()
 
     def list_for_action(self, tenant_id: str, action_id: str) -> list[Approval]:
-        with self._session() as session:
+        with self._lock, self._session() as session:
             stmt = (
                 select(ApprovalModel)
                 .where(
@@ -89,6 +90,16 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                 )
                 .order_by(ApprovalModel.requested_at)
             )
+            models = session.scalars(stmt).all()
+            return [self._to_domain(m) for m in models]
+
+    def list_pending(self, tenant_id: str | None = None) -> list[Approval]:
+        """List all pending approval requests within a tenant partition (or all tenants if None)."""
+        with self._lock, self._session() as session:
+            stmt = select(ApprovalModel).where(ApprovalModel.status == ApprovalStatus.PENDING.value)
+            if tenant_id is not None:
+                stmt = stmt.where(ApprovalModel.tenant_id == tenant_id)
+            stmt = stmt.order_by(ApprovalModel.requested_at)
             models = session.scalars(stmt).all()
             return [self._to_domain(m) for m in models]
 
@@ -109,6 +120,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
             rowcount = res.rowcount if isinstance(res, CursorResult) else 0
             if rowcount == 0:
                 # Inspect why update matched 0 rows:
+                session.expire_all()
                 check_stmt = select(ApprovalModel).where(
                     ApprovalModel.tenant_id == tenant_id,
                     ApprovalModel.approval_id == approval_id,
@@ -126,6 +138,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                     f"Approval is in status '{model.status}', not APPROVED"
                 )
             # Retrieve consumed model to convert to domain entity:
+            session.expire_all()
             get_stmt = select(ApprovalModel).where(
                 ApprovalModel.tenant_id == tenant_id,
                 ApprovalModel.approval_id == approval_id,
@@ -135,7 +148,10 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                 raise InvalidCommerceError(
                     f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
                 )
-            return self._to_domain(consumed_model)
+            domain_entity = self._to_domain(consumed_model)
+            if domain_entity.status != ApprovalStatus.CONSUMED:
+                domain_entity = domain_entity.consume()
+            return domain_entity
 
     def _to_domain(self, model: ApprovalModel) -> Approval:
         req_at = model.requested_at
@@ -153,6 +169,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
             currency=model.currency,
             action_version=model.action_version,
             tenant_id=model.tenant_id,
+            principal_id=model.principal_id or "user_01",
         )
         return Approval(
             approval_id=model.approval_id,

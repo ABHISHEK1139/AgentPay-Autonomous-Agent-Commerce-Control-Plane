@@ -104,6 +104,49 @@ def test_live_server_cors_preflight(live_server: tuple[str, int]) -> None:
         assert resp.headers.get("X-Content-Type-Options") == "nosniff"
 
 
+def test_live_server_restricted_cors_origins() -> None:
+    """Server enforces allowed_origins: permits configured origin and rejects unauthorized origins (§62, AP-010)."""
+    app = create_app()
+    server = create_server(
+        host="127.0.0.1",
+        port=0,
+        app=app,
+        allowed_origins=("https://control.internal",),
+    )
+    host, port = server.server_address[:2]
+    host_str = host if isinstance(host, str) else host.decode("utf-8")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://{host_str}:{port}"
+
+    try:
+        # 1. Allowed origin gets explicit Access-Control-Allow-Origin
+        req_allowed = urllib.request.Request(
+            f"{base_url}/api/v1/actions",
+            headers={"Origin": "https://control.internal"},
+            method="OPTIONS",
+        )
+        with urllib.request.urlopen(req_allowed, timeout=5) as resp:
+            assert resp.status == 204
+            assert resp.headers.get("Access-Control-Allow-Origin") == "https://control.internal"
+            assert resp.headers.get("Vary") == "Origin"
+
+        # 2. Disallowed origin gets 403 on preflight
+        req_evil = urllib.request.Request(
+            f"{base_url}/api/v1/actions",
+            headers={"Origin": "https://attacker.evil"},
+            method="OPTIONS",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req_evil, timeout=5)
+        assert exc_info.value.code == 403
+        exc_info.value.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
 def test_live_server_sdk_catalog_discovery(live_server: tuple[str, int]) -> None:
     base_url, _ = live_server
     sdk = AgentPay(
@@ -330,6 +373,7 @@ def test_live_server_request_body_size_limit_rejection(
     assert exc_info.value.code == 413
     resp_body = json.loads(exc_info.value.read().decode("utf-8"))
     assert resp_body["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    exc_info.value.close()
 
     # 2. Non-integer Content-Length is rejected with HTTP 400
     req_bad_cl = urllib.request.Request(
@@ -347,3 +391,4 @@ def test_live_server_request_body_size_limit_rejection(
     assert exc_info_bad.value.code == 400
     resp_body_bad = json.loads(exc_info_bad.value.read().decode("utf-8"))
     assert resp_body_bad["error"]["code"] == "INVALID_CONTENT_LENGTH"
+    exc_info_bad.value.close()

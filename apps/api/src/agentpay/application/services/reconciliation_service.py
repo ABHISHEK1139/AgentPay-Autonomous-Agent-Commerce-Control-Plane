@@ -17,6 +17,8 @@ from agentpay.application.ports.payment_port import (
     OrderRepository,
     PaymentProvider,
     PaymentRepository,
+    ProviderTransactionMappingRepository,
+    ProviderWebhookEventRepository,
 )
 from agentpay.domain.audit import AuditEventType
 from agentpay.domain.errors import CrossTenantAccessError, InvalidPaymentError
@@ -39,6 +41,8 @@ class PaymentReconciler:
         order_repo: OrderRepository | None = None,
         inventory_repo: InventoryRepository | None = None,
         audit_ledger: AuditLedger | None = None,
+        provider_mapping_repo: ProviderTransactionMappingRepository | None = None,
+        webhook_event_repo: ProviderWebhookEventRepository | None = None,
     ) -> None:
         self._provider = payment_provider
         self._repo = payment_repo
@@ -46,6 +50,8 @@ class PaymentReconciler:
         self._order_repo = order_repo
         self._inventory_repo = inventory_repo
         self._audit_ledger = audit_ledger
+        self._provider_mapping_repo = provider_mapping_repo
+        self._webhook_event_repo = webhook_event_repo
 
     def reconcile_unknown_payment(self, tenant_id: str, attempt_id: str) -> PaymentAttempt:
         """Return the authoritative status of an attempt, querying the provider only if UNKNOWN."""
@@ -89,33 +95,105 @@ class PaymentReconciler:
         """
         raw_data = payload.get("data")
         data_dict: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
-        attempt_id = str(
+        provider = str(payload.get("provider") or "").strip().lower()
+        if not provider and self._provider is not None:
+            cname = type(self._provider).__name__.lower()
+            if "mock" in cname:
+                provider = "mock"
+            elif "razorpay" in cname:
+                provider = "razorpay"
+            elif "stripe" in cname:
+                provider = "stripe"
+
+        # Candidate transaction IDs
+        prov_tx_id = str(
+            payload.get("provider_payment_id")
+            or data_dict.get("provider_payment_id")
+            or payload.get("id")
+            or data_dict.get("id")
+            or ""
+        ).strip()
+        candidate_attempt_id = str(
             payload.get("attempt_id")
             or payload.get("payment_id")
             or data_dict.get("attempt_id")
             or data_dict.get("payment_id")
             or ""
         ).strip()
+        provider_account_id = (
+            str(payload.get("account_id") or data_dict.get("account_id") or "").strip() or None
+        )
 
-        if not attempt_id:
+        effective_tenant = tenant_id.strip() if tenant_id else ""
+        effective_attempt_id = candidate_attempt_id
+
+        # 1. Resolve tenant & attempt strictly from stored mapping (§39, §41, §49)
+        mapping = None
+        if self._provider_mapping_repo is not None:
+            if prov_tx_id:
+                mapping = self._provider_mapping_repo.find_by_provider_transaction(
+                    provider=provider,
+                    provider_transaction_id=prov_tx_id,
+                    provider_account_id=provider_account_id,
+                )
+            if mapping is None and candidate_attempt_id:
+                mapping = self._provider_mapping_repo.find_by_provider_transaction(
+                    provider=provider,
+                    provider_transaction_id=candidate_attempt_id,
+                    provider_account_id=provider_account_id,
+                )
+            if mapping is None and effective_tenant and candidate_attempt_id:
+                mapping = self._provider_mapping_repo.find_by_attempt_id(
+                    tenant_id=effective_tenant,
+                    attempt_id=candidate_attempt_id,
+                )
+
+        if mapping is not None:
+            if effective_tenant and effective_tenant != mapping.tenant_id:
+                raise CrossTenantAccessError(
+                    f"Caller asserted tenant '{effective_tenant}' does not match mapped tenant '{mapping.tenant_id}'"
+                )
+            effective_tenant = mapping.tenant_id
+            effective_attempt_id = mapping.attempt_id
+        elif not effective_tenant:
+            # Unmapped & unauthenticated: fail-closed quarantine (§41, §49, AP-001)
+            # Emit security alert under "SYSTEM" without mutating orders/inventory
+            if self._audit_ledger is not None:
+                self._audit_ledger.record_event(
+                    event_type=AuditEventType.SECURITY_ALERT,
+                    action_id=f"quarantine_{uuid.uuid4().hex[:12]}",
+                    tenant_id="SYSTEM",
+                    actor="webhook_quarantine",
+                    data={
+                        "reason": "UNRESOLVED_WEBHOOK_TRANSACTION",
+                        "provider": provider,
+                        "provider_payment_id": prov_tx_id or candidate_attempt_id,
+                        "event_type": event_type,
+                    },
+                    trace_id=trace_id,
+                )
+            return {
+                "status": "QUARANTINED",
+                "reason": "UNRESOLVED_WEBHOOK_TRANSACTION",
+                "provider": provider,
+                "provider_payment_id": prov_tx_id or candidate_attempt_id,
+            }
+
+        if not effective_attempt_id:
             raise InvalidPaymentError("Missing attempt_id or payment_id in webhook payload")
 
-        attempt = self._repo.get(tenant_id, attempt_id)
+        attempt = self._repo.get(effective_tenant, effective_attempt_id)
         if attempt is None:
             raise InvalidPaymentError(
-                f"Payment attempt '{attempt_id}' not found in tenant '{tenant_id}'"
+                f"Payment attempt '{effective_attempt_id}' not found in tenant '{effective_tenant}'"
             )
-        if attempt.tenant_id != tenant_id:
+        if attempt.tenant_id != effective_tenant:
             raise CrossTenantAccessError(
-                f"Payment attempt tenant '{attempt.tenant_id}' does not match context '{tenant_id}'"
+                f"Payment attempt tenant '{attempt.tenant_id}' does not match context '{effective_tenant}'"
             )
 
         provider_payment_id = str(
-            payload.get("provider_payment_id")
-            or data_dict.get("provider_payment_id")
-            or payload.get("id")
-            or attempt.provider_payment_id
-            or f"prov_{attempt_id}"
+            prov_tx_id or attempt.provider_payment_id or f"prov_{effective_attempt_id}"
         )
         failure_reason = str(
             payload.get("reason")
@@ -131,15 +209,17 @@ class PaymentReconciler:
                 payload.get("order_id") or data_dict.get("order_id") or attempt.intent_id or ""
             ).strip()
             if order_id:
-                order = self._order_repo.get(tenant_id, order_id)
+                order = self._order_repo.get(effective_tenant, order_id)
             if order is None:
                 if hasattr(self._order_repo, "find_by_payment_attempt"):
-                    order = self._order_repo.find_by_payment_attempt(tenant_id, attempt_id)
+                    order = self._order_repo.find_by_payment_attempt(
+                        effective_tenant, effective_attempt_id
+                    )
                 elif hasattr(self._order_repo, "_orders"):
-                    for candidate in self._order_repo._orders.get(tenant_id, {}).values():
+                    for candidate in self._order_repo._orders.get(effective_tenant, {}).values():
                         if (
-                            candidate.payment_attempt_id == attempt_id
-                            or candidate.order_id == attempt_id
+                            candidate.payment_attempt_id == effective_attempt_id
+                            or candidate.order_id == effective_attempt_id
                         ):
                             order = candidate
                             break
@@ -149,11 +229,11 @@ class PaymentReconciler:
         if event_type == "payment.captured":
             if attempt.status in (PaymentStatus.FAILED, PaymentStatus.DECLINED):
                 raise InvalidPaymentError(
-                    f"Cannot capture payment '{attempt_id}' in terminal failure status '{attempt.status.value}'"
+                    f"Cannot capture payment '{effective_attempt_id}' in terminal failure status '{attempt.status.value}'"
                 )
             if attempt.status in (PaymentStatus.REFUNDED, PaymentStatus.PARTIALLY_REFUNDED):
                 raise InvalidPaymentError(
-                    f"Cannot capture payment '{attempt_id}' in status '{attempt.status.value}'"
+                    f"Cannot capture payment '{effective_attempt_id}' in status '{attempt.status.value}'"
                 )
 
             if attempt.status is PaymentStatus.CAPTURED:
@@ -162,13 +242,13 @@ class PaymentReconciler:
                     and self._order_repo is not None
                     and order.status is OrderStatus.PENDING_PAYMENT
                 ):
-                    confirmed_order = order.confirm(payment_attempt_id=attempt_id)
-                    self._order_repo.save(tenant_id, confirmed_order)
+                    confirmed_order = order.confirm(payment_attempt_id=effective_attempt_id)
+                    self._order_repo.save(effective_tenant, confirmed_order)
                     order = confirmed_order
                 return {
                     "status": "PROCESSED",
                     "event_type": event_type,
-                    "attempt_id": attempt_id,
+                    "attempt_id": effective_attempt_id,
                     "payment_status": attempt.status.value,
                     "order_id": order.order_id if order else None,
                     "order_status": order.status.value if order else None,
@@ -179,25 +259,25 @@ class PaymentReconciler:
                 PaymentStatus.CAPTURED,
                 provider_payment_id=provider_payment_id,
             )
-            self._repo.save(tenant_id, updated_attempt)
+            self._repo.save(effective_tenant, updated_attempt)
 
             if (
                 order is not None
                 and self._order_repo is not None
                 and order.status is OrderStatus.PENDING_PAYMENT
             ):
-                confirmed_order = order.confirm(payment_attempt_id=attempt_id)
-                self._order_repo.save(tenant_id, confirmed_order)
+                confirmed_order = order.confirm(payment_attempt_id=effective_attempt_id)
+                self._order_repo.save(effective_tenant, confirmed_order)
                 order = confirmed_order
 
             if self._audit_ledger is not None:
                 self._audit_ledger.record_event(
                     event_type=AuditEventType.PAYMENT_CAPTURED,
                     action_id=attempt.intent_id,
-                    tenant_id=tenant_id,
+                    tenant_id=effective_tenant,
                     actor="provider_webhook",
                     data={
-                        "attempt_id": attempt_id,
+                        "attempt_id": effective_attempt_id,
                         "provider_payment_id": provider_payment_id,
                         "order_id": order.order_id if order else None,
                         "status": PaymentStatus.CAPTURED.value,
@@ -209,11 +289,11 @@ class PaymentReconciler:
         elif event_type == "payment.failed":
             if attempt.status is PaymentStatus.CAPTURED:
                 raise InvalidPaymentError(
-                    f"Cannot fail payment '{attempt_id}' in status 'CAPTURED'"
+                    f"Cannot fail payment '{effective_attempt_id}' in status 'CAPTURED'"
                 )
             if attempt.status in (PaymentStatus.REFUNDED, PaymentStatus.PARTIALLY_REFUNDED):
                 raise InvalidPaymentError(
-                    f"Cannot fail payment '{attempt_id}' in status '{attempt.status.value}'"
+                    f"Cannot fail payment '{effective_attempt_id}' in status '{attempt.status.value}'"
                 )
 
             if attempt.status in (PaymentStatus.FAILED, PaymentStatus.DECLINED):
@@ -223,14 +303,16 @@ class PaymentReconciler:
                     and order.status is OrderStatus.PENDING_PAYMENT
                 ):
                     cancelled_order = order.cancel(reason=failure_reason)
-                    self._order_repo.save(tenant_id, cancelled_order)
+                    self._order_repo.save(effective_tenant, cancelled_order)
                     order = cancelled_order
                     if self._inventory_repo is not None:
-                        self._inventory_repo.release(tenant_id, order.variant_id, order.quantity)
+                        self._inventory_repo.release(
+                            effective_tenant, order.variant_id, order.quantity
+                        )
                 return {
                     "status": "PROCESSED",
                     "event_type": event_type,
-                    "attempt_id": attempt_id,
+                    "attempt_id": effective_attempt_id,
                     "payment_status": attempt.status.value,
                     "order_id": order.order_id if order else None,
                     "order_status": order.status.value if order else None,
@@ -241,31 +323,33 @@ class PaymentReconciler:
                 PaymentStatus.FAILED,
                 failure_reason=failure_reason,
             )
-            self._repo.save(tenant_id, updated_attempt)
+            self._repo.save(effective_tenant, updated_attempt)
 
             if order is not None and self._order_repo is not None:
                 if order.status is OrderStatus.PENDING_PAYMENT:
                     cancelled_order = order.cancel(reason=failure_reason)
-                    self._order_repo.save(tenant_id, cancelled_order)
+                    self._order_repo.save(effective_tenant, cancelled_order)
                     order = cancelled_order
 
                     # SAGA compensation: release reserved inventory
                     if self._inventory_repo is not None:
-                        self._inventory_repo.release(tenant_id, order.variant_id, order.quantity)
+                        self._inventory_repo.release(
+                            effective_tenant, order.variant_id, order.quantity
+                        )
             elif self._inventory_repo is not None:
                 variant_id = str(payload.get("variant_id") or data_dict.get("variant_id") or "")
                 if variant_id:
                     qty = int(payload.get("quantity") or data_dict.get("quantity") or 1)
-                    self._inventory_repo.release(tenant_id, variant_id, qty)
+                    self._inventory_repo.release(effective_tenant, variant_id, qty)
 
             if self._audit_ledger is not None:
                 self._audit_ledger.record_event(
                     event_type=AuditEventType.PAYMENT_FAILED,
                     action_id=attempt.intent_id,
-                    tenant_id=tenant_id,
+                    tenant_id=effective_tenant,
                     actor="provider_webhook",
                     data={
-                        "attempt_id": attempt_id,
+                        "attempt_id": effective_attempt_id,
                         "failure_reason": failure_reason,
                         "order_id": order.order_id if order else None,
                         "status": PaymentStatus.FAILED.value,
@@ -277,7 +361,7 @@ class PaymentReconciler:
                     self._audit_ledger.record_event(
                         event_type=AuditEventType.ORDER_CANCELLED,
                         action_id=attempt.intent_id,
-                        tenant_id=tenant_id,
+                        tenant_id=effective_tenant,
                         actor="provider_webhook",
                         data={
                             "order_id": order.order_id,
@@ -294,7 +378,7 @@ class PaymentReconciler:
                 PaymentStatus.REFUNDED,
             ):
                 raise InvalidPaymentError(
-                    f"Cannot refund payment '{attempt_id}' in status '{attempt.status.value}'; only CAPTURED payments can be refunded"
+                    f"Cannot refund payment '{effective_attempt_id}' in status '{attempt.status.value}'; only CAPTURED payments can be refunded"
                 )
 
             if attempt.status is PaymentStatus.REFUNDED:
@@ -302,7 +386,7 @@ class PaymentReconciler:
                 return {
                     "status": "PROCESSED",
                     "event_type": event_type,
-                    "attempt_id": attempt_id,
+                    "attempt_id": effective_attempt_id,
                     "payment_status": attempt.status.value,
                     "order_id": order.order_id if order else None,
                     "order_status": order.status.value if order else None,
@@ -310,7 +394,7 @@ class PaymentReconciler:
                 }
 
             updated_attempt = attempt.transition_to(PaymentStatus.REFUNDED)
-            self._repo.save(tenant_id, updated_attempt)
+            self._repo.save(effective_tenant, updated_attempt)
 
             refund_id = str(
                 payload.get("refund_id")
@@ -322,8 +406,8 @@ class PaymentReconciler:
             )
             refund = Refund(
                 refund_id=refund_id,
-                payment_attempt_id=attempt_id,
-                tenant_id=tenant_id,
+                payment_attempt_id=effective_attempt_id,
+                tenant_id=effective_tenant,
                 amount=attempt.amount,
                 reason=refund_reason,
             )
@@ -344,25 +428,27 @@ class PaymentReconciler:
                         payment_attempt_id=order.payment_attempt_id,
                         created_at=order.created_at,
                     )
-                    self._order_repo.save(tenant_id, refunded_order)
+                    self._order_repo.save(effective_tenant, refunded_order)
                     order = refunded_order
 
                     if self._inventory_repo is not None:
-                        self._inventory_repo.release(tenant_id, order.variant_id, order.quantity)
+                        self._inventory_repo.release(
+                            effective_tenant, order.variant_id, order.quantity
+                        )
             elif self._inventory_repo is not None:
                 variant_id = str(payload.get("variant_id") or data_dict.get("variant_id") or "")
                 if variant_id:
                     qty = int(payload.get("quantity") or data_dict.get("quantity") or 1)
-                    self._inventory_repo.release(tenant_id, variant_id, qty)
+                    self._inventory_repo.release(effective_tenant, variant_id, qty)
 
             if self._audit_ledger is not None:
                 self._audit_ledger.record_event(
                     event_type=AuditEventType.PAYMENT_REFUNDED,
                     action_id=attempt.intent_id,
-                    tenant_id=tenant_id,
+                    tenant_id=effective_tenant,
                     actor="provider_webhook",
                     data={
-                        "attempt_id": attempt_id,
+                        "attempt_id": effective_attempt_id,
                         "refund_id": refund.refund_id,
                         "amount_minor": refund.amount.minor_units,
                         "reason": refund.reason,
@@ -378,8 +464,9 @@ class PaymentReconciler:
 
         return {
             "status": "PROCESSED",
+            "tenant_id": effective_tenant,
             "event_type": event_type,
-            "attempt_id": attempt_id,
+            "attempt_id": effective_attempt_id,
             "payment_status": updated_attempt.status.value,
             "order_id": order.order_id if order else None,
             "order_status": order.status.value if order else None,

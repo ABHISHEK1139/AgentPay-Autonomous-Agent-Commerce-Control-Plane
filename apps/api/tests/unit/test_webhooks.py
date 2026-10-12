@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,6 +16,7 @@ from agentpay.adapters.in_memory.payment_repository import (
 )
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.api.app import AgentPayApiApp, ApiTestClient
+from agentpay.api.factory import create_app
 from agentpay.application.services.reconciliation_service import PaymentReconciler
 from agentpay.domain.audit import AuditEventType
 from agentpay.domain.commerce import Inventory, ProductVariant
@@ -24,6 +27,9 @@ from agentpay.domain.payments import (
     OrderStatus,
     PaymentAttempt,
     PaymentStatus,
+    ProviderTransactionMapping,
+    ProviderWebhookEvent,
+    WebhookEventStatus,
 )
 
 
@@ -974,15 +980,15 @@ def test_b_wh_02_future_timestamp_skew_rejection() -> None:
 
 
 def test_b_wh_03_missing_tenant_rejected() -> None:
-    """B-WH-03: Webhook payload without identifiable tenant is rejected with 400 INVALID_PAYLOAD."""
+    """B-WH-03: Webhook payload without identifiable tenant or mapped transaction is quarantined with 422 UNRESOLVED_WEBHOOK_TRANSACTION (§61, AP-001)."""
     _, client, _ = _seed_test_env("tenant_01")
     resp = client.post_webhook(
         "payment.captured",
-        payload={"event_id": "evt_no_tenant_01", "attempt_id": "att_test_01"},
+        payload={"event_id": "evt_no_tenant_01", "attempt_id": "att_test_unmapped"},
         tenant_id="",  # empty tenant
     )
-    assert resp.status_code == 400
-    assert resp.body["error"]["code"] == "INVALID_PAYLOAD"
+    assert resp.status_code == 422
+    assert resp.body["error"]["code"] == "UNRESOLVED_WEBHOOK_TRANSACTION"
 
 
 def test_b_wh_04_cross_tenant_event_replay_defense() -> None:
@@ -1091,3 +1097,864 @@ def test_b_rec_01_webhook_reconciliation_resolves_order_via_find_by_payment_atte
     updated_order = orch._order_repo.get("tenant_01", "ord_rec_find_01")
     assert updated_order is not None
     assert updated_order.status == OrderStatus.CONFIRMED
+
+
+def test_ap001_mapping_resolution_without_tenant_header() -> None:
+    """AP-001: Webhook without tenant header successfully resolves tenant strictly from ProviderTransactionMapping (§61, AP-001)."""
+    app, client, _ = _seed_test_env("tenant_01")
+
+    # Seed mapping in provider_mapping_repo
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_ap001_01",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="mock",
+        provider_payment_id="prov_mapped_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    resp = client.post_webhook(
+        "payment.captured",
+        payload={
+            "event_id": "evt_ap001_res_01",
+            "provider_payment_id": "prov_mapped_01",
+        },
+        tenant_id="",  # Explicitly omitted tenant
+    )
+    assert resp.status_code == 200
+    assert resp.body["status"] == "PROCESSED"
+    assert resp.body["tenant_id"] == "tenant_01"
+    assert resp.body["payment_status"] == "CAPTURED"
+
+
+def test_ap001_cross_tenant_assertion_fails_closed() -> None:
+    """AP-001: Asserted tenant that conflicts with mapped tenant fails closed (§61, AP-001)."""
+    app, client, _ = _seed_test_env("tenant_01")
+
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_ap001_02",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="mock",
+        provider_payment_id="prov_mapped_02",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    # Caller asserts tenant_02 for mapping belonging to tenant_01
+    resp = client.post_webhook(
+        "payment.captured",
+        payload={
+            "event_id": "evt_ap001_conflict_01",
+            "provider_payment_id": "prov_mapped_02",
+        },
+        tenant_id="tenant_02",
+    )
+    assert resp.status_code == 400
+    assert "CROSS_TENANT" in resp.body["error"]["code"] or "CrossTenantAccessError" in str(
+        resp.body
+    )
+
+
+def test_ap001_unmapped_event_quarantined_returns_422() -> None:
+    """AP-001: Unmapped webhook transaction is quarantined with 422 UNRESOLVED_WEBHOOK_TRANSACTION and audits to SYSTEM (§61, AP-001)."""
+    _, client, env = _seed_test_env("tenant_01")
+
+    resp = client.post_webhook(
+        "payment.captured",
+        payload={
+            "event_id": "evt_ap001_unmapped_01",
+            "provider_payment_id": "prov_never_mapped_999",
+        },
+        tenant_id="",  # No tenant
+    )
+    assert resp.status_code == 422
+    assert resp.body["error"]["code"] == "UNRESOLVED_WEBHOOK_TRANSACTION"
+    assert resp.body["error"]["details"]["status"] == "QUARANTINED"
+
+    # Verify audit event in SYSTEM tenant
+    audit_events = env["audit_ledger"].get_events("SYSTEM")
+    sec_events = [e for e in audit_events if e.event_type == AuditEventType.SECURITY_ALERT]
+    assert len(sec_events) >= 1
+    assert sec_events[-1].data["reason"] == "UNRESOLVED_WEBHOOK_TRANSACTION"
+
+
+def test_ap002_razorpay_webhook_valid_signature_success() -> None:
+    """AP-002: Dedicated POST /api/v1/webhooks/razorpay validates raw body HMAC and reconciles order (§61, AP-002)."""
+    app, client, _ = _seed_test_env("tenant_01")
+
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_rzp_01",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="razorpay",
+        provider_payment_id="pay_rzp_valid_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    payload = {
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_rzp_valid_01",
+                    "amount": 129900,
+                    "currency": "INR",
+                    "status": "captured",
+                }
+            }
+        },
+    }
+    resp = client.post_razorpay_webhook(payload)
+    assert resp.status_code == 200
+    assert resp.body["status"] == "PROCESSED"
+    assert resp.body["payment_status"] == "CAPTURED"
+    assert resp.body["order_status"] == "CONFIRMED"
+
+
+def test_ap002_razorpay_webhook_invalid_signature_returns_401() -> None:
+    """AP-002: Razorpay webhook with corrupted signature returns 401 INVALID_WEBHOOK_SIGNATURE (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"event": "payment.captured", "id": "evt_rzp_01"}
+    resp = client.post_razorpay_webhook(payload, custom_signature="deadbeef" * 8)
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"
+
+
+def test_ap002_razorpay_webhook_missing_signature_returns_401() -> None:
+    """AP-002: Razorpay webhook with missing signature header returns 401 INVALID_WEBHOOK_SIGNATURE (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"event": "payment.captured", "id": "evt_rzp_02"}
+    resp = client.post_razorpay_webhook(payload, custom_signature="__OMIT__")
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"
+
+
+def test_ap002_razorpay_webhook_unmapped_quarantine_returns_422() -> None:
+    """AP-002: Unmapped Razorpay transaction returns 422 UNRESOLVED_WEBHOOK_TRANSACTION (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_rzp_unmapped_404",
+                    "amount": 50000,
+                    "status": "captured",
+                }
+            }
+        },
+    }
+    resp = client.post_razorpay_webhook(payload)
+    assert resp.status_code == 422
+    assert resp.body["error"]["code"] == "UNRESOLVED_WEBHOOK_TRANSACTION"
+
+
+def test_ap002_razorpay_webhook_replay_defense_returns_409() -> None:
+    """AP-002: Duplicate Razorpay webhook event is rejected with 409 WEBHOOK_REPLAY_DETECTED (§61, AP-002)."""
+    app, client, _ = _seed_test_env("tenant_01")
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_rzp_replay",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="razorpay",
+        provider_payment_id="pay_rzp_rep_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    payload = {
+        "event_id": "evt_rzp_unique_rep_01",
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_rzp_rep_01",
+                    "amount": 129900,
+                    "status": "captured",
+                }
+            }
+        },
+    }
+    resp1 = client.post_razorpay_webhook(payload)
+    assert resp1.status_code == 200
+
+    resp2 = client.post_razorpay_webhook(payload)
+    assert resp2.status_code == 409
+    assert resp2.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+
+
+def test_ap002_razorpay_cross_endpoint_rejection() -> None:
+    """AP-002: Passing Stripe signature header to Razorpay endpoint is rejected with 401 (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"event": "payment.captured", "id": "evt_rzp_cross"}
+    # Supply Stripe-Signature instead of X-Razorpay-Signature
+    resp = client.request(
+        "POST",
+        "/api/v1/webhooks/razorpay",
+        headers={"stripe-signature": "t=12345,v1=abcde"},
+        json_body=payload,
+        auth=False,
+    )
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"
+
+
+def test_ap002_razorpay_secret_rotation() -> None:
+    """AP-002: Razorpay webhook verifies against rotated candidate secrets (§61, AP-002)."""
+    app, client, _ = _seed_test_env("tenant_01")
+    app.razorpay_webhook_secret = "whsec_old_key_1,whsec_new_key_2"
+
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_rzp_rot",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="razorpay",
+        provider_payment_id="pay_rzp_rot_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    payload = {
+        "event_id": "evt_rzp_rot_01",
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_rzp_rot_01",
+                    "amount": 129900,
+                    "status": "captured",
+                }
+            }
+        },
+    }
+    # Test valid with old key
+    resp_old = client.post_razorpay_webhook(payload, secret="whsec_old_key_1")
+    assert resp_old.status_code == 200
+
+    # Test valid with new key (different event_id)
+    payload["event_id"] = "evt_rzp_rot_02"
+    resp_new = client.post_razorpay_webhook(payload, secret="whsec_new_key_2")
+    assert resp_new.status_code == 200
+
+    # Test invalid with wrong key
+    payload["event_id"] = "evt_rzp_rot_03"
+    resp_bad = client.post_razorpay_webhook(payload, secret="whsec_wrong_key")
+    assert resp_bad.status_code == 401
+
+
+def test_ap002_stripe_webhook_valid_signature_success() -> None:
+    """AP-002: Dedicated POST /api/v1/webhooks/stripe validates t=...,v1=... HMAC and reconciles order (§61, AP-002)."""
+    app, client, _ = _seed_test_env("tenant_01")
+
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_stripe_01",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="stripe",
+        provider_payment_id="pi_stripe_valid_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    payload = {
+        "id": "evt_stripe_valid_01",
+        "type": "payment_intent.succeeded",
+        "data": {
+            "object": {
+                "id": "pi_stripe_valid_01",
+                "amount": 129900,
+                "currency": "INR",
+                "status": "succeeded",
+            }
+        },
+    }
+    resp = client.post_stripe_webhook(payload)
+    assert resp.status_code == 200
+    assert resp.body["status"] == "PROCESSED"
+    assert resp.body["payment_status"] == "CAPTURED"
+    assert resp.body["order_status"] == "CONFIRMED"
+
+
+def test_ap002_stripe_webhook_invalid_signature_returns_401() -> None:
+    """AP-002: Stripe webhook with corrupted signature returns 401 INVALID_WEBHOOK_SIGNATURE (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"id": "evt_stripe_01", "type": "payment_intent.succeeded"}
+    resp = client.post_stripe_webhook(
+        payload, custom_signature=f"t={int(time.time())},v1={'a' * 64}"
+    )
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"
+
+
+def test_ap002_stripe_webhook_missing_signature_returns_401() -> None:
+    """AP-002: Stripe webhook with missing signature header returns 401 INVALID_WEBHOOK_SIGNATURE (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"id": "evt_stripe_02", "type": "payment_intent.succeeded"}
+    resp = client.post_stripe_webhook(payload, custom_signature="__OMIT__")
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"
+
+
+def test_ap002_stripe_webhook_expired_timestamp_returns_401() -> None:
+    """AP-002: Stripe webhook with timestamp older than 300s returns 401 EXPIRED_WEBHOOK_TIMESTAMP (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"id": "evt_stripe_03", "type": "payment_intent.succeeded"}
+    expired_ts = int(time.time()) - 350
+    resp = client.post_stripe_webhook(payload, timestamp=expired_ts)
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "EXPIRED_WEBHOOK_TIMESTAMP"
+
+
+def test_ap002_stripe_webhook_unmapped_quarantine_returns_422() -> None:
+    """AP-002: Unmapped Stripe transaction returns 422 UNRESOLVED_WEBHOOK_TRANSACTION (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {
+        "id": "evt_stripe_unmapped_01",
+        "type": "payment_intent.succeeded",
+        "data": {
+            "object": {
+                "id": "pi_stripe_unmapped_999",
+                "amount": 50000,
+                "status": "succeeded",
+            }
+        },
+    }
+    resp = client.post_stripe_webhook(payload)
+    assert resp.status_code == 422
+    assert resp.body["error"]["code"] == "UNRESOLVED_WEBHOOK_TRANSACTION"
+
+
+def test_ap002_stripe_webhook_replay_defense_returns_409() -> None:
+    """AP-002: Duplicate Stripe webhook event is rejected with 409 WEBHOOK_REPLAY_DETECTED (§61, AP-002)."""
+    app, client, _ = _seed_test_env("tenant_01")
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_stripe_replay",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="stripe",
+        provider_payment_id="pi_stripe_rep_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    payload = {
+        "id": "evt_stripe_unique_rep_01",
+        "type": "payment_intent.succeeded",
+        "data": {
+            "object": {
+                "id": "pi_stripe_rep_01",
+                "amount": 129900,
+                "status": "succeeded",
+            }
+        },
+    }
+    resp1 = client.post_stripe_webhook(payload)
+    assert resp1.status_code == 200
+
+    resp2 = client.post_stripe_webhook(payload)
+    assert resp2.status_code == 409
+    assert resp2.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+
+
+def test_ap002_stripe_cross_endpoint_rejection() -> None:
+    """AP-002: Passing Razorpay signature header to Stripe endpoint is rejected with 401 (§61, AP-002)."""
+    _, client, _ = _seed_test_env("tenant_01")
+    payload = {"id": "evt_stripe_cross", "type": "payment_intent.succeeded"}
+    # Supply X-Razorpay-Signature instead of Stripe-Signature
+    resp = client.request(
+        "POST",
+        "/api/v1/webhooks/stripe",
+        headers={"x-razorpay-signature": "deadbeef" * 8},
+        json_body=payload,
+        auth=False,
+    )
+    assert resp.status_code == 401
+    assert resp.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"
+
+
+def test_ap002_stripe_secret_rotation() -> None:
+    """AP-002: Stripe webhook verifies against rotated candidate secrets (§61, AP-002)."""
+    app, client, _ = _seed_test_env("tenant_01")
+    app.stripe_webhook_secret = "whsec_old_key_1,whsec_new_key_2"
+
+    mapping = ProviderTransactionMapping(
+        mapping_id="map_stripe_rot",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="stripe",
+        provider_payment_id="pi_stripe_rot_01",
+    )
+    app.provider_mapping_repo.save(mapping)
+
+    payload = {
+        "id": "evt_stripe_rot_01",
+        "type": "payment_intent.succeeded",
+        "data": {
+            "object": {
+                "id": "pi_stripe_rot_01",
+                "amount": 129900,
+                "status": "succeeded",
+            }
+        },
+    }
+    # Test valid with old key
+    resp_old = client.post_stripe_webhook(payload, secret="whsec_old_key_1")
+    assert resp_old.status_code == 200
+
+    # Test valid with new key (different event_id)
+    payload["id"] = "evt_stripe_rot_02"
+    resp_new = client.post_stripe_webhook(payload, secret="whsec_new_key_2")
+    assert resp_new.status_code == 200
+
+    # Test invalid with wrong key
+    payload["id"] = "evt_stripe_rot_03"
+    resp_bad = client.post_stripe_webhook(payload, secret="whsec_wrong_key")
+    assert resp_bad.status_code == 401
+
+
+def test_ap003_domain_webhook_event_validation_and_transitions() -> None:
+    """Validate domain invariants for ProviderWebhookEvent (§61, AP-003)."""
+    # 1. Invalid empty event_id
+    with pytest.raises(InvalidPaymentError, match="event_id must be a non-empty string"):
+        ProviderWebhookEvent(
+            id="pwe_test_01",
+            provider="stripe",
+            event_id="   ",
+            event_type="payment.captured",
+        )
+
+    # 2. Invalid empty provider
+    with pytest.raises(InvalidPaymentError, match="provider must be a non-empty string"):
+        ProviderWebhookEvent(
+            id="pwe_test_02",
+            provider="",
+            event_id="evt_valid_01",
+            event_type="payment.captured",
+        )
+
+    # 3. Invalid empty id
+    with pytest.raises(InvalidPaymentError, match="id must be a non-empty string"):
+        ProviderWebhookEvent(
+            id="",
+            provider="stripe",
+            event_id="evt_valid_01",
+            event_type="payment.captured",
+        )
+
+    # 4. Valid creation and transitions: RECEIVED -> PROCESSING -> PROCESSED
+    evt = ProviderWebhookEvent(
+        id="pwe_test_03",
+        provider="stripe",
+        event_id="evt_valid_01",
+        event_type="payment.captured",
+        provider_account_id="acct_123",
+    )
+    assert evt.status == WebhookEventStatus.RECEIVED
+    assert evt.attempt_count == 1
+
+    evt_proc = evt.mark_processing()
+    assert evt_proc.status == WebhookEventStatus.PROCESSING
+    assert evt_proc.attempt_count == 2
+
+    evt_done = evt_proc.mark_processed(entity_reference="att_01")
+    assert evt_done.status == WebhookEventStatus.PROCESSED
+    assert evt_done.entity_reference == "att_01"
+    assert evt_done.last_error_code is None
+
+    # 5. Invalid transition from PROCESSED
+    with pytest.raises(InvalidPaymentError, match="Cannot transition webhook event from PROCESSED"):
+        evt_done.mark_processing()
+
+    with pytest.raises(InvalidPaymentError, match="Cannot transition webhook event from PROCESSED"):
+        evt_done.mark_failed("cannot fail after processed")
+
+    # 6. Failed and Quarantined paths
+    evt_fail = ProviderWebhookEvent(
+        id="pwe_test_04",
+        provider="razorpay",
+        event_id="evt_fail_01",
+        event_type="payment.failed",
+    )
+    evt_fail_proc = evt_fail.mark_processing()
+    evt_failed = evt_fail_proc.mark_failed("GATEWAY_ERROR")
+    assert evt_failed.status == WebhookEventStatus.FAILED
+    assert evt_failed.last_error_code == "GATEWAY_ERROR"
+
+    evt_quar = ProviderWebhookEvent(
+        id="pwe_test_05",
+        provider="stripe",
+        event_id="evt_quar_01",
+        event_type="unknown.event",
+    )
+    evt_quarantined = evt_quar.mark_quarantined("UNKNOWN_EVENT")
+    assert evt_quarantined.status == WebhookEventStatus.QUARANTINED
+    assert evt_quarantined.last_error_code == "UNKNOWN_EVENT"
+
+
+def test_ap003_durable_deduplication_restart_resilience_sqlite(tmp_path: Path) -> None:
+    """Verify restart resilience across separate application instances using SQLite (§61, AP-003).
+
+    Instance 1 processes the event. Instance 2 starts with an empty L1 in-memory cache,
+    reads from the persistent SQLite database, and detects/blocks the replay with 409.
+    """
+    db_file = tmp_path / "webhook_restart_resilience.db"
+    db_url = f"sqlite:///{db_file}"
+
+    # 1. Instance 1 setup
+    app1 = create_app(database_url=db_url, seed_demo_data=True, tenant_id="tenant_01")
+    client1 = ApiTestClient(app1)
+
+    # Seed PaymentAttempt and Order in app1
+    attempt = PaymentAttempt(
+        attempt_id="att_restart_01",
+        intent_id="intent_restart_01",
+        tenant_id="tenant_01",
+        amount=Money(129900, "INR"),
+        status=PaymentStatus.CREATED,
+        idempotency_key="idem_att_restart_01",
+        provider="mock",
+    )
+    assert app1.orchestrator._payment_repo is not None
+    app1.orchestrator._payment_repo.save("tenant_01", attempt)
+
+    order = Order(
+        order_id="ord_restart_01",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="user_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=1,
+        total_amount=Money(129900, "INR"),
+        status=OrderStatus.PENDING_PAYMENT,
+        payment_attempt_id="att_restart_01",
+    )
+    assert app1.orchestrator._order_repo is not None
+    app1.orchestrator._order_repo.save("tenant_01", order)
+
+    # Post first webhook to app1
+    payload = {
+        "event_id": "evt_durable_restart_01",
+        "event_type": "payment.captured",
+        "attempt_id": "att_restart_01",
+        "provider": "mock",
+        "amount": {"minor_units": 129900, "currency": "INR"},
+    }
+    resp1 = client1.post_webhook("payment.captured", payload)
+    assert resp1.status_code == 200
+    assert resp1.body.get("payment_status") == "CAPTURED"
+
+    # Verify attempt in app1 is CAPTURED
+    att_db = app1.orchestrator._payment_repo.get("tenant_01", "att_restart_01")
+    assert att_db is not None
+    assert att_db.status == PaymentStatus.CAPTURED
+
+    # 2. Simulate server restart: spin up completely separate Instance 2 on same DB
+    app2 = create_app(database_url=db_url, seed_demo_data=False, tenant_id="tenant_01")
+    client2 = ApiTestClient(app2)
+
+    # Verify App 2's L1 memory cache is completely empty!
+    assert len(app2._processed_webhook_events) == 0
+
+    # Post identical webhook event to App 2
+    resp2 = client2.post_webhook("payment.captured", payload)
+
+    # Must return 409 Conflict with WEBHOOK_REPLAY_DETECTED
+    assert resp2.status_code == 409
+    assert resp2.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+    assert "already been processed" in resp2.body["error"]["message"]
+
+    # Verify App 2's L1 cache was populated from DB
+    assert "mock::evt_durable_restart_01" in app2._processed_webhook_events
+
+    # Verify durable record exists in repo
+    assert app2.webhook_event_repo is not None
+    stored_event = app2.webhook_event_repo.find_by_provider_event("mock", "evt_durable_restart_01")
+    assert stored_event is not None
+    assert stored_event.status == WebhookEventStatus.PROCESSED
+    assert stored_event.entity_reference == "att_restart_01"
+
+
+def test_ap003_durable_deduplication_concurrent_race_sqlite(tmp_path: Path) -> None:
+    """Stress test multithreaded concurrent deliveries of same webhook against SQLite (§61, AP-003).
+
+    10 concurrent threads deliver the exact same event. Exactly 1 must receive 200 PROCESSED,
+    and 9 must receive 409 WEBHOOK_REPLAY_DETECTED.
+    """
+    db_file = tmp_path / "webhook_concurrency_race.db"
+    db_url = f"sqlite:///{db_file}"
+
+    app = create_app(database_url=db_url, seed_demo_data=True, tenant_id="tenant_01")
+
+    attempt = PaymentAttempt(
+        attempt_id="att_race_sql_01",
+        intent_id="intent_race_sql_01",
+        tenant_id="tenant_01",
+        amount=Money(129900, "INR"),
+        status=PaymentStatus.CREATED,
+        idempotency_key="idem_att_race_sql_01",
+        provider="mock",
+    )
+    assert app.orchestrator._payment_repo is not None
+    app.orchestrator._payment_repo.save("tenant_01", attempt)
+
+    order = Order(
+        order_id="ord_race_sql_01",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="user_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=1,
+        total_amount=Money(129900, "INR"),
+        status=OrderStatus.PENDING_PAYMENT,
+        payment_attempt_id="att_race_sql_01",
+    )
+    assert app.orchestrator._order_repo is not None
+    app.orchestrator._order_repo.save("tenant_01", order)
+
+    payload = {
+        "event_id": "evt_concurrent_race_sql_999",
+        "event_type": "payment.captured",
+        "attempt_id": "att_race_sql_01",
+        "amount": {"minor_units": 129900, "currency": "INR"},
+    }
+
+    results: list[int] = []
+
+    def _worker() -> int:
+        client = ApiTestClient(app)
+        resp = client.post_webhook("payment.captured", payload)
+        return resp.status_code
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(_worker) for _ in range(10)]
+        for fut in concurrent.futures.as_completed(futures):
+            results.append(fut.result())
+
+    assert results.count(200) == 1, f"Expected exactly 1 200 OK, got: {results}"
+    assert results.count(409) == 9, f"Expected 9 409 Conflict, got: {results}"
+
+    # Verify attempt state is CAPTURED
+    att = app.orchestrator._payment_repo.get("tenant_01", "att_race_sql_01")
+    assert att is not None
+    assert att.status == PaymentStatus.CAPTURED
+
+
+def test_ap003_duplicate_failure_inventory_safety(tmp_path: Path) -> None:
+    """Ensure duplicate payment.failed webhooks do not double-release inventory (§44, §61, AP-003)."""
+    db_file = tmp_path / "webhook_failure_inventory.db"
+    db_url = f"sqlite:///{db_file}"
+
+    app = create_app(database_url=db_url, seed_demo_data=True, tenant_id="tenant_01")
+    client = ApiTestClient(app)
+
+    # Initial inventory: available=50, reserved=0
+    assert app.orchestrator._inventory_repo is not None
+    inv_initial = app.orchestrator._inventory_repo.get("tenant_01", "var_01")
+    assert inv_initial is not None
+    assert inv_initial.available == 50
+    assert inv_initial.reserved == 0
+
+    # Reserve 2 items
+    app.orchestrator._inventory_repo.reserve("tenant_01", "var_01", 2)
+    inv_res = app.orchestrator._inventory_repo.get("tenant_01", "var_01")
+    assert inv_res is not None
+    assert inv_res.reserved == 2
+
+    # Seed attempt and order
+    attempt = PaymentAttempt(
+        attempt_id="att_fail_inv_01",
+        intent_id="intent_fail_inv_01",
+        tenant_id="tenant_01",
+        amount=Money(20000, "INR"),
+        status=PaymentStatus.CREATED,
+        idempotency_key="idem_fail_inv_01",
+        provider="mock",
+    )
+    assert app.orchestrator._payment_repo is not None
+    app.orchestrator._payment_repo.save("tenant_01", attempt)
+
+    order = Order(
+        order_id="ord_fail_inv_01",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="user_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=2,
+        total_amount=Money(20000, "INR"),
+        status=OrderStatus.PENDING_PAYMENT,
+        payment_attempt_id="att_fail_inv_01",
+    )
+    assert app.orchestrator._order_repo is not None
+    app.orchestrator._order_repo.save("tenant_01", order)
+
+    payload = {
+        "event_id": "evt_fail_inv_safe_01",
+        "event_type": "payment.failed",
+        "attempt_id": "att_fail_inv_01",
+        "error_code": "INSUFFICIENT_FUNDS",
+        "error_message": "Card declined",
+    }
+
+    # 1. First failure delivery -> releases reserved inventory
+    r1 = client.post_webhook("payment.failed", payload)
+    assert r1.status_code == 200
+
+    inv_after_first = app.orchestrator._inventory_repo.get("tenant_01", "var_01")
+    assert inv_after_first is not None
+    assert inv_after_first.reserved == 0
+
+    # 2. Duplicate failure delivery -> rejected with 409 WEBHOOK_REPLAY_DETECTED
+    r2 = client.post_webhook("payment.failed", payload)
+    assert r2.status_code == 409
+    assert r2.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+
+    # Inventory must remain reserved == 0 (no negative reserved inventory!)
+    inv_after_second = app.orchestrator._inventory_repo.get("tenant_01", "var_01")
+    assert inv_after_second is not None
+    assert inv_after_second.reserved == 0
+
+
+def test_ap003_duplicate_refund_inventory_safety(tmp_path: Path) -> None:
+    """Ensure duplicate payment.refunded webhooks do not double-restock inventory (§44, §61, AP-003)."""
+    db_file = tmp_path / "webhook_refund_inventory.db"
+    db_url = f"sqlite:///{db_file}"
+
+    app = create_app(database_url=db_url, seed_demo_data=True, tenant_id="tenant_01")
+    client = ApiTestClient(app)
+
+    # Initial inventory: reserve 2 items
+    assert app.orchestrator._inventory_repo is not None
+    app.orchestrator._inventory_repo.reserve("tenant_01", "var_01", 2)
+
+    attempt = PaymentAttempt(
+        attempt_id="att_ref_inv_01",
+        intent_id="intent_ref_inv_01",
+        tenant_id="tenant_01",
+        amount=Money(20000, "INR"),
+        status=PaymentStatus.CAPTURED,
+        idempotency_key="idem_ref_inv_01",
+        provider="mock",
+    )
+    assert app.orchestrator._payment_repo is not None
+    app.orchestrator._payment_repo.save("tenant_01", attempt)
+
+    order = Order(
+        order_id="ord_ref_inv_01",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="user_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=2,
+        total_amount=Money(20000, "INR"),
+        status=OrderStatus.CONFIRMED,
+        payment_attempt_id="att_ref_inv_01",
+    )
+    assert app.orchestrator._order_repo is not None
+    app.orchestrator._order_repo.save("tenant_01", order)
+
+    payload = {
+        "event_id": "evt_ref_inv_safe_01",
+        "event_type": "payment.refunded",
+        "attempt_id": "att_ref_inv_01",
+        "refund_id": "ref_001",
+        "reason": "Customer cancellation",
+    }
+
+    # 1. First refund delivery -> releases reserved inventory
+    r1 = client.post_webhook("payment.refunded", payload)
+    assert r1.status_code == 200
+
+    inv_after_first = app.orchestrator._inventory_repo.get("tenant_01", "var_01")
+    assert inv_after_first is not None
+    assert inv_after_first.reserved == 0
+
+    # 2. Duplicate refund delivery -> blocked with 409
+    r2 = client.post_webhook("payment.refunded", payload)
+    assert r2.status_code == 409
+    assert r2.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+
+    inv_after_second = app.orchestrator._inventory_repo.get("tenant_01", "var_01")
+    assert inv_after_second is not None
+    assert inv_after_second.reserved == 0
+
+
+def test_ap003_cross_provider_event_id_isolation() -> None:
+    """Verify that identical event_ids from different providers do not collide (§61, AP-003)."""
+    app, client, env = _seed_test_env()
+
+    # Map Stripe payment
+    mapping_stripe = ProviderTransactionMapping(
+        mapping_id="map_stripe_iso",
+        tenant_id="tenant_01",
+        attempt_id="att_test_01",
+        provider="stripe",
+        provider_payment_id="pi_stripe_iso_01",
+    )
+    app.provider_mapping_repo.save(mapping_stripe)
+
+    # Seed another attempt for Razorpay
+    attempt_rzp = PaymentAttempt(
+        attempt_id="att_rzp_01",
+        intent_id="intent_rzp_01",
+        tenant_id="tenant_01",
+        amount=Money(129900, "INR"),
+        status=PaymentStatus.CREATED,
+        idempotency_key="idem_att_rzp_01",
+        provider="razorpay",
+    )
+    env["payment_repo"].save("tenant_01", attempt_rzp)
+
+    mapping_rzp = ProviderTransactionMapping(
+        mapping_id="map_rzp_iso",
+        tenant_id="tenant_01",
+        attempt_id="att_rzp_01",
+        provider="razorpay",
+        provider_payment_id="pay_rzp_iso_01",
+    )
+    app.provider_mapping_repo.save(mapping_rzp)
+
+    shared_event_id = "evt_shared_cross_provider_001"
+
+    # Stripe webhook with shared event_id
+    stripe_payload = {
+        "id": shared_event_id,
+        "type": "payment_intent.succeeded",
+        "data": {
+            "object": {
+                "id": "pi_stripe_iso_01",
+                "amount": 129900,
+                "status": "succeeded",
+            }
+        },
+    }
+    r_stripe = client.post_stripe_webhook(stripe_payload)
+    assert r_stripe.status_code == 200
+
+    # Razorpay webhook with THE SAME event_id
+    rzp_payload = {
+        "id": shared_event_id,
+        "event": "payment.captured",
+        "payload": {
+            "payment": {
+                "entity": {
+                    "id": "pay_rzp_iso_01",
+                    "amount": 129900,
+                    "currency": "INR",
+                    "status": "captured",
+                }
+            }
+        },
+    }
+    r_rzp = client.post_razorpay_webhook(rzp_payload)
+    # Razorpay must succeed, not collide with Stripe's event!
+    assert r_rzp.status_code == 200
+
+    # Replay of Stripe must 409
+    r_stripe_replay = client.post_stripe_webhook(stripe_payload)
+    assert r_stripe_replay.status_code == 409
+    assert r_stripe_replay.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"
+
+    # Replay of Razorpay must 409
+    r_rzp_replay = client.post_razorpay_webhook(rzp_payload)
+    assert r_rzp_replay.status_code == 409
+    assert r_rzp_replay.body["error"]["code"] == "WEBHOOK_REPLAY_DETECTED"

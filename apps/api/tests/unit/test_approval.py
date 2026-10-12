@@ -277,3 +277,132 @@ def test_hypothesis_approval_binding_amount_invariance(
                 action_version=1,
                 tenant_id="t1",
             )
+
+
+def test_approval_binding_exact_8_field_matching() -> None:
+    """AP-006: Explicit 8-field binding verifies principal_id and tenant_id alongside commerce fields."""
+    binding = ApprovalBinding(
+        action_id="act_01",
+        amount=Money(5000, "INR"),
+        merchant_id="merch_01",
+        resource_id="prod_123",
+        currency="INR",
+        action_version=1,
+        tenant_id="tenant_01",
+        principal_id="user_alice",
+    )
+    assert (
+        binding.matches(
+            action_id="act_01",
+            amount=Money(5000, "INR"),
+            merchant_id="merch_01",
+            resource_id="prod_123",
+            currency="INR",
+            action_version=1,
+            tenant_id="tenant_01",
+            principal_id="user_alice",
+        )
+        is True
+    )
+
+    # Principal mismatch raises
+    with pytest.raises(
+        ApprovalBindingMismatchError,
+        match="Principal mismatch: approval bound to 'user_alice', got 'user_bob'",
+    ):
+        binding.assert_exact_match(
+            action_id="act_01",
+            amount=Money(5000, "INR"),
+            merchant_id="merch_01",
+            resource_id="prod_123",
+            currency="INR",
+            action_version=1,
+            tenant_id="tenant_01",
+            principal_id="user_bob",
+        )
+
+    # Tenant mismatch raises
+    with pytest.raises(
+        ApprovalBindingMismatchError,
+        match="Tenant mismatch: approval bound to 'tenant_01', got 'tenant_02'",
+    ):
+        binding.assert_exact_match(
+            action_id="act_01",
+            amount=Money(5000, "INR"),
+            merchant_id="merch_01",
+            resource_id="prod_123",
+            currency="INR",
+            action_version=1,
+            tenant_id="tenant_02",
+            principal_id="user_alice",
+        )
+
+
+def test_approval_service_cross_principal_attack_rejected() -> None:
+    """AP-006: User Bob cannot verify or execute an approval bound to User Alice in the same tenant."""
+    repo = InMemoryApprovalRepository()
+    service = ApprovalService(repo)
+
+    alice_action = ActionRequest(
+        action_id="act_alice_01",
+        tenant_id="tenant_01",
+        principal_id="user_alice",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="product", id="prod_123"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="procurement"),
+        amount=Money(10000, "INR"),
+        authorization_mode=AuthorizationMode.SUPERVISED,
+        version=1,
+    )
+    approval = service.create_approval(alice_action, tenant_id="tenant_01")
+    assert approval.binding.principal_id == "user_alice"
+
+    # Bob constructs action with identical parameters except principal_id
+    bob_action = ActionRequest(
+        action_id="act_alice_01",
+        tenant_id="tenant_01",
+        principal_id="user_bob",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="product", id="prod_123"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="procurement"),
+        amount=Money(10000, "INR"),
+        authorization_mode=AuthorizationMode.SUPERVISED,
+        version=1,
+    )
+
+    with pytest.raises(
+        ApprovalBindingMismatchError,
+        match="Principal mismatch: approval bound to 'user_alice', got 'user_bob'",
+    ):
+        service.verify_binding(approval, bob_action)
+
+
+def test_approval_repository_list_pending() -> None:
+    """AP-006: list_pending returns only pending approvals partitioned by tenant."""
+    repo = InMemoryApprovalRepository()
+    service = ApprovalService(repo)
+
+    act1 = make_action_request(action_id="act_pend_1", amount_minor=5000)
+    act2 = make_action_request(action_id="act_pend_2", amount_minor=6000)
+    app1 = service.create_approval(act1, tenant_id="tenant_01")
+    app2 = service.create_approval(act2, tenant_id="tenant_01")
+
+    # Initially both are pending
+    pending = repo.list_pending("tenant_01")
+    assert len(pending) == 2
+    assert {a.approval_id for a in pending} == {app1.approval_id, app2.approval_id}
+
+    # Grant app1 -> no longer pending
+    service.grant_approval(app1.approval_id, approver_id="mgr_01", tenant_id="tenant_01")
+    pending_after = repo.list_pending("tenant_01")
+    assert len(pending_after) == 1
+    assert pending_after[0].approval_id == app2.approval_id
+
+    # Another tenant has 0 pending
+    assert repo.list_pending("tenant_02") == []

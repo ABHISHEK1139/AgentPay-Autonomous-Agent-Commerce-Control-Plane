@@ -65,7 +65,7 @@ Per `AGENTS.md` §108 and §144, AgentPay adheres to strict truth-in-documentati
 | **V10.1.1** | **V10 Malicious Code**: Hermetic build and dependency locking via `uv.lock` and pinned package hashes in CI. | L2 | `VERIFIED` | `pyproject.toml`, `uv.lock`, `.github/workflows/ci.yml` | `uv run ruff format --check .`, `uv run ruff check .` |
 | **V10.2.1** | **V10 Malicious Code**: Static AST boundary analysis continuously scanning `agentpay/domain/` to prohibit third-party framework or database imports. | L2 | `VERIFIED` | `apps/api/tests/unit/test_architecture_boundaries.py` | `apps/api/tests/unit/test_architecture_boundaries.py` (7/7 passed) |
 | **V11.1.1** | **V11 Business Logic**: Deterministic spending policy engine enforcing monotonicity, spending caps, and mandatory human approval. | L3 | `VERIFIED` | `domain/policy.py` | `apps/api/tests/unit/test_policy.py` (17/17 passed) |
-| **V11.1.2** | **V11 Business Logic**: Cryptographically bound, single-use 7-field human approvals (`action_id`, `amount`, `merchant_id`, `resource_id`, `currency`, `action_version`, `tenant_id`). | L3 | `VERIFIED` | `domain/approval.py` | `apps/api/tests/unit/test_approval.py` |
+| **V11.1.2** | **V11 Business Logic**: Cryptographically bound, single-use 8-field human approvals (`action_id`, `amount`, `merchant_id`, `resource_id`, `currency`, `action_version`, `principal_id`, `tenant_id`). | L3 | `VERIFIED` | `domain/approval.py` | `apps/api/tests/unit/test_approval.py` |
 | **V11.2.1** | **V11 Business Logic**: Non-blind payment timeout reconciliation (`PaymentReconciler`): queries provider state rather than retrying charges (§43). | L3 | `VERIFIED` | `application/services/reconciliation_service.py` | `apps/api/tests/unit/test_reconciliation.py`, `test_failure_engineering.py` |
 | **V11.2.2** | **V11 Business Logic**: Saga compensation: atomic inventory release on payment failure; automatic payment refund on downstream order failure. | L3 | `VERIFIED` | `application/use_cases/purchase_flow.py` | `apps/api/tests/unit/test_purchase_flow.py`, `test_failure_engineering.py` |
 | **V11.6.1** | **V11 Business Logic**: External PSP integration abstraction. | L3 | `EXCEPTION` | `application/ports/payments_port.py` | `apps/api/tests/unit/test_payments.py` (Documented in EXC-002: MockPaymentProvider used for hermetic local testing) |
@@ -97,7 +97,7 @@ Per `AGENTS.md` §108 and §144, AgentPay adheres to strict truth-in-documentati
 ### Chapter V3: Session Management
 - **Assurance Level**: Level 2
 - **Replay Protection**: Financial actions require unique idempotency keys. Replay attempts with modified payloads trigger `IdempotencyConflictError` (HTTP 409).
-- **Single-Use Approvals**: Human approval decisions are bound to a 7-field cryptographic tuple and atomically marked `ApprovalStatus.CONSUMED` upon first use under mutex lock.
+- **Single-Use Approvals**: Human approval decisions are bound to an 8-field cryptographic tuple (`action_id`, `amount`, `merchant_id`, `resource_id`, `currency`, `action_version`, `principal_id`, `tenant_id`) and atomically marked `ApprovalStatus.CONSUMED` upon first use under mutex lock.
 
 ### Chapter V4: Access Control Verification
 - **Assurance Level**: Level 2 / Level 3

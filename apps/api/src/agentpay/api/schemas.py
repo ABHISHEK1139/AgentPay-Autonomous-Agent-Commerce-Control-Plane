@@ -63,6 +63,26 @@ class ApprovalDecisionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalDetailResponse:
+    """Detailed response exposing all 8 binding fields and full lifecycle metadata (§20, §66)."""
+
+    approval_id: str
+    tenant_id: str
+    principal_id: str
+    action_id: str
+    status: str
+    amount_minor: int
+    currency: str
+    merchant_id: str
+    resource_id: str
+    action_version: int
+    requested_at: str
+    approver_id: str | None = None
+    decided_at: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class EmergencyControlRequest:
     """Request payload for invoking emergency pause / kill switch (§21, §67)."""
 

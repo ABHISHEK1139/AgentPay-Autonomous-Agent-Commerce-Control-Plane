@@ -47,18 +47,28 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            175 files already formatted
+uv run ruff format --check .                                            199 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 167 source files
-uv run pytest                                                           748 passed
+uv run mypy                                                             Success: no issues found in 182 source files
+uv run pytest                                                           815 passed
 node --test tests/web.test.mjs                                          5 passed (incl. live API & §121 accessibility)
-uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
-uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
 uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
-uv run python tests/adversarial/stress_test_money.py                    6/6 passed
-uv run python tests/adversarial/stress_test_webhooks.py                 6/6 passed
-uv run python tests/adversarial/stress_test_ssrf_resilience.py          9/9 passed
+uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
+uv run python tests/adversarial/stress_test_m1_tenant_isolation.py       10/10 passed (tenant partition enforcement)
+uv run python tests/adversarial/stress_test_m2_durable_webhooks.py       8/8 passed (durable replay & crash survival)
+uv run python tests/adversarial/stress_test_m2_saga_concurrency.py       8/8 passed (SAGA stock compensation)
+uv run python tests/adversarial/stress_test_m3_sandbox_config.py         10/10 passed (fail-closed environment profiles)
+uv run python tests/adversarial/stress_test_m4_approval_binding.py       8/8 passed (8-field exact binding)
+uv run python tests/adversarial/stress_test_m4_challenger_edge_cases.py   6/6 passed (immutability & 30-thread race)
+uv run python tests/adversarial/stress_test_m6_shared_operational_controls.py 6/6 passed (multi-instance shared pause)
+uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py 8/8 passed (auth header vs token claims)
+uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py 5/5 passed (Razorpay sandbox E2E)
 uv run python tests/adversarial/stress_test_model_gateway_resilience.py  6/6 passed
+uv run python tests/adversarial/stress_test_money.py                    6/6 passed
+uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
+uv run python tests/adversarial/stress_test_ssrf_resilience.py          9/9 passed
+uv run python tests/adversarial/stress_test_webhook_crypto.py           8/8 passed (strict raw-byte HMAC verification)
+uv run python tests/adversarial/stress_test_webhooks.py                 6/6 passed
 uv run python scripts/verify_audit_chain.py --help                      Verified working
 uv run python scripts/generate_sbom.py --verify                          Verified working (CycloneDX 1.5 + SLSA 1.2)
 ```

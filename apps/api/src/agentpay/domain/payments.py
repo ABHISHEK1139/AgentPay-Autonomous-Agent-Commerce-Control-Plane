@@ -306,3 +306,222 @@ class IdempotencyRecord:
 
         if not isinstance(self.result_data, dict):
             raise InvalidPaymentError("result_data must be a dict")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderTransactionMapping:
+    """Immutable mapping between external provider transaction identifiers and internal domain entities (§39, §41, §49)."""
+
+    mapping_id: str
+    tenant_id: str
+    attempt_id: str
+    provider: str
+    provider_payment_id: str
+    provider_order_id: str | None = None
+    provider_account_id: str | None = None
+    order_id: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        strings: tuple[tuple[str, object], ...] = (
+            ("mapping_id", self.mapping_id),
+            ("tenant_id", self.tenant_id),
+            ("attempt_id", self.attempt_id),
+            ("provider", self.provider),
+            ("provider_payment_id", self.provider_payment_id),
+        )
+        for name, val in strings:
+            val_obj: object = val
+            if not isinstance(val_obj, str) or not val_obj.strip():
+                raise InvalidPaymentError(f"{name} must be a non-empty string")
+
+        if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
+            raise InvalidPaymentError("created_at must be timezone-aware (UTC)")
+
+
+class WebhookEventStatus(StrEnum):
+    """Lifecycle status of an ingested payment provider webhook event (§42, §61, AP-003)."""
+
+    RECEIVED = "RECEIVED"
+    PROCESSING = "PROCESSING"
+    PROCESSED = "PROCESSED"
+    FAILED = "FAILED"
+    QUARANTINED = "QUARANTINED"
+
+
+_ALLOWED_WEBHOOK_EVENT_TRANSITIONS: Final[
+    dict[WebhookEventStatus, frozenset[WebhookEventStatus]]
+] = {
+    WebhookEventStatus.RECEIVED: frozenset(
+        {
+            WebhookEventStatus.PROCESSING,
+            WebhookEventStatus.FAILED,
+            WebhookEventStatus.QUARANTINED,
+        }
+    ),
+    WebhookEventStatus.PROCESSING: frozenset(
+        {
+            WebhookEventStatus.PROCESSED,
+            WebhookEventStatus.FAILED,
+            WebhookEventStatus.QUARANTINED,
+        }
+    ),
+    WebhookEventStatus.FAILED: frozenset(
+        {
+            WebhookEventStatus.PROCESSING,
+            WebhookEventStatus.QUARANTINED,
+        }
+    ),
+    WebhookEventStatus.QUARANTINED: frozenset(
+        {
+            WebhookEventStatus.PROCESSING,
+        }
+    ),
+    WebhookEventStatus.PROCESSED: frozenset(),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderWebhookEvent:
+    """Durable record of an external payment provider webhook event (§42, §61, AP-003)."""
+
+    id: str
+    provider: str
+    event_id: str
+    status: WebhookEventStatus = WebhookEventStatus.RECEIVED
+    provider_account_id: str = ""
+    received_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    attempt_count: int = 1
+    last_error_code: str | None = None
+    entity_reference: str | None = None
+    event_type: str | None = None
+    payload_hash: str | None = None
+    trace_id: str | None = None
+
+    def __post_init__(self) -> None:
+        strings: tuple[tuple[str, object], ...] = (
+            ("id", self.id),
+            ("provider", self.provider),
+            ("event_id", self.event_id),
+        )
+        for name, val in strings:
+            val_obj: object = val
+            if not isinstance(val_obj, str) or not val_obj.strip():
+                raise InvalidPaymentError(f"{name} must be a non-empty string")
+
+        acc_obj: object = self.provider_account_id
+        if acc_obj is None:
+            object.__setattr__(self, "provider_account_id", "")
+        elif not isinstance(acc_obj, str):
+            object.__setattr__(self, "provider_account_id", str(acc_obj))
+
+        status_obj: object = self.status
+        if not isinstance(status_obj, WebhookEventStatus):
+            if isinstance(status_obj, str):
+                try:
+                    object.__setattr__(self, "status", WebhookEventStatus(status_obj))
+                except ValueError as exc:
+                    raise InvalidPaymentError(
+                        f"Invalid webhook event status: {status_obj}"
+                    ) from exc
+            else:
+                raise InvalidPaymentError(f"Invalid webhook event status: {status_obj}")
+
+        if self.attempt_count < 0:
+            raise InvalidPaymentError("attempt_count must be non-negative")
+
+        if self.received_at.tzinfo is None or self.received_at.utcoffset() is None:
+            raise InvalidPaymentError("received_at must be timezone-aware (UTC)")
+        if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
+            raise InvalidPaymentError("updated_at must be timezone-aware (UTC)")
+
+    def can_transition_to(self, new_status: WebhookEventStatus) -> bool:
+        if new_status == self.status:
+            return True
+        allowed = _ALLOWED_WEBHOOK_EVENT_TRANSITIONS.get(self.status, frozenset())
+        return new_status in allowed
+
+    def mark_processing(self) -> ProviderWebhookEvent:
+        if not self.can_transition_to(WebhookEventStatus.PROCESSING):
+            raise InvalidPaymentError(
+                f"Cannot transition webhook event from {self.status.value} to PROCESSING"
+            )
+        return ProviderWebhookEvent(
+            id=self.id,
+            provider=self.provider,
+            event_id=self.event_id,
+            status=WebhookEventStatus.PROCESSING,
+            provider_account_id=self.provider_account_id,
+            received_at=self.received_at,
+            updated_at=datetime.now(UTC),
+            attempt_count=self.attempt_count + 1,
+            last_error_code=self.last_error_code,
+            entity_reference=self.entity_reference,
+            event_type=self.event_type,
+            payload_hash=self.payload_hash,
+            trace_id=self.trace_id,
+        )
+
+    def mark_processed(self, entity_reference: str | None = None) -> ProviderWebhookEvent:
+        if not self.can_transition_to(WebhookEventStatus.PROCESSED):
+            raise InvalidPaymentError(
+                f"Cannot transition webhook event from {self.status.value} to PROCESSED"
+            )
+        return ProviderWebhookEvent(
+            id=self.id,
+            provider=self.provider,
+            event_id=self.event_id,
+            status=WebhookEventStatus.PROCESSED,
+            provider_account_id=self.provider_account_id,
+            received_at=self.received_at,
+            updated_at=datetime.now(UTC),
+            attempt_count=self.attempt_count,
+            last_error_code=None,
+            entity_reference=entity_reference or self.entity_reference,
+            event_type=self.event_type,
+            payload_hash=self.payload_hash,
+            trace_id=self.trace_id,
+        )
+
+    def mark_failed(self, error_code: str) -> ProviderWebhookEvent:
+        if not self.can_transition_to(WebhookEventStatus.FAILED):
+            raise InvalidPaymentError(
+                f"Cannot transition webhook event from {self.status.value} to FAILED"
+            )
+        return ProviderWebhookEvent(
+            id=self.id,
+            provider=self.provider,
+            event_id=self.event_id,
+            status=WebhookEventStatus.FAILED,
+            provider_account_id=self.provider_account_id,
+            received_at=self.received_at,
+            updated_at=datetime.now(UTC),
+            attempt_count=self.attempt_count,
+            last_error_code=error_code,
+            entity_reference=self.entity_reference,
+            event_type=self.event_type,
+            payload_hash=self.payload_hash,
+            trace_id=self.trace_id,
+        )
+
+    def mark_quarantined(self, reason_code: str) -> ProviderWebhookEvent:
+        if not self.can_transition_to(WebhookEventStatus.QUARANTINED):
+            raise InvalidPaymentError(
+                f"Cannot transition webhook event from {self.status.value} to QUARANTINED"
+            )
+        return ProviderWebhookEvent(
+            id=self.id,
+            provider=self.provider,
+            event_id=self.event_id,
+            status=WebhookEventStatus.QUARANTINED,
+            provider_account_id=self.provider_account_id,
+            received_at=self.received_at,
+            updated_at=datetime.now(UTC),
+            attempt_count=self.attempt_count,
+            last_error_code=reason_code,
+            entity_reference=self.entity_reference,
+            event_type=self.event_type,
+            payload_hash=self.payload_hash,
+            trace_id=self.trace_id,
+        )

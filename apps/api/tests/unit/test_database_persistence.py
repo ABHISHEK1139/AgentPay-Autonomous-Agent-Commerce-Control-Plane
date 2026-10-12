@@ -558,6 +558,7 @@ def test_approval_repository_roundtrip_and_atomic_consume(
         currency="USD",
         action_version=1,
         tenant_id="tenant_appr",
+        principal_id="user_procure_99",
     )
     approval = Approval(
         approval_id="appr_server_01",
@@ -574,11 +575,19 @@ def test_approval_repository_roundtrip_and_atomic_consume(
     assert retrieved.approval_id == "appr_server_01"
     assert retrieved.tenant_id == "tenant_appr"
     assert retrieved.status == ApprovalStatus.PENDING
+    assert retrieved.binding.principal_id == "user_procure_99"
     assert retrieved.binding.amount.minor_units == 75000
     assert retrieved.binding.amount.currency == "USD"
     assert retrieved.binding.merchant_id == "merch_dell"
 
-    # 2. list_for_action
+    # 2. list_pending
+    pending_list = approval_repo.list_pending("tenant_appr")
+    assert len(pending_list) == 1
+    assert pending_list[0].approval_id == "appr_server_01"
+    assert pending_list[0].binding.principal_id == "user_procure_99"
+    assert approval_repo.list_pending("tenant_other") == []
+
+    # 3. list_for_action
     action_approvals = approval_repo.list_for_action("tenant_appr", "act_procure_01")
     assert len(action_approvals) == 1
     assert action_approvals[0].approval_id == "appr_server_01"

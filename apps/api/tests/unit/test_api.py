@@ -190,6 +190,53 @@ def test_approval_flow_via_http() -> None:
     assert body["status"] == "APPROVED"
     assert body["approver_id"] == "manager_alice"
 
+    # 3. GET /api/v1/approvals/{approval_id} exposes all 8 binding fields (§20, §66)
+    status_code, detail = client.get(
+        f"/api/v1/approvals/{approval_id}",
+        headers=headers,
+    )
+    assert status_code == 200
+    assert detail["approval_id"] == approval_id
+    assert detail["tenant_id"] == "tenant_01"
+    assert detail["principal_id"] == "user_01"
+    assert detail["action_id"] == "api_act_review"
+    assert detail["status"] == "APPROVED"
+    assert detail["amount_minor"] == 800000
+    assert detail["currency"] == "INR"
+    assert detail["approver_id"] == "manager_alice"
+
+    # 4. Cross-principal execution attempt is rejected (§20)
+    status_code, err_resp = client.post(
+        f"/api/v1/approvals/{approval_id}/execute",
+        json_body={
+            "action_id": "api_act_review",
+            "principal_id": "user_imposter",
+            "agent_id": "agent_01",
+            "variant_id": "var_expensive",
+            "amount_minor": 800000,
+            "currency": "INR",
+        },
+        headers=headers,
+    )
+    assert status_code == 422
+    assert "Principal mismatch" in err_resp["error"]["message"]
+
+    # 5. Legitimate principal execution succeeds (§20)
+    status_code, exec_resp = client.post(
+        f"/api/v1/approvals/{approval_id}/execute",
+        json_body={
+            "action_id": "api_act_review",
+            "principal_id": "user_01",
+            "agent_id": "agent_01",
+            "variant_id": "var_expensive",
+            "amount_minor": 800000,
+            "currency": "INR",
+        },
+        headers=headers,
+    )
+    assert status_code == 200
+    assert exec_resp["status"] == "COMPLETED"
+
 
 def test_emergency_endpoints_accessible_without_tenant_header() -> None:
     """Verify operator can query status, pause, and resume without X-Tenant-ID header (§21, §67)."""

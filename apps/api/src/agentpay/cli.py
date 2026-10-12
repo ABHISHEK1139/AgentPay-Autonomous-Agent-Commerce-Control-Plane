@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from agentpay.api.factory import create_app
+from agentpay.config.config import AppConfig
 from agentpay.server import run_server
 from agentpay.workers import BackgroundWorker
 
@@ -44,7 +45,10 @@ def _handle_serve(args: argparse.Namespace) -> int:
             print("[!] Warning: --with-web was specified but apps/web/dist was not found.")
             print("[!] Run 'npm --prefix apps/web run build' to generate the Web UI assets.")
 
-    app = create_app(database_url=db_url)
+    config = AppConfig.from_env()
+    if db_url:
+        config = config.with_overrides(database_url=db_url)
+    app = create_app(config=config)
     run_server(host=host, port=port, app=app, static_dir=static_dir, database_url=db_url)
     return 0
 

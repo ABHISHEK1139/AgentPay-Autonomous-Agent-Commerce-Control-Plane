@@ -48,6 +48,19 @@ class InMemoryApprovalRepository(ApprovalRepository):
             tenant_store = self._approvals.get(tenant_id, {})
             return [appr for appr in tenant_store.values() if appr.binding.action_id == action_id]
 
+    def list_pending(self, tenant_id: str | None = None) -> list[Approval]:
+        """List all pending approval requests within a tenant partition (or all tenants if None)."""
+        with self._lock:
+            if tenant_id is not None:
+                tenant_store = self._approvals.get(tenant_id, {})
+                return [appr for appr in tenant_store.values() if appr.is_pending]
+            return [
+                appr
+                for tenant_store in self._approvals.values()
+                for appr in tenant_store.values()
+                if appr.is_pending
+            ]
+
     def atomic_consume(self, tenant_id: str, approval_id: str) -> Approval:
         """Atomically verify and transition approval to CONSUMED under lock (§20, §177 Vector 10)."""
         with self._lock:

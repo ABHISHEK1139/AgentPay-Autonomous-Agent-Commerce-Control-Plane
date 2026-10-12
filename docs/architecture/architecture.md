@@ -1,6 +1,6 @@
 # AgentPay — Architecture
 
-> **Status**: Sprint 12 Complete — Full Autonomous Control Plane Verified  
+> **Status**: Remediation Complete — Full Autonomous Control Plane Verified (Engineering Preview)  
 > **Governing Specifications**: `AGENTS.md` (§8, §10, §18, §21, §45, §67, §107, §108, §176)  
 
 ---
@@ -17,7 +17,7 @@ The architecture follows a strict **modular monolith** with clean hexagonal boun
                                │ HTTP / Protocols
 ┌──────────────────────────────▼──────────────────────────────┐
 │                    API & PROTOCOL ADAPTERS                  │
-│   FastAPI / ASGI App  •  ACP  •  AP2  •  UAP  •  x402       │
+│ AgentPayApiApp (Zero-Dep HTTP) • ACP • AP2 • UAP • x402     │
 └──────────────────────────────┬──────────────────────────────┘
                                │ Commands / DTOs
 ┌──────────────────────────────▼──────────────────────────────┐
@@ -33,7 +33,7 @@ The architecture follows a strict **modular monolith** with clean hexagonal boun
                                │ Implements Ports
 ┌──────────────────────────────┴──────────────────────────────┐
 │                    PORTS & INFRASTRUCTURE                   │
-│   In-Memory Repositories  •  Mock PSP  •  Mock JEV Engine   │
+│ In-Memory & SQLAlchemy Repos • Sandbox & Mock Payment Gateways│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,7 +58,7 @@ Dependency direction is strictly inward:
 | `domain/commerce.py` | `Merchant`, `Product`, `ProductVariant`, `Inventory`, `MerchantStatus`. | Stock reservation state machine. Suspended merchants fail closed (§30, §37). |
 | `domain/evidence.py` | `EvidenceConflictDetector`, `EvidenceRecord`, `ConflictType`. | Pre-flight price and stock conflict detection. Fails closed before payment (§32, §33). |
 | `domain/decision.py` | `Decision`, `DecisionRecommendation`, `RiskLevel`. | Advisory AI (JEV / LLM). Strictly subordinate to deterministic policy engine (§2.2, §134). |
-| `domain/approval.py` | `Approval`, `ApprovalBinding`, `ApprovalStatus`, `ApprovalTier`, `ApprovalPolicy`. | Exact 7-field binding to action, amount, merchant, resource, currency, version, tenant. Single-use consumption (§20). |
+| `domain/approval.py` | `Approval`, `ApprovalBinding`, `ApprovalStatus`, `ApprovalTier`, `ApprovalPolicy`. | Exact 8-field binding to action, amount, merchant, resource, currency, version, tenant, principal. Single-use consumption (§20). |
 | `domain/payments.py` | `PaymentAttempt`, `PaymentStatus`, `Order`, `OrderStatus`, `Refund`, `IdempotencyRecord`. | Strict idempotency keys. On timeout, query provider; never blindly retry (§41, §43). |
 | `application/services/reconciliation_service.py` | `PaymentReconciler`. | Read-only provider query for UNKNOWN attempts; persists outcome; never creates, captures, or refunds (§43). |
 | `domain/audit.py` | `AuditEvent`, `AuditHasher`, `SensitiveFieldRedactor`, `AuditEventType`. | SHA-256 hash chaining over canonical JSON. Full metadata preimage validation (§29, §45). |
@@ -89,10 +89,10 @@ Built as an interactive, inspectable operator dashboard:
 
 ## 5. Deliberately Deferred & Operational Seams
 
-The following components are designed and architected, with concrete operational runbooks, but operate hermetically in-memory in the local environment because the local Docker daemon is not active:
-- **Persistent Database Daemon**: PostgreSQL schema definitions and WAL archiving procedures are specified (ADR-0001); test suites run against multi-tenant thread-safe in-memory repositories.
-- **Distributed Cache Daemon**: Redis AOF/RDB configuration is specified; in-memory thread-safe state trackers handle local execution.
-- **Live Merchant PSP Keys**: Payment provider operates against verified sandbox/mock gateways with the complete state machine and saga compensation lifecycle.
+The following components are designed, implemented, and verified with in-memory or SQLite adapters, ready for production deployment:
+- **Relational Persistence & Migrations**: SQLAlchemy 2.0 models and tenant-partitioned repositories are implemented (`infrastructure/database/`), verified against in-memory SQLite, and managed via Alembic migrations (`0001` through `0004`). Production deployment targets PostgreSQL with WAL archiving (ADR-0001).
+- **Distributed Cache & State**: Emergency pause and webhook deduplication persist to SQLite/PostgreSQL; in-process threading primitives provide fast-path caching.
+- **Payment Sandboxes (§151)**: Payment processing operates against real sandbox (`RazorpaySandboxProvider`) or mock adapters with the complete state machine and saga compensation lifecycle. Live-money processing is strictly disabled.
 
 ---
 

@@ -7,6 +7,7 @@ request body parsing, API dispatching, and optional Single Page Application (SPA
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import mimetypes
@@ -25,8 +26,11 @@ MAX_REQUEST_BODY_BYTES: int = 1024 * 1024  # 1 MiB payload limit (§62, B-SRV-01
 def create_request_handler(
     app: AgentPayApiApp,
     static_dir: Path | None = None,
+    allowed_origins: tuple[str, ...] | list[str] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Factory creating an HTTP request handler bound to the specified application and static directory."""
+
+    origins = tuple(allowed_origins) if allowed_origins is not None else ("*",)
 
     class AgentPayHttpHandler(BaseHTTPRequestHandler):
         server_version = "AgentPay/0.1.0"
@@ -40,19 +44,32 @@ def create_request_handler(
             )
 
         def _send_cors_headers(self) -> None:
-            self.send_header("Access-Control-Allow-Origin", "*")
+            incoming_origin = self.headers.get("Origin", "").strip()
+            if "*" in origins:
+                self.send_header("Access-Control-Allow-Origin", "*")
+            elif incoming_origin and incoming_origin in origins:
+                self.send_header("Access-Control-Allow-Origin", incoming_origin)
+                self.send_header("Vary", "Origin")
+
             self.send_header(
                 "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD"
             )
             self.send_header(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Tenant-ID, X-API-Key, X-Request-ID, "
-                "X-Webhook-Signature, X-Webhook-Timestamp, Accept",
+                "X-Webhook-Signature, X-Webhook-Timestamp, X-Razorpay-Signature, "
+                "Stripe-Signature, Accept",
             )
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
 
         def do_OPTIONS(self) -> None:
+            incoming_origin = self.headers.get("Origin", "").strip()
+            if "*" not in origins and incoming_origin not in origins:
+                self.send_response(403)
+                self.end_headers()
+                return
+
             self.send_response(204)
             self._send_cors_headers()
             self.end_headers()
@@ -79,6 +96,9 @@ def create_request_handler(
                         break
             except Exception:
                 pass
+            finally:
+                with contextlib.suppress(Exception):
+                    self.connection.setblocking(True)
 
         def _handle_request(self, method: str) -> None:
             clean_path = self.path.split("?")[0]
@@ -242,12 +262,15 @@ def create_server(
     app: AgentPayApiApp | None = None,
     static_dir: Path | str | None = None,
     database_url: str | None = None,
+    allowed_origins: tuple[str, ...] | list[str] | None = None,
 ) -> ThreadingHTTPServer:
     """Create a configured multi-threaded HTTP server instance."""
     app_instance = app or create_app(database_url=database_url)
     resolved_static = Path(static_dir) if static_dir else None
 
-    handler_cls = create_request_handler(app_instance, resolved_static)
+    handler_cls = create_request_handler(
+        app_instance, resolved_static, allowed_origins=allowed_origins
+    )
     server = ThreadingHTTPServer((host, port), handler_cls)
     return server
 
@@ -258,6 +281,7 @@ def run_server(
     app: AgentPayApiApp | None = None,
     static_dir: Path | str | None = None,
     database_url: str | None = None,
+    allowed_origins: tuple[str, ...] | list[str] | None = None,
 ) -> None:
     """Run the AgentPay HTTP server until interrupted."""
     server = create_server(
@@ -266,6 +290,7 @@ def run_server(
         app=app,
         static_dir=static_dir,
         database_url=database_url,
+        allowed_origins=allowed_origins,
     )
     logger.info("AgentPay Control Plane running on http://%s:%s", host, port)
     logger.info("Health check: http://%s:%s/api/v1/health", host, port)

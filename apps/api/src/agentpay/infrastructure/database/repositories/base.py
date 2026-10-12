@@ -21,4 +21,11 @@ class BaseSqlAlchemyRepository:
             yield self._session_or_factory
         else:
             with self._session_or_factory() as session:
-                yield session
+                try:
+                    yield session
+                except Exception:
+                    session.rollback()
+                    raise
+                else:
+                    if session.is_active:
+                        session.commit()

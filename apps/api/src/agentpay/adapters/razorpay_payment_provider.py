@@ -35,8 +35,12 @@ class RazorpayWebhookSignatureError(InvalidPaymentError):
     code = "RAZORPAY_WEBHOOK_SIGNATURE_INVALID"
 
 
-class RazorpayPaymentProvider(PaymentProvider):
-    """Razorpay implementation of PaymentProvider port with HMAC signature verification."""
+class InMemoryRazorpaySimulator(PaymentProvider):
+    """Thread-safe in-memory test simulator for Razorpay PSP behavior (§39, §41, §42, §61).
+
+    Simulates Razorpay order creation, payment capture, and refunds using local
+    dictionary storage and synthetic IDs. Makes zero outbound network calls.
+    """
 
     def __init__(
         self,
@@ -237,13 +241,8 @@ class RazorpayPaymentProvider(PaymentProvider):
         payment_entity = payload_entity.get("payment", {}).get("entity", {})
 
         notes = payment_entity.get("notes", {})
-        attempt_id = (
-            notes.get("attempt_id")
-            or notes.get("payment_attempt_id")
-            or payment_entity.get("id")
-            or ""
-        )
-        tenant_id = notes.get("tenant_id") or "tenant_01"
+        attempt_id = str(notes.get("attempt_id") or notes.get("payment_attempt_id") or "").strip()
+        tenant_id = str(notes.get("tenant_id") or "").strip()
 
         type_mapping = {
             "payment.captured": "payment.captured",
@@ -266,3 +265,13 @@ class RazorpayPaymentProvider(PaymentProvider):
                 "received_at": datetime.now(UTC).isoformat(),
             },
         }
+
+
+# Backward compatibility alias for legacy imports (§39, AP-004)
+RazorpayPaymentProvider = InMemoryRazorpaySimulator
+
+__all__ = [
+    "InMemoryRazorpaySimulator",
+    "RazorpayPaymentProvider",
+    "RazorpayWebhookSignatureError",
+]

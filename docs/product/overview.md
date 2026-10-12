@@ -15,7 +15,7 @@ It allows AI agents to perform real-world actions on behalf of humans or enterpr
 - **Authorization & Permissions**: Least privilege capability gating, fixed tool registries.
 - **Financial Limits**: Minor-unit budgeting, daily/monthly spend caps, multi-tier approval thresholds.
 - **Evidence Verification**: Cross-referencing quoted prices against merchant feeds; conflict detection.
-- **Human Approval**: Exact 7-field cryptographic binding for human-in-the-loop signoff.
+- **Human Approval**: Exact 8-field cryptographic binding for human-in-the-loop signoff.
 - **Safe Execution & Recovery**: Idempotent payments, saga compensation rollbacks, read-only timeout reconciliation.
 - **Auditability**: SHA-256 hash-chained immutable audit ledger.
 

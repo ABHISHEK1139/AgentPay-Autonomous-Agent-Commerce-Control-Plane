@@ -52,6 +52,7 @@ class ApprovalService:
             currency=action.amount.currency,
             action_version=action.version,
             tenant_id=tenant_id,
+            principal_id=action.principal_id,
         )
 
         approval_id = f"appr_{uuid.uuid4().hex[:16]}"
@@ -67,6 +68,9 @@ class ApprovalService:
             self._repo.save(tenant_id, approval)
 
         return approval
+
+    # Alias for specification consistency
+    create_approval_request = create_approval
 
     def verify_binding(self, approval: Approval, action: ActionRequest) -> bool:
         """Strictly verify that an approval binds to the action request being executed (§20, §0.4).
@@ -85,8 +89,12 @@ class ApprovalService:
             currency=action.amount.currency,
             action_version=action.version,
             tenant_id=action.tenant_id,
+            principal_id=action.principal_id,
         )
         return True
+
+    # Alias for specification consistency
+    verify_approval_binding = verify_binding
 
     def grant_approval(
         self,

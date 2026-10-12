@@ -29,7 +29,7 @@ This section is the map of what actually exists:
   audit-chain verifier CLI (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
   (`scripts/generate_sbom.py --verify`).
 - **Backend confirmed present:** 16 domain modules (`Money` + ISO 4217 `currencies` exponent table,
-  `ActionRequest`, identity, policy, approval with exact 7-field binding, SHA-256 chained audit
+  `ActionRequest`, identity, policy, approval with exact 8-field binding, SHA-256 chained audit
   ledger with redaction, commerce, evidence conflicts, payments, decision, safety budgets, tool
   registry, `OutboxEvent`, `SecurityEvent`); application ports, services (`AgentAuthorizationService`,
   `ApprovalService`, `PaymentReconciler` with webhook state-machine guards, `PurchaseOrchestrator`,
@@ -147,7 +147,7 @@ code, and no schedule pressure, test failure, or model output overrides them.
   cache keys are namespaced per tenant. Cross-tenant denial must be tested, not assumed.
 - **Financial operations are idempotent** (§42): create payment, capture, create order, refund. On
   timeout, query the provider — never blindly retry a charge (§43).
-- **Approval binds to the exact action, amount, merchant, resource, currency, and action version**
+- **Approval binds to the exact action, amount, currency, merchant, resource, action version, principal, and tenant**
   (§20). Approval for ₹5,000 never authorizes ₹50,000, and a reused approval is a security bug.
 - **Payment state is not order state** (§41). Never infer payment success from a frontend redirect;
   verify with the provider. Minimize payment data — no card numbers, no CVV (§40).
@@ -1199,12 +1199,14 @@ Example:
 
 Approval must bind to the exact:
 
-- action
+- action_id
 - amount
-- merchant
-- resource
 - currency
-- action version
+- merchant_id
+- resource_id
+- action_version
+- principal_id
+- tenant_id
 
 Approval for ₹5,000 must not automatically authorize ₹50,000.
 

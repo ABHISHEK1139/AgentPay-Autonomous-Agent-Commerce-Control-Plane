@@ -20,6 +20,9 @@ from agentpay.adapters.in_memory.commerce_repository import (
     InMemoryProductRepository,
     InMemoryVariantRepository,
 )
+from agentpay.adapters.in_memory.emergency_pause_store import (
+    InMemoryEmergencyPauseStore,
+)
 from agentpay.adapters.in_memory.identity_repository import (
     InMemoryAgentPermissionsRepository,
     InMemoryAgentRepository,
@@ -30,13 +33,26 @@ from agentpay.adapters.in_memory.payment_repository import (
     InMemoryIdempotencyStore,
     InMemoryOrderRepository,
     InMemoryPaymentRepository,
+    InMemoryProviderWebhookEventRepository,
 )
 from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
+from agentpay.adapters.model_gateway.model_gateway import ModelGateway
+from agentpay.adapters.razorpay_payment_provider import InMemoryRazorpaySimulator
+from agentpay.adapters.razorpay_sandbox_provider import RazorpaySandboxProvider
+from agentpay.adapters.stripe_payment_provider import InMemoryStripeSimulator
 from agentpay.api.app import AgentPayApiApp
+from agentpay.application.ports.approval_port import DecisionEngine
+from agentpay.application.ports.payment_port import PaymentProvider
 from agentpay.application.services.approval_service import ApprovalService
 from agentpay.application.services.identity_service import AgentAuthorizationService
 from agentpay.application.use_cases.purchase_flow import PurchaseOrchestrator
+from agentpay.config.config import (
+    AppConfig,
+    ConfigValidationError,
+    DecisionEngineType,
+    PaymentProviderType,
+)
 from agentpay.domain.commerce import (
     Inventory,
     Merchant,
@@ -78,6 +94,9 @@ from agentpay.infrastructure.database.repositories.commerce_repository import (
 from agentpay.infrastructure.database.repositories.credential_repository import (
     SqlAlchemyCredentialRepository,
 )
+from agentpay.infrastructure.database.repositories.emergency_pause_repository import (
+    SqlAlchemyEmergencyPauseRepository,
+)
 from agentpay.infrastructure.database.repositories.order_repository import (
     SqlAlchemyOrderRepository,
 )
@@ -87,6 +106,9 @@ from agentpay.infrastructure.database.repositories.payment_repository import (
 )
 from agentpay.infrastructure.database.repositories.tenant_repository import (
     SqlAlchemyTenantRepository,
+)
+from agentpay.infrastructure.database.repositories.webhook_event_repository import (
+    SqlAlchemyProviderWebhookEventRepository,
 )
 from agentpay.infrastructure.database.session import (
     create_database_engine,
@@ -261,19 +283,86 @@ def seed_initial_demo_data(
     )
 
 
-def create_app(
-    database_url: str | None = None,
-    seed_demo_data: bool = True,
-    tenant_id: str = "tenant_01",
-    webhook_secret: str = "whsec_agentpay_default_secure_secret_32bytes",
-    require_observability_auth: bool = False,
-) -> AgentPayApiApp:
-    """Instantiate and wire a complete AgentPay application instance (§8, §13, §49).
+def _verify_database_schema_ready(engine: Any) -> None:
+    """Verify that required database tables exist in sandbox/production before application boot (§49, AP-007).
 
-    If `database_url` is provided (e.g. `sqlite:///agentpay.db` or PostgreSQL connection URI),
-    relational SQLAlchemy 2.0 repositories and schemas will be initialized.
-    Otherwise, thread-safe in-memory repository adapters will be used.
+    Deployments must run migrations explicitly (e.g. `alembic upgrade head` or `agentpay migrate`).
+    Fails fast if migrations have not been applied.
     """
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    required_tables = {
+        "tenants",
+        "agents",
+        "agent_permissions",
+        "credentials",
+        "merchants",
+        "products",
+        "product_variants",
+        "inventory",
+        "approvals",
+        "payment_attempts",
+        "orders",
+        "idempotency_records",
+        "audit_events",
+        "provider_webhook_events",
+        "provider_transaction_mappings",
+        "emergency_pause_records",
+    }
+    missing = required_tables - existing_tables
+    if missing or "alembic_version" not in existing_tables:
+        missing_desc = sorted(missing or {"alembic_version"})
+        raise ConfigValidationError(
+            f"Database schema is not ready for environment. Missing required tables: {missing_desc}. "
+            "Run 'agentpay migrate' or 'alembic upgrade head' before starting in production or sandbox mode (§49, AP-007)."
+        )
+
+
+def create_app(
+    config_or_db: AppConfig | str | None = None,
+    *,
+    config: AppConfig | None = None,
+    database_url: str | None = None,
+    seed_demo_data: bool | None = None,
+    tenant_id: str | None = None,
+    webhook_secret: str | None = None,
+    require_observability_auth: bool | None = None,
+    payment_provider: PaymentProvider | None = None,
+    decision_engine: DecisionEngine | None = None,
+) -> AgentPayApiApp:
+    """Instantiate and wire a complete AgentPay application instance (§8, §13, §49, AP-005).
+
+    Resolves validated immutable AppConfig, dynamically constructs configured payment provider
+    and decision engine, and wires persistence repositories.
+    """
+    # 1. Resolve configuration
+    if isinstance(config_or_db, AppConfig):
+        cfg = config_or_db
+    elif config is not None:
+        cfg = config
+    else:
+        cfg = AppConfig.from_env()
+
+    overrides: dict[str, Any] = {}
+    if isinstance(config_or_db, str):
+        overrides["database_url"] = config_or_db
+    if database_url is not None:
+        overrides["database_url"] = database_url
+    if seed_demo_data is not None:
+        overrides["seed_demo_data"] = seed_demo_data
+    if tenant_id is not None:
+        overrides["tenant_id"] = tenant_id
+    if webhook_secret is not None:
+        overrides["razorpay_webhook_secret"] = webhook_secret
+        overrides["stripe_webhook_secret"] = webhook_secret
+    if require_observability_auth is not None:
+        overrides["require_observability_auth"] = require_observability_auth
+
+    if overrides:
+        cfg = cfg.with_overrides(**overrides)
+
     tenant_repo: Any
     agent_repo: Any
     perms_repo: Any
@@ -288,10 +377,15 @@ def create_app(
     order_repo: Any
     idempotency_store: Any
     audit_ledger: Any
+    webhook_event_repo: Any
+    emergency_pause_store: Any
 
-    if database_url:
-        engine = create_database_engine(database_url)
-        Base.metadata.create_all(engine)
+    if cfg.database_url:
+        engine = create_database_engine(cfg.database_url)
+        if cfg.is_production_like:
+            _verify_database_schema_ready(engine)
+        else:
+            Base.metadata.create_all(engine)
         session_factory = create_session_factory(engine)
 
         tenant_repo = SqlAlchemyTenantRepository(session_factory)
@@ -308,6 +402,8 @@ def create_app(
         order_repo = SqlAlchemyOrderRepository(session_factory)
         idempotency_store = SqlAlchemyIdempotencyStore(session_factory)
         audit_ledger = SqlAlchemyAuditRepository(session_factory)
+        webhook_event_repo = SqlAlchemyProviderWebhookEventRepository(session_factory)
+        emergency_pause_store = SqlAlchemyEmergencyPauseRepository(session_factory)
     else:
         tenant_repo = InMemoryTenantRepository()
         agent_repo = InMemoryAgentRepository()
@@ -323,9 +419,41 @@ def create_app(
         order_repo = InMemoryOrderRepository()
         idempotency_store = InMemoryIdempotencyStore()
         audit_ledger = InMemoryAuditLedger()
+        webhook_event_repo = InMemoryProviderWebhookEventRepository()
+        emergency_pause_store = InMemoryEmergencyPauseStore()
 
-    payment_provider = MockPaymentProvider()
-    decision_engine = MockDecisionEngine()
+    # 2. Dynamically wire PaymentProvider
+    if payment_provider is None:
+        if cfg.payment_provider == PaymentProviderType.MOCK:
+            payment_provider = MockPaymentProvider()
+        elif cfg.payment_provider == PaymentProviderType.IN_MEMORY_RAZORPAY:
+            payment_provider = InMemoryRazorpaySimulator(
+                key_id=cfg.razorpay_key_id or "rzp_test_placeholder_id",
+                key_secret=cfg.razorpay_key_secret or "rzp_test_placeholder_secret",
+                webhook_secret=cfg.razorpay_webhook_secret,
+            )
+        elif cfg.payment_provider == PaymentProviderType.IN_MEMORY_STRIPE:
+            payment_provider = InMemoryStripeSimulator(
+                api_key=cfg.stripe_api_key or "sk_test_placeholder_key_for_testing",
+                webhook_secret=cfg.stripe_webhook_secret,
+            )
+        elif cfg.payment_provider == PaymentProviderType.RAZORPAY_SANDBOX:
+            payment_provider = RazorpaySandboxProvider(
+                key_id=cfg.razorpay_key_id or "",
+                key_secret=cfg.razorpay_key_secret or "",
+                webhook_secret=cfg.razorpay_webhook_secret,
+            )
+        else:
+            raise ConfigValidationError(f"Unsupported payment provider: {cfg.payment_provider}")
+
+    # 3. Dynamically wire DecisionEngine
+    if decision_engine is None:
+        if cfg.decision_engine == DecisionEngineType.MOCK:
+            decision_engine = MockDecisionEngine()
+        elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
+            decision_engine = ModelGateway()
+        else:
+            raise ConfigValidationError(f"Unsupported decision engine: {cfg.decision_engine}")
 
     auth_service = AgentAuthorizationService(
         tenant_repo=tenant_repo,
@@ -354,9 +482,9 @@ def create_app(
         audit_ledger=audit_ledger,
     )
 
-    if seed_demo_data:
+    if cfg.seed_demo_data:
         seed_initial_demo_data(
-            tenant_id=tenant_id,
+            tenant_id=cfg.tenant_id,
             tenant_repo=tenant_repo,
             agent_repo=agent_repo,
             perms_repo=perms_repo,
@@ -371,7 +499,10 @@ def create_app(
         orchestrator=orchestrator,
         credential_repo=credential_repo,
         idempotency_store=idempotency_store,
-        webhook_secret=webhook_secret,
-        require_observability_auth=require_observability_auth,
+        webhook_event_repo=webhook_event_repo,
+        emergency_pause_store=emergency_pause_store,
+        webhook_secret=cfg.razorpay_webhook_secret,
+        require_observability_auth=cfg.require_observability_auth,
+        config=cfg,
     )
     return app

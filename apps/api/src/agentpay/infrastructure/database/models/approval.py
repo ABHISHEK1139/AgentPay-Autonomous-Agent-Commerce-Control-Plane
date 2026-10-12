@@ -34,8 +34,12 @@ class ApprovalModel(Base):
     approver_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    principal_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", server_default="", index=True
+    )
 
     __table_args__ = (
         Index("ix_approvals_tenant_action", "tenant_id", "action_id"),
         Index("ix_approvals_tenant_status", "tenant_id", "status"),
+        Index("ix_approvals_tenant_principal", "tenant_id", "principal_id"),
     )

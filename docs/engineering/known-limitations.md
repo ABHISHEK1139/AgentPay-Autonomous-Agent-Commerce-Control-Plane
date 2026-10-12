@@ -23,11 +23,11 @@ Things a future engineer will otherwise discover the hard way.
 - **Single-Item Atomic Purchase Slice**: While the data model supports carts and multi-item orders, the primary
   hardened orchestrator (`PurchaseOrchestrator`) specializes in atomic single-variant purchase actions with
   pre-flight conflict detection.
-- **Mock Payment Provider Only**: The payment subsystem uses a mock provider (`MockPaymentProvider`,
-  labelled `mock_razorpay`) implementing the payment state machine (`CREATED`, `AUTHORIZED`,
-  `CAPTURED`, `FAILED`, `UNKNOWN`, `REFUNDED`), idempotency checking, and saga compensation. Incoming
-  payment webhooks (`POST /api/v1/webhooks/payments`) are verified with HMAC-SHA256 and 300s replay windows,
-  but there is no live external PSP gateway SDK in `src`.
+- **Mock and Sandbox Payment Providers (No Live Money, §151)**: The payment subsystem provides
+  both hermetic in-memory mock adapters (`MockPaymentProvider`) and a dedicated sandbox adapter
+  (`RazorpaySandboxProvider`) implementing authoritative status queries, SAGA inventory rollback,
+  HMAC-SHA256 signature verification, and durable database-backed webhook deduplication. Live-money
+  production execution is strictly disabled (§151).
 
 ## AI & Intelligence Boundaries
 

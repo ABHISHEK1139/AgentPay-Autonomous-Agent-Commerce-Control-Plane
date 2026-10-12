@@ -80,6 +80,22 @@ def test_alembic_upgrade_and_downgrade_lifecycle() -> None:
             "idempotency_key",
         }.issubset(payment_cols)
 
+        webhook_cols = {c["name"] for c in inspector.get_columns("provider_webhook_events")}
+        assert {
+            "id",
+            "provider",
+            "provider_account_id",
+            "event_id",
+            "status",
+            "received_at",
+        }.issubset(webhook_cols)
+
+        approval_cols = {c["name"] for c in inspector.get_columns("approvals")}
+        assert "principal_id" in approval_cols
+
+        pause_cols = {c["name"] for c in inspector.get_columns("emergency_pause_records")}
+        assert {"scope", "is_paused", "paused_by", "reason", "paused_at"}.issubset(pause_cols)
+
         # 5. Verify domain repository works against the migrated database
         session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
         tenant_repo = SqlAlchemyTenantRepository(session_factory)
@@ -96,6 +112,17 @@ def test_alembic_upgrade_and_downgrade_lifecycle() -> None:
         assert retrieved.tenant_id == "tenant_migrated_01"
         assert retrieved.name == "Migrated Org"
         assert retrieved.status == TenantStatus.ACTIVE
+
+        from agentpay.infrastructure.database.repositories.emergency_pause_repository import (
+            SqlAlchemyEmergencyPauseRepository,
+        )
+
+        pause_repo = SqlAlchemyEmergencyPauseRepository(session_factory)
+        pause_repo.pause("op_migrated", "Maintenance", "tenant:tenant_migrated_01")
+        assert pause_repo.is_paused_for("tenant_migrated_01") is True
+        assert pause_repo.is_paused_for("tenant_other") is False
+        pause_repo.resume("op_migrated", "tenant:tenant_migrated_01")
+        assert pause_repo.is_paused_for("tenant_migrated_01") is False
 
         # 6. Run downgrade to base
         command.downgrade(config, "base")
@@ -120,18 +147,34 @@ def test_alembic_offline_sql_generation(capsys: pytest.CaptureFixture[str]) -> N
     assert "CREATE TABLE" in captured.out
     assert "tenants" in captured.out
     assert "payment_attempts" in captured.out
+    assert "provider_webhook_events" in captured.out
     assert "0001_initial_schema" in captured.out
 
 
 def test_alembic_current_and_heads_inspection() -> None:
-    """Alembic heads and script directory inspection reports 0001_initial_schema (§49)."""
+    """Alembic heads and script directory inspection reports 0003_add_approval_binding_principal (§49)."""
     config = get_alembic_config("sqlite:///:memory:")
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0001_initial_schema"]
+    assert heads == ["0004_add_emergency_pause_records"]
 
-    rev = script.get_revision("0001_initial_schema")
-    assert rev is not None
-    assert rev.doc == "initial_schema"
+    rev1 = script.get_revision("0001_initial_schema")
+    assert rev1 is not None
+    assert rev1.doc == "initial_schema"
+
+    rev2 = script.get_revision("0002_add_provider_webhook_events")
+    assert rev2 is not None
+    assert rev2.doc == "add_provider_webhook_events"
+    assert rev2.down_revision == "0001_initial_schema"
+
+    rev3 = script.get_revision("0003_add_approval_binding_principal")
+    assert rev3 is not None
+    assert rev3.doc == "add_approval_binding_principal"
+    assert rev3.down_revision == "0002_add_provider_webhook_events"
+
+    rev4 = script.get_revision("0004_add_emergency_pause_records")
+    assert rev4 is not None
+    assert rev4.doc == "add_emergency_pause_records"
+    assert rev4.down_revision == "0003_add_approval_binding_principal"

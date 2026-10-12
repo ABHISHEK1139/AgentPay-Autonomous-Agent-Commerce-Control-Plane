@@ -446,3 +446,64 @@ The following programmatic test commands must be executed and pass with 0 errors
 - [ ] Stripe and Razorpay webhook signature verification, replay protection, and reconciliation pass all contract tests.
 - [ ] Frontend Control Center builds without TypeScript/Vite errors and successfully dispatches live authenticated requests to backend endpoints.
 - [ ] All 4 CI gates and all 9 auxiliary adversarial stress suites pass with 100% success.
+
+
+## Follow-up — 2026-10-12T04:04:29Z
+
+Execute and complete the comprehensive engineering remediation and hardening plan for AgentPay based on AgentPay_Implementation_Remediation_Report.md, systematically resolving findings AP-001 through AP-017 across 12 incremental agile milestones to deliver an independently verifiable, sandbox-hardened release candidate.
+
+Working directory: c:\Users\ak612\OneDrive\Desktop\platfrom
+Integrity mode: development
+Reference document: AgentPay_Implementation_Remediation_Report.md
+
+## Requirements
+
+### R1. Webhook Security & Tenant Identity Mapping (AP-001, AP-002, AP-003)
+- Remove any fallback tenant assignment (or "tenant_01") from all webhook parsers; resolve tenant identity exclusively from authenticated stored provider account connections and persisted transaction mappings.
+- Implement distinct, provider-specific webhook ingress routes (e.g. /api/v1/webhooks/razorpay and /api/v1/webhooks/stripe), validating raw request body bytes with provider-native signature algorithms and constant-time digest comparison.
+- Add durable, database-backed webhook deduplication table (provider_webhook_events) with database uniqueness constraint on (provider, provider_account_id, event_id) that survives restarts and multi-process concurrency.
+
+### R2. Explicit Provider Configuration & Runtime Separation (AP-004, AP-005)
+- Separate in-memory test simulators (renaming them to InMemoryRazorpaySimulator / InMemoryStripeSimulator) from real payment provider adapters (RazorpaySandboxProvider).
+- Introduce a validated, immutable application configuration object enforcing explicit runtime modes (mock, sandbox, live, with live disabled by default).
+- Ensure sandbox mode requires valid credentials and fails startup if missing or using placeholder secrets; reject demo-seed credentials outside local development mode.
+
+### R3. Comprehensive Approval Binding & Shared State Integrity (AP-006, AP-008)
+- Update ApprovalBinding to bind both principal_id and tenant_id alongside action ID, amount, currency, merchant, resource, and action version, backed by an ADR and schema migration.
+- Enforce atomic single-use approval consumption in the persistence layer, and re-verify live catalog price, inventory stock, and agent permissions prior to execution.
+- Persist emergency kill-switch pause state to shared/database storage with tenant and global scope support, failing closed if safety state is unreachable.
+
+### R4. Database Migrations, Auth Profiles & Deployment Hardening (AP-007, AP-009, AP-010)
+- Decouple schema migration from application startup: require explicit alembic upgrade head before application boot, with startup validating schema readiness.
+- Implement a fail-closed production authentication profile that derives tenant identity from verified credentials and rejects caller-asserted tenant header overrides.
+- Explicitly delineate the built-in development HTTP server (server.py) from production ASGI deployment profiles, configuring CORS allowed origins and request timeouts.
+
+### R5. Model Advisory Contract, Concurrency & Saga Verification (AP-011, AP-015, AP-017)
+- Maintain strict supremacy of the deterministic policy engine: advisory model/JEV outputs cannot expand permissions or bypass spending limits under any prompt injection or malformed response.
+- Harden concurrency, saga rollback compensation, and timeout reconciliation across inventory reservations and payment attempts, preventing double charges or orphaned holds.
+- Sanitize sensitive PCI/PII data across nested error payloads, headers, and logs, preserving tamper-evident SHA-256 chained audit integrity.
+
+### R6. Protocol Conformance & Truthful Documentation (AP-012, AP-013, AP-014, AP-016)
+- Maintain an accurate protocol register: correct ACP to "Agentic Commerce Protocol" mapped to the OpenAI spec, verify AP2 and x402 schemas, and treat UAP as internal.
+- Update all documentation (README.md, AGENTS.md, BUGS.md, docs/) to use truthful status vocabulary (Implemented, Unit-tested, Sandbox-verified, Production-ready).
+- Enhance CI workflow with database migration verification and dependency security scans.
+
+## Acceptance Criteria
+
+### Security & Financial Invariants
+- [ ] No webhook handler assigns unverified events to tenant_01 or any default tenant.
+- [ ] Provider signatures are verified against raw request bytes using provider-specific algorithms.
+- [ ] Webhook replay across process restarts is blocked via database-enforced event uniqueness.
+- [ ] Sandbox mode startup fails closed if credentials are missing or placeholders.
+- [ ] Human approval binds to both principal_id and tenant_id and is consumed atomically.
+- [ ] Emergency pause is shared across application instances and halts mutating operations fail-closed.
+- [ ] Saga rollbacks release reserved inventory on payment decline or network timeout.
+
+### Verification & Quality Gates
+- [ ] uv run ruff format --check . passes cleanly across all Python files.
+- [ ] uv run ruff check . passes with zero lint errors.
+- [ ] uv run mypy passes in strict mode across all source files.
+- [ ] uv run pytest passes 100% of unit, property, and integration tests.
+- [ ] node --test tests/web.test.mjs passes all web control center suites.
+- [ ] All architectural boundary tests (test_architecture_boundaries.py) pass with 0 forbidden imports.
+- [ ] All documentation accurately states verified capabilities without unverified certification claims.

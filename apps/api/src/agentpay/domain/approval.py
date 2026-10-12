@@ -36,7 +36,8 @@ class ApprovalBinding:
     """Immutable cryptographically/logically bound scope of an approval (§20, §0.4).
 
     Approval binds to the EXACT action_id, amount, merchant, resource, currency,
-    action version, and tenant. An approval granted for ₹5,000 never authorizes ₹50,000.
+    action version, tenant, and principal. An approval granted for ₹5,000 never authorizes ₹50,000,
+    and an approval granted to principal Alice never authorizes principal Bob.
     """
 
     action_id: str
@@ -46,6 +47,7 @@ class ApprovalBinding:
     currency: str
     action_version: int
     tenant_id: str
+    principal_id: str = "user_01"
 
     def __post_init__(self) -> None:
         strings: tuple[tuple[str, object], ...] = (
@@ -54,6 +56,7 @@ class ApprovalBinding:
             ("resource_id", self.resource_id),
             ("currency", self.currency),
             ("tenant_id", self.tenant_id),
+            ("principal_id", self.principal_id),
         )
         for name, val in strings:
             val_obj: object = val
@@ -85,6 +88,7 @@ class ApprovalBinding:
         currency: str,
         action_version: int,
         tenant_id: str,
+        principal_id: str = "user_01",
     ) -> bool:
         """Check whether this binding matches the execution request exactly (§20)."""
         return (
@@ -95,6 +99,7 @@ class ApprovalBinding:
             and self.currency == currency
             and self.action_version == action_version
             and self.tenant_id == tenant_id
+            and self.principal_id == principal_id
         )
 
     def assert_exact_match(
@@ -106,11 +111,16 @@ class ApprovalBinding:
         currency: str,
         action_version: int,
         tenant_id: str,
+        principal_id: str = "user_01",
     ) -> None:
         """Assert exact match or raise ApprovalBindingMismatchError (§0.4, §20)."""
         if self.tenant_id != tenant_id:
             raise ApprovalBindingMismatchError(
                 f"Tenant mismatch: approval bound to '{self.tenant_id}', got '{tenant_id}'"
+            )
+        if self.principal_id != principal_id:
+            raise ApprovalBindingMismatchError(
+                f"Principal mismatch: approval bound to '{self.principal_id}', got '{principal_id}'"
             )
         if self.action_id != action_id:
             raise ApprovalBindingMismatchError(

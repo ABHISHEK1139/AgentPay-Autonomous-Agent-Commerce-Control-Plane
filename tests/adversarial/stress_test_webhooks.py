@@ -7,6 +7,8 @@ Exhaustively probes:
 4. Probe 4: Cross-tenant payment access fail-closed isolation.
 5. Probe 5: Multithreaded race condition (30 concurrent threads racing same webhook delivery).
 6. Probe 6: SAGA inventory compensation on payment failures and refunds.
+7. Probe 7: Restart resilience across application restarts on durable storage (AP-003).
+8. Probe 8: Multi-instance concurrency race across separate application nodes (AP-003).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import hashlib
 import hmac
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,7 @@ sys.path.insert(0, str(Path("apps/api/tests/unit").resolve()))
 from test_purchase_flow import setup_orchestrator  # type: ignore[import-not-found]
 
 from agentpay.api.app import AgentPayApiApp, ApiTestClient
+from agentpay.api.factory import create_app
 from agentpay.domain.audit import AuditEventType
 from agentpay.domain.money import Money
 from agentpay.domain.payments import (
@@ -34,6 +38,7 @@ from agentpay.domain.payments import (
     OrderStatus,
     PaymentAttempt,
     PaymentStatus,
+    WebhookEventStatus,
 )
 
 
@@ -442,6 +447,158 @@ def probe_saga_compensation_invariants() -> dict[str, Any]:
     }
 
 
+def probe_restart_resilience_durable_dedup() -> dict[str, Any]:
+    """Probe 7: Verify restart resilience across application restarts on durable storage (§61, AP-003)."""
+    violations: list[str] = []
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        db_file = Path(tmp_dir) / "stress_restart.db"
+        db_url = f"sqlite:///{db_file}"
+
+        app1 = create_app(database_url=db_url, seed_demo_data=True, tenant_id="tenant_01")
+        client1 = ApiTestClient(app1)
+
+        attempt = PaymentAttempt(
+            attempt_id="att_adv_res_01",
+            intent_id="intent_adv_res_01",
+            tenant_id="tenant_01",
+            amount=Money(99900, "INR"),
+            status=PaymentStatus.CREATED,
+            idempotency_key="idem_adv_res_01",
+            provider="mock",
+        )
+        assert app1.orchestrator._payment_repo is not None
+        app1.orchestrator._payment_repo.save("tenant_01", attempt)
+
+        order = Order(
+            order_id="ord_adv_res_01",
+            tenant_id="tenant_01",
+            merchant_id="merch_01",
+            buyer_id="user_01",
+            agent_id="agent_01",
+            variant_id="var_01",
+            quantity=1,
+            total_amount=Money(99900, "INR"),
+            status=OrderStatus.PENDING_PAYMENT,
+            payment_attempt_id="att_adv_res_01",
+        )
+        assert app1.orchestrator._order_repo is not None
+        app1.orchestrator._order_repo.save("tenant_01", order)
+
+        payload = {
+            "event_id": "evt_adv_restart_dedup_01",
+            "event_type": "payment.captured",
+            "attempt_id": "att_adv_res_01",
+            "provider": "mock",
+            "amount": {"minor_units": 99900, "currency": "INR"},
+        }
+
+        r1 = client1.post_webhook("payment.captured", payload)
+        if r1.status_code != 200:
+            violations.append(f"Initial delivery failed with {r1.status_code}: {r1.body}")
+
+        # Simulate restart: new app instance with empty L1 cache
+        app2 = create_app(database_url=db_url, seed_demo_data=False, tenant_id="tenant_01")
+        client2 = ApiTestClient(app2)
+
+        if len(app2._processed_webhook_events) != 0:
+            violations.append("App 2 in-memory cache was not empty on startup")
+
+        r2 = client2.post_webhook("payment.captured", payload)
+        if r2.status_code != 409:
+            violations.append(f"Replay against fresh App 2 returned {r2.status_code}, expected 409")
+        if r2.body.get("error", {}).get("code") != "WEBHOOK_REPLAY_DETECTED":
+            violations.append(f"Expected code WEBHOOK_REPLAY_DETECTED, got {r2.body}")
+
+        stored = (
+            app2.webhook_event_repo.find_by_provider_event("mock", "evt_adv_restart_dedup_01")
+            if app2.webhook_event_repo
+            else None
+        )
+        if stored is None or stored.status != WebhookEventStatus.PROCESSED:
+            violations.append(f"Durable event record not found or not PROCESSED: {stored}")
+
+    return {
+        "probe": "probe_restart_resilience_durable_dedup",
+        "passed": len(violations) == 0,
+        "violations": violations,
+    }
+
+
+def probe_multi_instance_concurrency_race() -> dict[str, Any]:
+    """Probe 8: Multithreaded race condition across multiple app instances sharing durable repository (§61, AP-003)."""
+    violations: list[str] = []
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        db_file = Path(tmp_dir) / "stress_multi_race.db"
+        db_url = f"sqlite:///{db_file}"
+
+        app_a = create_app(database_url=db_url, seed_demo_data=True, tenant_id="tenant_01")
+        app_b = create_app(database_url=db_url, seed_demo_data=False, tenant_id="tenant_01")
+
+        attempt = PaymentAttempt(
+            attempt_id="att_adv_multi_01",
+            intent_id="intent_adv_multi_01",
+            tenant_id="tenant_01",
+            amount=Money(99900, "INR"),
+            status=PaymentStatus.CREATED,
+            idempotency_key="idem_adv_multi_01",
+            provider="mock",
+        )
+        assert app_a.orchestrator._payment_repo is not None
+        app_a.orchestrator._payment_repo.save("tenant_01", attempt)
+
+        order = Order(
+            order_id="ord_adv_multi_01",
+            tenant_id="tenant_01",
+            merchant_id="merch_01",
+            buyer_id="user_01",
+            agent_id="agent_01",
+            variant_id="var_01",
+            quantity=1,
+            total_amount=Money(99900, "INR"),
+            status=OrderStatus.PENDING_PAYMENT,
+            payment_attempt_id="att_adv_multi_01",
+        )
+        assert app_a.orchestrator._order_repo is not None
+        app_a.orchestrator._order_repo.save("tenant_01", order)
+
+        payload = {
+            "event_id": "evt_adv_multi_race_01",
+            "event_type": "payment.captured",
+            "attempt_id": "att_adv_multi_01",
+            "provider": "mock",
+            "amount": {"minor_units": 99900, "currency": "INR"},
+        }
+
+        results: list[int] = []
+
+        def _race_worker(idx: int) -> int:
+            app = app_a if idx % 2 == 0 else app_b
+            client = ApiTestClient(app)
+            resp = client.post_webhook("payment.captured", payload)
+            return resp.status_code
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(_race_worker, i) for i in range(20)]
+            for fut in concurrent.futures.as_completed(futures):
+                results.append(fut.result())
+
+        success_count = results.count(200)
+        conflict_count = results.count(409)
+
+        if success_count != 1:
+            violations.append(f"Expected exactly 1 success (200), got {success_count} (out of 20)")
+        if conflict_count != 19:
+            violations.append(
+                f"Expected exactly 19 conflicts (409), got {conflict_count} (out of 20)"
+            )
+
+    return {
+        "probe": "probe_multi_instance_concurrency_race",
+        "passed": len(violations) == 0,
+        "violations": violations,
+    }
+
+
 def main() -> int:
     log("=" * 66)
     log("AGENTPAY EMPIRICAL PAYMENT WEBHOOK & REPLAY ADVERSARIAL HARNESS")
@@ -454,6 +611,8 @@ def main() -> int:
         ("probe_webhook_cross_tenant_isolation", probe_webhook_cross_tenant_isolation),
         ("probe_concurrent_replay_race", probe_concurrent_replay_race),
         ("probe_saga_compensation_invariants", probe_saga_compensation_invariants),
+        ("probe_restart_resilience_durable_dedup", probe_restart_resilience_durable_dedup),
+        ("probe_multi_instance_concurrency_race", probe_multi_instance_concurrency_race),
     ]
 
     all_passed = True

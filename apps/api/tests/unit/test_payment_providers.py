@@ -12,19 +12,27 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
 import pytest
 
 from agentpay.adapters.in_memory.payment_repository import InMemoryPaymentRepository
 from agentpay.adapters.razorpay_payment_provider import (
+    InMemoryRazorpaySimulator,
     RazorpayPaymentProvider,
     RazorpayWebhookSignatureError,
 )
+from agentpay.adapters.razorpay_sandbox_provider import (
+    RazorpaySandboxCredentialError,
+    RazorpaySandboxProvider,
+)
 from agentpay.adapters.stripe_payment_provider import (
+    InMemoryStripeSimulator,
     StripePaymentProvider,
     StripeWebhookSignatureError,
 )
 from agentpay.application.services.reconciliation_service import PaymentReconciler
+from agentpay.domain.errors import InvalidPaymentError
 from agentpay.domain.money import Money
 from agentpay.domain.payments import PaymentStatus
 
@@ -288,3 +296,348 @@ def test_razorpay_webhook_signature_verification_and_parsing() -> None:
         payload_bytes, sig, timestamp=now, tolerance_seconds=300, current_time=now
     )
     assert parsed_with_ts["event_type"] == "payment.captured"
+
+
+def test_payment_provider_simulator_aliases() -> None:
+    """Verify InMemory simulators are aliased by legacy names (§39, AP-004)."""
+    assert RazorpayPaymentProvider is InMemoryRazorpaySimulator
+    assert StripePaymentProvider is InMemoryStripeSimulator
+
+
+def test_razorpay_sandbox_credential_fail_fast() -> None:
+    """RazorpaySandboxProvider fails fast on missing, malformed, or placeholder credentials (§39, AP-004)."""
+    # 1. Empty credentials
+    with pytest.raises(RazorpaySandboxCredentialError, match="missing or empty"):
+        RazorpaySandboxProvider(key_id="", key_secret="sec_real_secret_123456")
+    with pytest.raises(RazorpaySandboxCredentialError, match="missing or empty"):
+        RazorpaySandboxProvider(key_id="rzp_test_real12345", key_secret="")
+
+    # 2. Invalid prefix
+    with pytest.raises(RazorpaySandboxCredentialError, match="must begin with 'rzp_test_'"):
+        RazorpaySandboxProvider(key_id="rzp_live_real12345", key_secret="sec_real_secret_123456")
+
+    # 3. Too short key
+    with pytest.raises(RazorpaySandboxCredentialError, match="at least 14 chars"):
+        RazorpaySandboxProvider(key_id="rzp_test_1", key_secret="sec_real_secret_123456")
+
+    # 4. Too short secret
+    with pytest.raises(RazorpaySandboxCredentialError, match="at least 16 chars"):
+        RazorpaySandboxProvider(key_id="rzp_test_real12345", key_secret="short")
+
+    # 5. Placeholder key_id
+    with pytest.raises(RazorpaySandboxCredentialError, match="placeholder"):
+        RazorpaySandboxProvider(
+            key_id="rzp_test_placeholder_id", key_secret="sec_real_secret_123456"
+        )
+
+    # 6. Placeholder secret
+    with pytest.raises(RazorpaySandboxCredentialError, match="placeholder"):
+        RazorpaySandboxProvider(key_id="rzp_test_real12345", key_secret="your_secret_here_dummy")
+
+
+def test_razorpay_sandbox_order_creation_with_mock_transport() -> None:
+    """RazorpaySandboxProvider creates order via mock transport and verifies auth headers (§39, AP-004)."""
+    recorded_requests: list[Any] = []
+
+    def mock_transport(req: Any) -> tuple[int, bytes, dict[str, str]]:
+        recorded_requests.append(req)
+        resp_data = {
+            "id": "order_EKwxwAgItmmXdp",
+            "entity": "order",
+            "amount": 149900,
+            "currency": "INR",
+            "receipt": "idem_sandbox_01",
+            "status": "created",
+            "notes": {
+                "tenant_id": "tenant_01",
+                "intent_id": "intent_01",
+            },
+        }
+        return 201, json.dumps(resp_data).encode("utf-8"), {"Content-Type": "application/json"}
+
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        transport=mock_transport,
+        auto_capture=False,
+    )
+
+    amount = Money(149900, "INR")
+    attempt = provider.create_payment(
+        tenant_id="tenant_01",
+        intent_id="intent_01",
+        amount=amount,
+        idempotency_key="idem_sandbox_01",
+    )
+
+    assert attempt.provider == "razorpay"
+    assert attempt.provider_payment_id == "order_EKwxwAgItmmXdp"
+    assert attempt.status == PaymentStatus.AUTHORIZED
+    assert len(recorded_requests) == 1
+
+    req = recorded_requests[0]
+    auth_header = req.headers.get("Authorization")
+    assert auth_header is not None
+    assert auth_header.startswith("Basic ")
+
+
+def test_razorpay_sandbox_timeout_maps_to_unknown() -> None:
+    """Network timeout during sandbox request maps safely to PaymentStatus.UNKNOWN (§43, AP-004)."""
+
+    def timeout_transport(req: Any) -> tuple[int, bytes, dict[str, str]]:
+        raise TimeoutError("Read timed out")
+
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        transport=timeout_transport,
+    )
+
+    attempt = provider.create_payment(
+        tenant_id="tenant_01",
+        intent_id="intent_01",
+        amount=Money(50000, "INR"),
+        idempotency_key="idem_timeout_01",
+    )
+
+    assert attempt.status == PaymentStatus.UNKNOWN
+    assert attempt.provider_payment_id is None
+    assert "timeout" in (attempt.failure_reason or "").lower()
+
+
+def test_razorpay_sandbox_http_error_redacts_credentials() -> None:
+    """HTTP 401 error from Razorpay sandbox maps to typed error with zero credential leakage (§13, AP-004)."""
+    import urllib.error
+
+    def unauthorized_transport(req: Any) -> tuple[int, bytes, dict[str, str]]:
+        raise urllib.error.HTTPError(
+            req.full_url,
+            401,
+            "Unauthorized",
+            hdrs={},  # type: ignore[arg-type]
+            fp=None,
+        )
+
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        transport=unauthorized_transport,
+    )
+
+    with pytest.raises(InvalidPaymentError) as exc_info:
+        provider.create_payment(
+            tenant_id="tenant_01",
+            intent_id="intent_01",
+            amount=Money(50000, "INR"),
+            idempotency_key="idem_unauth_01",
+        )
+
+    err_str = str(exc_info.value)
+    assert "401" in err_str
+    assert "sec_real_secret_123456" not in err_str
+    assert "rzp_test_real12345" not in err_str
+
+
+def test_razorpay_sandbox_webhook_signature_and_parsing() -> None:
+    """RazorpaySandboxProvider supports HMAC-SHA256 signature generation and event parsing (§61, AP-004)."""
+    secret = "whsec_sandbox_test_secret_32bytes"
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        webhook_secret=secret,
+    )
+
+    payload = json.dumps(
+        {
+            "event": "payment.captured",
+            "payload": {
+                "payment": {
+                    "entity": {
+                        "id": "pay_sandbox_123",
+                        "amount": 250000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "notes": {"attempt_id": "attempt_99", "tenant_id": "tenant_01"},
+                    }
+                }
+            },
+        }
+    ).encode("utf-8")
+
+    sig = provider.generate_webhook_signature(payload)
+    assert provider.verify_webhook_signature(payload, sig) is True
+
+    parsed = provider.parse_webhook_event(payload, sig)
+    assert parsed["event_type"] == "payment.captured"
+    assert parsed["attempt_id"] == "attempt_99"
+    assert parsed["tenant_id"] == "tenant_01"
+
+
+def test_razorpay_sandbox_capture_and_refund() -> None:
+    """RazorpaySandboxProvider capture and refund routes execute correctly (§41, §44, AP-004)."""
+
+    def mock_transport(req: Any) -> tuple[int, bytes, dict[str, str]]:
+        if req.get_method() == "GET" and "/payments/" in req.full_url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": "pay_sandbox_456",
+                        "amount": 10000,
+                        "currency": "INR",
+                        "status": "authorized",
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        if req.get_method() == "POST" and "/capture" in req.full_url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": "pay_sandbox_456",
+                        "status": "captured",
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        if req.get_method() == "POST" and "/refund" in req.full_url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": "rfnd_sandbox_789",
+                        "amount": 10000,
+                        "currency": "INR",
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        return 404, b"{}", {}
+
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        transport=mock_transport,
+    )
+
+    captured = provider.capture_payment("tenant_01", "pay_sandbox_456")
+    assert captured.status == PaymentStatus.CAPTURED
+
+    refund = provider.refund("tenant_01", "pay_sandbox_456", Money(10000, "INR"), "Defective item")
+    assert refund.refund_id == "rfnd_sandbox_789"
+    assert refund.amount == Money(10000, "INR")
+
+
+def test_razorpay_sandbox_safe_receipt_length_constraint() -> None:
+    """Razorpay orders enforce max 40-character receipt length by hashing long idempotency keys (§39, AP-004)."""
+    recorded_receipts: list[str] = []
+    recorded_notes: list[dict[str, Any]] = []
+
+    def mock_transport(req: Any) -> tuple[int, bytes, dict[str, str]]:
+        if req.get_method() == "POST" and "/orders" in req.full_url:
+            payload = json.loads(req.data.decode("utf-8"))
+            recorded_receipts.append(payload["receipt"])
+            recorded_notes.append(payload["notes"])
+            return (
+                201,
+                json.dumps(
+                    {
+                        "id": "order_test_receipt_len",
+                        "status": "created",
+                        "amount": payload["amount"],
+                        "currency": payload["currency"],
+                        "receipt": payload["receipt"],
+                        "notes": payload["notes"],
+                    }
+                ).encode("utf-8"),
+                {"Content-Type": "application/json"},
+            )
+        return 404, b"{}", {}
+
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        transport=mock_transport,
+    )
+
+    # 1. Long idempotency key (> 40 chars)
+    long_key = "very_long_custom_agent_idempotency_key_exceeding_forty_characters_123456789"
+    assert len(long_key) > 40
+    attempt = provider.create_payment("tenant_01", "intent_01", Money(5000, "INR"), long_key)
+    assert attempt.idempotency_key == long_key
+    assert len(recorded_receipts[0]) <= 40
+    assert recorded_receipts[0].startswith("rcpt_")
+    assert recorded_notes[0]["idempotency_key"] == long_key
+
+    # 2. Short idempotency key (<= 40 chars)
+    short_key = "short_key_20_chars"
+    assert len(short_key) <= 40
+    attempt_short = provider.create_payment("tenant_01", "intent_02", Money(5000, "INR"), short_key)
+    assert attempt_short.idempotency_key == short_key
+    assert recorded_receipts[1] == short_key
+    assert recorded_notes[1]["idempotency_key"] == short_key
+
+
+def test_razorpay_sandbox_refund_validation_invariants() -> None:
+    """RazorpaySandboxProvider verifies currency match, balance limits, tenant ownership, and amount bounds (§44, AP-004)."""
+
+    def mock_transport(req: Any) -> tuple[int, bytes, dict[str, str]]:
+        if req.get_method() == "GET" and "/payments/pay_test_inr" in req.full_url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": "pay_test_inr",
+                        "amount": 10000,
+                        "currency": "INR",
+                        "status": "captured",
+                        "notes": {"tenant_id": "tenant_01"},
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        if req.get_method() == "POST" and "/refund" in req.full_url:
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": "rfnd_test_ok",
+                        "amount": 5000,
+                        "currency": "INR",
+                    }
+                ).encode("utf-8"),
+                {},
+            )
+        return 404, b"{}", {}
+
+    provider = RazorpaySandboxProvider(
+        key_id="rzp_test_real12345",
+        key_secret="sec_real_secret_123456",
+        transport=mock_transport,
+    )
+
+    # 1. Non-positive amount rejected
+    with pytest.raises(InvalidPaymentError, match="strictly positive"):
+        provider.refund("tenant_01", "pay_test_inr", Money(0, "INR"), "Zero refund")
+
+    # 2. Currency mismatch rejected
+    with pytest.raises(
+        InvalidPaymentError,
+        match="Refund currency 'USD' does not match payment currency 'INR'",
+    ):
+        provider.refund("tenant_01", "pay_test_inr", Money(5000, "USD"), "Wrong currency")
+
+    # 3. Exceeds payment amount rejected
+    with pytest.raises(InvalidPaymentError, match="Refund amount exceeds payment amount"):
+        provider.refund("tenant_01", "pay_test_inr", Money(15000, "INR"), "Exceeds balance")
+
+    # 4. Cross-tenant access rejected
+    with pytest.raises(InvalidPaymentError, match="belongs to tenant 'tenant_01', not 'tenant_02'"):
+        provider.refund("tenant_02", "pay_test_inr", Money(5000, "INR"), "Cross-tenant attack")
+
+    # 5. Valid refund succeeds
+    ref = provider.refund("tenant_01", "pay_test_inr", Money(5000, "INR"), "Valid partial refund")
+    assert ref.refund_id == "rfnd_test_ok"
+    assert ref.amount == Money(5000, "INR")
+    assert ref.tenant_id == "tenant_01"

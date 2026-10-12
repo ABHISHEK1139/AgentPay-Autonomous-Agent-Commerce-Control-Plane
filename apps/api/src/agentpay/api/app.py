@@ -17,17 +17,22 @@ import json
 import math
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 
-from agentpay.adapters.in_memory.approval_repository import InMemoryApprovalRepository
+from agentpay.adapters.in_memory.emergency_pause_store import (
+    InMemoryEmergencyPauseStore,
+)
 from agentpay.adapters.in_memory.identity_repository import InMemoryCredentialRepository
 from agentpay.adapters.in_memory.payment_repository import (
     InMemoryIdempotencyStore,
     InMemoryPaymentRepository,
+    InMemoryProviderTransactionMappingRepository,
+    InMemoryProviderWebhookEventRepository,
 )
 from agentpay.adapters.in_memory.rate_limiter import InMemoryRateLimiter
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
@@ -46,14 +51,20 @@ from agentpay.api.schemas import (
     ApiErrorDetail,
     ApiErrorResponse,
 )
+from agentpay.application.ports.emergency_pause_port import EmergencyPauseStore
 from agentpay.application.ports.identity_port import CredentialRepository
-from agentpay.application.ports.payment_port import IdempotencyStore
+from agentpay.application.ports.payment_port import (
+    IdempotencyStore,
+    ProviderTransactionMappingRepository,
+    ProviderWebhookEventRepository,
+)
 from agentpay.application.ports.rate_limit_port import RateLimiter
 from agentpay.application.services.reconciliation_service import PaymentReconciler
 from agentpay.application.use_cases.purchase_flow import (
     PurchaseExecutionResult,
     PurchaseOrchestrator,
 )
+from agentpay.config.config import AppConfig
 from agentpay.domain.action_request import (
     ActionRequest,
     AuthorizationMode,
@@ -79,7 +90,9 @@ from agentpay.domain.identity import (
     UserRole,
 )
 from agentpay.domain.money import Money
-from agentpay.domain.payments import IdempotencyRecord
+from agentpay.domain.payments import (
+    IdempotencyRecord,
+)
 
 Scope = dict[str, Any]
 Receive = Callable[[], Coroutine[Any, Any, dict[str, Any]]]
@@ -137,10 +150,22 @@ class AgentPayApiApp:
         read_tenant_capacity: int = 500,
         read_tenant_refill_rate: float = 100.0,
         webhook_secret: str = "whsec_test_secret_32bytes_minimum_length",
+        razorpay_webhook_secret: str | None = None,
+        stripe_webhook_secret: str | None = None,
         reconciler: PaymentReconciler | None = None,
         idempotency_store: IdempotencyStore | None = None,
+        provider_mapping_repo: ProviderTransactionMappingRepository | None = None,
+        webhook_event_repo: ProviderWebhookEventRepository | None = None,
         require_observability_auth: bool = False,
+        config: AppConfig | None = None,
+        emergency_pause_store: EmergencyPauseStore | None = None,
     ) -> None:
+        self.config: AppConfig | None = config
+        self.emergency_pause_store: EmergencyPauseStore = (
+            emergency_pause_store
+            if emergency_pause_store is not None
+            else InMemoryEmergencyPauseStore()
+        )
         self.orchestrator = orchestrator
         self.credential_repo: CredentialRepository = (
             credential_repo if credential_repo is not None else InMemoryCredentialRepository()
@@ -175,8 +200,24 @@ class AgentPayApiApp:
         else:
             self.idempotency_store = InMemoryIdempotencyStore()
 
+        mapping_repo = (
+            provider_mapping_repo
+            or getattr(orchestrator, "_provider_mapping_repo", None)
+            or InMemoryProviderTransactionMappingRepository()
+        )
+        wb_repo = (
+            webhook_event_repo
+            or getattr(orchestrator, "_webhook_event_repo", None)
+            or InMemoryProviderWebhookEventRepository()
+        )
+        self.webhook_event_repo: ProviderWebhookEventRepository = wb_repo
+
         if reconciler is not None:
             self.reconciler = reconciler
+            if getattr(self.reconciler, "_provider_mapping_repo", None) is None:
+                self.reconciler._provider_mapping_repo = mapping_repo
+            if getattr(self.reconciler, "_webhook_event_repo", None) is None:
+                self.reconciler._webhook_event_repo = wb_repo
         else:
             provider = getattr(orchestrator, "_payment_provider", None) or MockPaymentProvider()
             pay_repo = getattr(orchestrator, "_payment_repo", None) or InMemoryPaymentRepository()
@@ -186,7 +227,23 @@ class AgentPayApiApp:
                 order_repo=getattr(orchestrator, "_order_repo", None),
                 inventory_repo=getattr(orchestrator, "_inventory_repo", None),
                 audit_ledger=getattr(orchestrator, "_audit_ledger", None),
+                provider_mapping_repo=mapping_repo,
+                webhook_event_repo=wb_repo,
             )
+
+        self.provider_mapping_repo = mapping_repo
+        self.razorpay_webhook_secret: str = (
+            razorpay_webhook_secret
+            or os.environ.get("RAZORPAY_WEBHOOK_SECRET")
+            or getattr(getattr(self.reconciler, "_provider", None), "webhook_secret", None)
+            or webhook_secret
+        )
+        self.stripe_webhook_secret: str = (
+            stripe_webhook_secret
+            or os.environ.get("STRIPE_WEBHOOK_SECRET")
+            or getattr(getattr(self.reconciler, "_provider", None), "webhook_secret", None)
+            or webhook_secret
+        )
 
         self._last_response_headers: dict[str, str] = {}
         self._emergency_paused: bool = False
@@ -300,12 +357,18 @@ class AgentPayApiApp:
 
     @property
     def is_emergency_paused(self) -> bool:
+        """Return True if global emergency pause or any pause scope is active (§21, §67, AP-008)."""
         return (
-            self._emergency_paused or "ALL" in self._paused_scopes or len(self._paused_scopes) > 0
+            self.emergency_pause_store.is_globally_paused()
+            or self._emergency_paused
+            or "ALL" in self._paused_scopes
+            or len(self._paused_scopes) > 0
         )
 
     def is_emergency_paused_for(self, tenant_id: str = "") -> bool:
-        """Check if emergency pause is active for the platform or a specific tenant (§21, §67, B-PAUSE-01)."""
+        """Check if emergency pause is active for the platform or a specific tenant (§21, §67, AP-008, B-PAUSE-01)."""
+        if self.emergency_pause_store.is_paused_for(tenant_id):
+            return True
         if self._emergency_paused or "ALL" in self._paused_scopes:
             return True
         if not tenant_id:
@@ -314,7 +377,8 @@ class AgentPayApiApp:
         return clean in self._paused_scopes or f"tenant:{clean}" in self._paused_scopes
 
     def pause_emergency(self, operator_id: str, reason: str, scope: str = "ALL") -> None:
-        """Trigger emergency kill switch (§21, §67, B-PAUSE-01)."""
+        """Trigger emergency kill switch (§21, §67, AP-008, B-PAUSE-01)."""
+        self.emergency_pause_store.pause(operator_id=operator_id, reason=reason, scope=scope)
         norm_scope = scope.strip() if scope else "ALL"
         upper_scope = norm_scope.upper()
         if (
@@ -339,7 +403,8 @@ class AgentPayApiApp:
         }
 
     def resume_emergency(self, operator_id: str, scope: str = "ALL") -> None:
-        """Resume normal autonomous operations (§21, §67, B-PAUSE-01)."""
+        """Resume normal autonomous operations (§21, §67, AP-008, B-PAUSE-01)."""
+        self.emergency_pause_store.resume(operator_id=operator_id, scope=scope)
         norm_scope = scope.strip() if scope else "ALL"
         upper_scope = norm_scope.upper()
         if (
@@ -365,13 +430,16 @@ class AgentPayApiApp:
         }
 
     def get_emergency_status(self) -> dict[str, Any]:
-        """Return current emergency kill switch status (§21, §67)."""
+        """Return current emergency kill switch status (§21, §67, AP-008)."""
+        store_status = self.emergency_pause_store.get_status()
         is_paused = self.is_emergency_paused
+        scopes = sorted(set(self._paused_scopes) | set(store_status.get("scopes", [])))
+        metadata = dict(store_status.get("metadata") or self._pause_metadata)
         return {
             "paused": is_paused,
             "emergency_paused": is_paused,
-            "scopes": sorted(self._paused_scopes),
-            "metadata": dict(self._pause_metadata),
+            "scopes": scopes,
+            "metadata": metadata,
         }
 
     def _error_response(
@@ -820,13 +888,6 @@ class AgentPayApiApp:
             or str(body.get("tenant_id") or "").strip()
             or tenant_id
         )
-        if not effective_tenant:
-            return self._error_response(
-                400,
-                "INVALID_PAYLOAD",
-                "Missing tenant identifier in headers or webhook payload",
-                request_id,
-            )
 
         event_id = str(
             body.get("event_id") or headers.get("x-webhook-id") or body.get("id") or ""
@@ -852,26 +913,61 @@ class AgentPayApiApp:
                 request_id,
             )
 
+        provider = str(body.get("provider") or "payment").strip().lower()
+        provider_account_id = str(
+            body.get("account_id") or headers.get("x-account-id") or ""
+        ).strip()
         replay_key = f"webhook:{event_id}"
+        cache_key = f"{provider}:{provider_account_id}:{event_id}"
+        payload_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
         with self._webhook_lock:
-            if event_id in self._processed_webhook_events:
+            if cache_key in self._processed_webhook_events:
                 return self._error_response(
                     409,
                     "WEBHOOK_REPLAY_DETECTED",
                     f"Webhook event '{event_id}' has already been processed",
                     request_id,
-                    details={"event_id": event_id, "replay_key": replay_key},
+                    details={"event_id": event_id, "provider": provider, "replay_key": replay_key},
                 )
 
-            existing_record = self.idempotency_store.get(effective_tenant, replay_key)
-            if existing_record is not None:
-                self._processed_webhook_events.add(event_id)
+            if effective_tenant:
+                existing_record = self.idempotency_store.get(effective_tenant, replay_key)
+                if existing_record is not None:
+                    self._processed_webhook_events.add(cache_key)
+                    return self._error_response(
+                        409,
+                        "WEBHOOK_REPLAY_DETECTED",
+                        f"Webhook event '{event_id}' has already been processed",
+                        request_id,
+                        details={
+                            "event_id": event_id,
+                            "provider": provider,
+                            "replay_key": replay_key,
+                        },
+                    )
+
+            claimed_event, is_new = self.webhook_event_repo.claim_event(
+                provider=provider,
+                provider_account_id=provider_account_id,
+                event_id=event_id,
+                payload_hash=payload_hash,
+                event_type=event_type,
+                trace_id=trace_id,
+            )
+            if not is_new:
+                self._processed_webhook_events.add(cache_key)
                 return self._error_response(
                     409,
                     "WEBHOOK_REPLAY_DETECTED",
                     f"Webhook event '{event_id}' has already been processed",
                     request_id,
-                    details={"event_id": event_id, "replay_key": replay_key},
+                    details={
+                        "event_id": event_id,
+                        "provider": provider,
+                        "replay_key": replay_key,
+                        "status": claimed_event.status.value,
+                    },
                 )
 
             # 5. Dispatch to PaymentReconciler under lock
@@ -883,6 +979,7 @@ class AgentPayApiApp:
                     trace_id=trace_id,
                 )
             except DomainError as err:
+                self.webhook_event_repo.save(claimed_event.mark_failed(err.code))
                 return self._error_response(
                     400,
                     err.code,
@@ -891,6 +988,7 @@ class AgentPayApiApp:
                     details=getattr(err, "details", {}),
                 )
             except Exception as err:
+                self.webhook_event_repo.save(claimed_event.mark_failed("RECONCILIATION_FAILED"))
                 return self._error_response(
                     500,
                     "RECONCILIATION_FAILED",
@@ -898,18 +996,610 @@ class AgentPayApiApp:
                     request_id,
                 )
 
+            if reconcile_result.get("status") == "QUARANTINED":
+                self.webhook_event_repo.save(
+                    claimed_event.mark_quarantined("UNRESOLVED_WEBHOOK_TRANSACTION")
+                )
+                return self._error_response(
+                    422,
+                    "UNRESOLVED_WEBHOOK_TRANSACTION",
+                    "Unmapped or unresolvable webhook transaction",
+                    request_id,
+                    details=reconcile_result,
+                )
+
+            final_tenant = str(reconcile_result.get("tenant_id") or effective_tenant).strip()
+            if not final_tenant:
+                self.webhook_event_repo.save(claimed_event.mark_failed("MISSING_TENANT"))
+                return self._error_response(
+                    400,
+                    "INVALID_PAYLOAD",
+                    "Missing tenant identifier in headers or webhook payload",
+                    request_id,
+                )
+
+            # Mark processed in durable repository
+            entity_ref = str(
+                reconcile_result.get("attempt_id") or reconcile_result.get("order_id") or ""
+            )
+            self.webhook_event_repo.save(claimed_event.mark_processed(entity_reference=entity_ref))
+
             # Save idempotency record to prevent future replay
             self.idempotency_store.save(
-                effective_tenant,
+                final_tenant,
                 IdempotencyRecord(
                     key=replay_key,
-                    tenant_id=effective_tenant,
+                    tenant_id=final_tenant,
                     operation_type="webhook",
-                    request_hash=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    request_hash=payload_hash,
                     result_data=reconcile_result,
                 ),
             )
-            self._processed_webhook_events.add(event_id)
+            self._processed_webhook_events.add(cache_key)
+
+        return 200, reconcile_result
+
+    def _handle_razorpay_webhook(
+        self,
+        headers: dict[str, str],
+        body: dict[str, Any] | None,
+        request_id: str,
+        tenant_id: str,
+        trace_id: str,
+        raw_body: bytes | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """Process incoming Razorpay webhook with raw-body HMAC-SHA256 verification (§61)."""
+        raw_bytes: bytes = b""
+        if raw_body is not None:
+            raw_bytes = raw_body
+        elif body is not None:
+            raw_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        else:
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Missing or invalid JSON payload", request_id
+            )
+
+        # 1. Enforce X-Razorpay-Signature header
+        sig_header = headers.get("x-razorpay-signature", "").strip()
+        if not sig_header:
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Missing or blank X-Razorpay-Signature header",
+                request_id,
+            )
+
+        # 2. Cryptographic constant-time HMAC-SHA256 verification
+        secret_candidates = (
+            [s.strip() for s in self.razorpay_webhook_secret.split(",") if s.strip()]
+            if "," in self.razorpay_webhook_secret
+            else [self.razorpay_webhook_secret]
+        )
+
+        signature_valid = False
+        for sec in secret_candidates:
+            expected_sig = hmac.new(sec.encode("utf-8"), raw_bytes, hashlib.sha256).hexdigest()
+            if hmac.compare_digest(expected_sig, sig_header):
+                signature_valid = True
+                break
+
+        if not signature_valid:
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Razorpay webhook HMAC signature verification failed",
+                request_id,
+            )
+
+        # 3. Parse JSON body
+        parsed_body = body
+        if parsed_body is None:
+            try:
+                parsed_body = json.loads(raw_bytes.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return self._error_response(
+                    400, "INVALID_PAYLOAD", "Malformed JSON payload", request_id
+                )
+
+        if not isinstance(parsed_body, dict):
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Webhook body must be a JSON object", request_id
+            )
+
+        # 4. Extract Event Metadata
+        event_id = str(
+            headers.get("x-razorpay-event-id")
+            or headers.get("x-webhook-id")
+            or parsed_body.get("event_id")
+            or parsed_body.get("id")
+            or ""
+        ).strip()
+
+        event_name = str(
+            parsed_body.get("event")
+            or parsed_body.get("event_type")
+            or parsed_body.get("type")
+            or ""
+        ).strip()
+        if not event_name:
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Missing event type in Razorpay webhook payload", request_id
+            )
+
+        type_mapping = {
+            "payment.captured": "payment.captured",
+            "payment.failed": "payment.failed",
+            "refund.processed": "payment.refunded",
+        }
+        canonical_event_type = type_mapping.get(event_name, event_name)
+
+        payload_entity = parsed_body.get("payload", {})
+        payment_entity = (
+            payload_entity.get("payment", {}).get("entity", {})
+            if isinstance(payload_entity, dict)
+            else {}
+        )
+        notes = payment_entity.get("notes", {}) if isinstance(payment_entity, dict) else {}
+
+        prov_payment_id = str(
+            payment_entity.get("id")
+            or parsed_body.get("provider_payment_id")
+            or parsed_body.get("id")
+            or ""
+        ).strip()
+        candidate_attempt = str(
+            notes.get("attempt_id")
+            or notes.get("payment_attempt_id")
+            or parsed_body.get("attempt_id")
+            or parsed_body.get("payment_id")
+            or ""
+        ).strip()
+
+        if not event_id:
+            event_id = (
+                f"rzp_{prov_payment_id}_{canonical_event_type}"
+                if prov_payment_id
+                else f"evt_rzp_{uuid.uuid4().hex[:12]}"
+            )
+
+        # 5. Replay Protection
+        prov_account_id = str(parsed_body.get("account_id") or "").strip()
+        payload_hash = hashlib.sha256(raw_bytes).hexdigest()
+        replay_key = f"webhook:razorpay:{event_id}"
+        cache_key = f"razorpay:{prov_account_id}:{event_id}"
+
+        with self._webhook_lock:
+            if cache_key in self._processed_webhook_events:
+                return self._error_response(
+                    409,
+                    "WEBHOOK_REPLAY_DETECTED",
+                    f"Razorpay webhook event '{event_id}' has already been processed",
+                    request_id,
+                    details={
+                        "event_id": event_id,
+                        "provider": "razorpay",
+                        "replay_key": replay_key,
+                    },
+                )
+
+            effective_tenant = (
+                headers.get("x-tenant-id", "").strip()
+                or str(notes.get("tenant_id") or parsed_body.get("tenant_id") or "").strip()
+                or tenant_id
+            )
+            if effective_tenant:
+                existing_record = self.idempotency_store.get(effective_tenant, replay_key)
+                if existing_record is not None:
+                    self._processed_webhook_events.add(cache_key)
+                    return self._error_response(
+                        409,
+                        "WEBHOOK_REPLAY_DETECTED",
+                        f"Razorpay webhook event '{event_id}' has already been processed",
+                        request_id,
+                        details={
+                            "event_id": event_id,
+                            "provider": "razorpay",
+                            "replay_key": replay_key,
+                        },
+                    )
+
+            claimed_event, is_new = self.webhook_event_repo.claim_event(
+                provider="razorpay",
+                provider_account_id=prov_account_id,
+                event_id=event_id,
+                payload_hash=payload_hash,
+                event_type=canonical_event_type,
+                trace_id=trace_id,
+            )
+            if not is_new:
+                self._processed_webhook_events.add(cache_key)
+                return self._error_response(
+                    409,
+                    "WEBHOOK_REPLAY_DETECTED",
+                    f"Razorpay webhook event '{event_id}' has already been processed",
+                    request_id,
+                    details={
+                        "event_id": event_id,
+                        "provider": "razorpay",
+                        "replay_key": replay_key,
+                        "status": claimed_event.status.value,
+                    },
+                )
+
+            # 6. Normalize payload for Reconciler
+            reconcile_payload = {
+                **parsed_body,
+                "provider": "razorpay",
+                "provider_payment_id": prov_payment_id,
+                "attempt_id": candidate_attempt,
+                "tenant_id": effective_tenant,
+                "event_type": canonical_event_type,
+                "data": {
+                    "provider_payment_id": prov_payment_id,
+                    "amount": payment_entity.get("amount") or parsed_body.get("amount"),
+                    "currency": (
+                        payment_entity.get("currency") or parsed_body.get("currency") or "INR"
+                    ).upper(),
+                    "status": payment_entity.get("status") or parsed_body.get("status"),
+                    "error_description": payment_entity.get("error_description"),
+                    "reason": payment_entity.get("error_description"),
+                },
+            }
+
+            try:
+                reconcile_result = self.reconciler.reconcile_webhook_event(
+                    tenant_id=effective_tenant,
+                    event_type=canonical_event_type,
+                    payload=reconcile_payload,
+                    trace_id=trace_id,
+                )
+            except DomainError as err:
+                self.webhook_event_repo.save(claimed_event.mark_failed(err.code))
+                return self._error_response(
+                    400,
+                    err.code,
+                    str(err),
+                    request_id,
+                    details=getattr(err, "details", {}),
+                )
+            except Exception as err:
+                self.webhook_event_repo.save(claimed_event.mark_failed("RECONCILIATION_FAILED"))
+                return self._error_response(
+                    500,
+                    "RECONCILIATION_FAILED",
+                    f"Razorpay webhook reconciliation failed: {err}",
+                    request_id,
+                )
+
+            if reconcile_result.get("status") == "QUARANTINED":
+                self.webhook_event_repo.save(
+                    claimed_event.mark_quarantined("UNRESOLVED_WEBHOOK_TRANSACTION")
+                )
+                return self._error_response(
+                    422,
+                    "UNRESOLVED_WEBHOOK_TRANSACTION",
+                    "Unmapped or unresolvable webhook transaction",
+                    request_id,
+                    details=reconcile_result,
+                )
+
+            entity_ref = str(reconcile_result.get("attempt_id") or "")
+            self.webhook_event_repo.save(claimed_event.mark_processed(entity_reference=entity_ref))
+
+            final_tenant = str(reconcile_result.get("tenant_id") or effective_tenant).strip()
+            if final_tenant:
+                self.idempotency_store.save(
+                    final_tenant,
+                    IdempotencyRecord(
+                        key=replay_key,
+                        tenant_id=final_tenant,
+                        operation_type="webhook",
+                        request_hash=payload_hash,
+                        result_data=reconcile_result,
+                    ),
+                )
+            self._processed_webhook_events.add(cache_key)
+
+        return 200, reconcile_result
+
+    def _handle_stripe_webhook(
+        self,
+        headers: dict[str, str],
+        body: dict[str, Any] | None,
+        request_id: str,
+        tenant_id: str,
+        trace_id: str,
+        raw_body: bytes | None = None,
+    ) -> tuple[int, dict[str, Any]]:
+        """Process incoming Stripe webhook with timestamped Stripe-Signature HMAC-SHA256 verification (§61)."""
+        raw_bytes: bytes = b""
+        if raw_body is not None:
+            raw_bytes = raw_body
+        elif body is not None:
+            raw_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        else:
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Missing or invalid JSON payload", request_id
+            )
+
+        # 1. Enforce Stripe-Signature header
+        sig_header = headers.get("stripe-signature", "").strip()
+        if not sig_header:
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Missing or blank Stripe-Signature header",
+                request_id,
+            )
+
+        # 2. Parse Stripe-Signature components (t=..., v1=...)
+        parts = sig_header.split(",")
+        ts_str: str | None = None
+        signatures: list[str] = []
+        for part in parts:
+            item = part.strip()
+            if item.startswith("t="):
+                ts_str = item[2:]
+            elif item.startswith("v1="):
+                signatures.append(item[3:])
+
+        if not ts_str or not signatures:
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Invalid Stripe-Signature header format; must contain t= and v1=",
+                request_id,
+            )
+
+        # 3. Enforce Timestamp Window (300s max past age, 30s max future skew)
+        try:
+            ts_val = int(ts_str)
+        except ValueError:
+            return self._error_response(
+                400,
+                "INVALID_WEBHOOK_TIMESTAMP",
+                f"Unparseable Stripe timestamp '{ts_str}'",
+                request_id,
+            )
+
+        age_seconds = time.time() - ts_val
+        if age_seconds > 300.0 or age_seconds < -30.0:
+            return self._error_response(
+                401,
+                "EXPIRED_WEBHOOK_TIMESTAMP",
+                f"Stripe webhook timestamp expired or future skew exceeds tolerance ({int(age_seconds)}s outside -30s..300s window)",
+                request_id,
+                details={
+                    "age_seconds": age_seconds,
+                    "max_age_seconds": 300,
+                    "max_future_skew_seconds": 30,
+                },
+            )
+
+        # 4. Cryptographic constant-time HMAC-SHA256 verification
+        signed_payload = f"{ts_val}.".encode() + raw_bytes
+        secret_candidates = (
+            [s.strip() for s in self.stripe_webhook_secret.split(",") if s.strip()]
+            if "," in self.stripe_webhook_secret
+            else [self.stripe_webhook_secret]
+        )
+
+        signature_valid = False
+        for sec in secret_candidates:
+            expected_sig = hmac.new(sec.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+            for sig in signatures:
+                if hmac.compare_digest(expected_sig, sig):
+                    signature_valid = True
+                    break
+            if signature_valid:
+                break
+
+        if not signature_valid:
+            return self._error_response(
+                401,
+                "INVALID_WEBHOOK_SIGNATURE",
+                "Stripe webhook HMAC signature verification failed",
+                request_id,
+            )
+
+        # 5. Parse JSON body
+        parsed_body = body
+        if parsed_body is None:
+            try:
+                parsed_body = json.loads(raw_bytes.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return self._error_response(
+                    400, "INVALID_PAYLOAD", "Malformed JSON payload", request_id
+                )
+
+        if not isinstance(parsed_body, dict):
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Webhook body must be a JSON object", request_id
+            )
+
+        # 6. Extract Event Metadata
+        event_id = str(
+            headers.get("x-stripe-event-id")
+            or headers.get("x-webhook-id")
+            or parsed_body.get("id")
+            or parsed_body.get("event_id")
+            or ""
+        ).strip()
+
+        event_name = str(
+            parsed_body.get("type")
+            or parsed_body.get("event_type")
+            or parsed_body.get("event")
+            or ""
+        ).strip()
+        if not event_name:
+            return self._error_response(
+                400, "INVALID_PAYLOAD", "Missing event type in Stripe webhook payload", request_id
+            )
+
+        type_mapping = {
+            "payment_intent.succeeded": "payment.captured",
+            "payment_intent.payment_failed": "payment.failed",
+            "charge.refunded": "payment.refunded",
+        }
+        canonical_event_type = type_mapping.get(event_name, event_name)
+
+        raw_data = parsed_body.get("data")
+        data_dict: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+        raw_obj = data_dict.get("object")
+        obj: dict[str, Any] = raw_obj if isinstance(raw_obj, dict) else {}
+        raw_meta = obj.get("metadata")
+        metadata: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+
+        prov_payment_id = str(obj.get("id") or parsed_body.get("provider_payment_id") or "").strip()
+        candidate_attempt = str(
+            metadata.get("attempt_id")
+            or obj.get("metadata_attempt_id")
+            or parsed_body.get("attempt_id")
+            or parsed_body.get("payment_id")
+            or ""
+        ).strip()
+
+        if not event_id:
+            event_id = f"evt_stripe_{uuid.uuid4().hex[:12]}"
+
+        # 7. Replay Protection
+        prov_account_id = str(parsed_body.get("account") or "").strip()
+        payload_hash = hashlib.sha256(signed_payload).hexdigest()
+        replay_key = f"webhook:stripe:{event_id}"
+        cache_key = f"stripe:{prov_account_id}:{event_id}"
+
+        with self._webhook_lock:
+            if cache_key in self._processed_webhook_events:
+                return self._error_response(
+                    409,
+                    "WEBHOOK_REPLAY_DETECTED",
+                    f"Stripe webhook event '{event_id}' has already been processed",
+                    request_id,
+                    details={"event_id": event_id, "provider": "stripe", "replay_key": replay_key},
+                )
+
+            effective_tenant = (
+                headers.get("x-tenant-id", "").strip()
+                or str(metadata.get("tenant_id") or parsed_body.get("tenant_id") or "").strip()
+                or tenant_id
+            )
+            if effective_tenant:
+                existing_record = self.idempotency_store.get(effective_tenant, replay_key)
+                if existing_record is not None:
+                    self._processed_webhook_events.add(cache_key)
+                    return self._error_response(
+                        409,
+                        "WEBHOOK_REPLAY_DETECTED",
+                        f"Stripe webhook event '{event_id}' has already been processed",
+                        request_id,
+                        details={
+                            "event_id": event_id,
+                            "provider": "stripe",
+                            "replay_key": replay_key,
+                        },
+                    )
+
+            claimed_event, is_new = self.webhook_event_repo.claim_event(
+                provider="stripe",
+                provider_account_id=prov_account_id,
+                event_id=event_id,
+                payload_hash=payload_hash,
+                event_type=canonical_event_type,
+                trace_id=trace_id,
+            )
+            if not is_new:
+                self._processed_webhook_events.add(cache_key)
+                return self._error_response(
+                    409,
+                    "WEBHOOK_REPLAY_DETECTED",
+                    f"Stripe webhook event '{event_id}' has already been processed",
+                    request_id,
+                    details={
+                        "event_id": event_id,
+                        "provider": "stripe",
+                        "replay_key": replay_key,
+                        "status": claimed_event.status.value,
+                    },
+                )
+
+            # 8. Normalize payload for Reconciler
+            raw_last_err = obj.get("last_payment_error")
+            last_err: dict[str, Any] = raw_last_err if isinstance(raw_last_err, dict) else {}
+            failure_msg = last_err.get("message")
+
+            reconcile_payload = {
+                **parsed_body,
+                "provider": "stripe",
+                "provider_payment_id": prov_payment_id,
+                "attempt_id": candidate_attempt,
+                "tenant_id": effective_tenant,
+                "event_type": canonical_event_type,
+                "data": {
+                    "provider_payment_id": prov_payment_id,
+                    "amount": obj.get("amount") or parsed_body.get("amount"),
+                    "currency": (
+                        obj.get("currency") or parsed_body.get("currency") or "INR"
+                    ).upper(),
+                    "status": obj.get("status") or parsed_body.get("status"),
+                    "failure_reason": failure_msg,
+                    "reason": failure_msg,
+                },
+            }
+
+            try:
+                reconcile_result = self.reconciler.reconcile_webhook_event(
+                    tenant_id=effective_tenant,
+                    event_type=canonical_event_type,
+                    payload=reconcile_payload,
+                    trace_id=trace_id,
+                )
+            except DomainError as err:
+                self.webhook_event_repo.save(claimed_event.mark_failed(err.code))
+                return self._error_response(
+                    400,
+                    err.code,
+                    str(err),
+                    request_id,
+                    details=getattr(err, "details", {}),
+                )
+            except Exception as err:
+                self.webhook_event_repo.save(claimed_event.mark_failed("RECONCILIATION_FAILED"))
+                return self._error_response(
+                    500,
+                    "RECONCILIATION_FAILED",
+                    f"Stripe webhook reconciliation failed: {err}",
+                    request_id,
+                )
+
+            if reconcile_result.get("status") == "QUARANTINED":
+                self.webhook_event_repo.save(
+                    claimed_event.mark_quarantined("UNRESOLVED_WEBHOOK_TRANSACTION")
+                )
+                return self._error_response(
+                    422,
+                    "UNRESOLVED_WEBHOOK_TRANSACTION",
+                    "Unmapped or unresolvable webhook transaction",
+                    request_id,
+                    details=reconcile_result,
+                )
+
+            entity_ref = str(reconcile_result.get("attempt_id") or "")
+            self.webhook_event_repo.save(claimed_event.mark_processed(entity_reference=entity_ref))
+
+            final_tenant = str(reconcile_result.get("tenant_id") or effective_tenant).strip()
+            if final_tenant:
+                self.idempotency_store.save(
+                    final_tenant,
+                    IdempotencyRecord(
+                        key=replay_key,
+                        tenant_id=final_tenant,
+                        operation_type="webhook",
+                        request_hash=payload_hash,
+                        result_data=reconcile_result,
+                    ),
+                )
+            self._processed_webhook_events.add(cache_key)
 
         return 200, reconcile_result
 
@@ -927,7 +1617,11 @@ class AgentPayApiApp:
 
         # Guard against non-object JSON bodies on mutating routes (§13, B-API-01)
         if method in ("POST", "PUT", "PATCH") and body is not None and not isinstance(body, dict):
-            if path == "/api/v1/webhooks/payments":
+            if path in (
+                "/api/v1/webhooks/payments",
+                "/api/v1/webhooks/razorpay",
+                "/api/v1/webhooks/stripe",
+            ):
                 return self._error_response(
                     400, "INVALID_PAYLOAD", "Missing or invalid JSON payload", request_id
                 )
@@ -941,10 +1635,34 @@ class AgentPayApiApp:
 
         # 1. Health check
         if path == "/api/v1/health" and method == "GET":
-            return 200, {
+            resp: dict[str, Any] = {
                 "status": "healthy",
                 "emergency_paused": self._emergency_paused,
                 "version": "1.0.0-mvp",
+            }
+            if self.config is not None:
+                resp["environment"] = self.config.environment.value
+                resp["payment_provider"] = self.config.payment_provider.value
+                resp["decision_engine"] = self.config.decision_engine.value
+            return 200, resp
+
+        # 1a. System Configuration Diagnostics (§13, AP-005)
+        if path == "/api/v1/system/config" and method == "GET":
+            if self.config is not None:
+                return 200, self.config.safe_summary()
+            return 200, {
+                "environment": "local",
+                "payment_provider": "mock",
+                "decision_engine": "mock",
+                "persistence": "in_memory",
+                "demo_data_seeded": True,
+                "require_observability_auth": False,
+                "capabilities": {
+                    "payments_live": False,
+                    "razorpay_configured": False,
+                    "stripe_configured": False,
+                    "model_gateway_enabled": False,
+                },
             }
 
         # 1b. Observability Metrics (§47, B-OBS-01)
@@ -1049,15 +1767,29 @@ class AgentPayApiApp:
                     "/api/v1/webhooks/payments": {
                         "post": {"summary": "Payment Provider Webhook Ingestion"}
                     },
+                    "/api/v1/webhooks/razorpay": {
+                        "post": {"summary": "Razorpay Webhook Ingestion"}
+                    },
+                    "/api/v1/webhooks/stripe": {"post": {"summary": "Stripe Webhook Ingestion"}},
                     "/api/v1/security/sbom": {
                         "get": {"summary": "CycloneDX 1.5 SBOM & SLSA Provenance"}
                     },
                 },
             }
 
-        # 2.5 Webhook Ingestion (§61) - Dedicated unauthenticated/signature-verified route!
+        # 2.5 Webhook Ingestion (§61) - Dedicated unauthenticated/signature-verified routes!
         if path == "/api/v1/webhooks/payments" and method == "POST":
             return self._handle_payment_webhook(
+                headers, body, request_id, tenant_id, trace_id, raw_body=raw_body
+            )
+
+        if path == "/api/v1/webhooks/razorpay" and method == "POST":
+            return self._handle_razorpay_webhook(
+                headers, body, request_id, tenant_id, trace_id, raw_body=raw_body
+            )
+
+        if path == "/api/v1/webhooks/stripe" and method == "POST":
+            return self._handle_stripe_webhook(
                 headers, body, request_id, tenant_id, trace_id, raw_body=raw_body
             )
 
@@ -1133,9 +1865,12 @@ class AgentPayApiApp:
             tenant_id = self._extract_protocol_tenant(path, body)
 
         if not tenant_id:
-            return self._error_response(
-                400, "MISSING_TENANT_HEADER", "X-Tenant-ID header is required", request_id
-            )
+            if self.config and self.config.is_production_like:
+                tenant_id = cred.tenant_id
+            else:
+                return self._error_response(
+                    400, "MISSING_TENANT_HEADER", "X-Tenant-ID header is required", request_id
+                )
 
         if tenant_id != cred.tenant_id:
             return self._error_response(
@@ -1291,6 +2026,19 @@ class AgentPayApiApp:
                     422, "INVALID_REQUEST_BODY", f"Missing or invalid field: {err}", request_id
                 )
 
+            # --- AGENT IMPERSONATION PREVENTION (§14, §15, AP-009) ---
+            if cred.role is None and sub.agent_id != cred.principal_id:
+                return self._error_response(
+                    403,
+                    "AGENT_IMPERSONATION_DENIED",
+                    f"Authenticated agent '{cred.principal_id}' cannot act as agent '{sub.agent_id}'",
+                    request_id,
+                    details={
+                        "authenticated_agent": cred.principal_id,
+                        "asserted_agent": sub.agent_id,
+                    },
+                )
+
             action = ActionRequest(
                 action_id=sub.action_id,
                 tenant_id=tenant_id,
@@ -1353,25 +2101,59 @@ class AgentPayApiApp:
                 "trace_id": trace_id,
             }
 
-        # 6. Approvals (GET /api/v1/approvals or POST /api/v1/approvals/{id}/approve or reject or grant)
+        # 6. Approvals (GET /api/v1/approvals or GET /api/v1/approvals/{id} or POST /api/v1/approvals/{id}/*)
         if path == "/api/v1/approvals" and method == "GET":
             pending_list: list[dict[str, Any]] = []
             if self.orchestrator._approval_repo is not None:
                 repo = self.orchestrator._approval_repo
-                if isinstance(repo, InMemoryApprovalRepository):
-                    tenant_store = repo._approvals.get(tenant_id, {})
-                    for a in tenant_store.values():
-                        if a.status.value == "PENDING":
-                            pending_list.append(
-                                {
-                                    "approval_id": a.approval_id,
-                                    "action_id": a.binding.action_id,
-                                    "status": a.status.value,
-                                    "amount_minor": a.binding.amount.minor_units,
-                                    "currency": a.binding.amount.currency,
-                                }
-                            )
+                pending_approvals = repo.list_pending(tenant_id)
+                for a in pending_approvals:
+                    pending_list.append(
+                        {
+                            "approval_id": a.approval_id,
+                            "tenant_id": a.tenant_id,
+                            "principal_id": a.binding.principal_id,
+                            "action_id": a.binding.action_id,
+                            "status": a.status.value,
+                            "amount_minor": a.binding.amount.minor_units,
+                            "currency": a.binding.amount.currency,
+                            "merchant_id": a.binding.merchant_id,
+                            "resource_id": a.binding.resource_id,
+                            "action_version": a.binding.action_version,
+                            "requested_at": a.requested_at.isoformat(),
+                        }
+                    )
             return 200, {"approvals": pending_list}
+
+        if path.startswith("/api/v1/approvals/") and method == "GET":
+            parts = path.strip("/").split("/")
+            if len(parts) == 4:
+                approval_id = parts[3]
+                if self.orchestrator._approval_repo is None:
+                    return self._error_response(
+                        404, "NOT_FOUND", "Approval repository not configured", request_id
+                    )
+                appr_obj = self.orchestrator._approval_repo.get(tenant_id, approval_id)
+                if appr_obj is None:
+                    return self._error_response(
+                        404, "NOT_FOUND", f"Approval '{approval_id}' not found", request_id
+                    )
+                return 200, {
+                    "approval_id": appr_obj.approval_id,
+                    "tenant_id": appr_obj.tenant_id,
+                    "principal_id": appr_obj.binding.principal_id,
+                    "action_id": appr_obj.binding.action_id,
+                    "status": appr_obj.status.value,
+                    "amount_minor": appr_obj.binding.amount.minor_units,
+                    "currency": appr_obj.binding.amount.currency,
+                    "merchant_id": appr_obj.binding.merchant_id,
+                    "resource_id": appr_obj.binding.resource_id,
+                    "action_version": appr_obj.binding.action_version,
+                    "requested_at": appr_obj.requested_at.isoformat(),
+                    "approver_id": appr_obj.approver_id,
+                    "decided_at": appr_obj.decided_at.isoformat() if appr_obj.decided_at else None,
+                    "reason": appr_obj.reason,
+                }
 
         if path.startswith("/api/v1/approvals/") and method == "POST":
             parts = path.strip("/").split("/")
@@ -1400,12 +2182,19 @@ class AgentPayApiApp:
 
                     action_id = str(req.get("action_id") or appr.binding.action_id)
                     agent_id = str(req.get("agent_id") or "agent_01")
-                    principal_id = str(req.get("principal_id") or "user_01")
                     resource_id = str(req.get("resource_id") or appr.binding.resource_id)
                     variant_id = str(req.get("variant_id") or resource_id)
                     quantity = int(req.get("quantity", 1))
                     amount_minor = int(req.get("amount_minor", appr.binding.amount.minor_units))
                     currency = str(req.get("currency", appr.binding.amount.currency))
+
+                    body_principal = req.get("principal_id")
+                    if body_principal:
+                        principal_id = str(body_principal)
+                    elif cred.role == UserRole.ADMIN:
+                        principal_id = appr.binding.principal_id
+                    else:
+                        principal_id = cred.principal_id
 
                     action = ActionRequest(
                         action_id=action_id,
@@ -1470,6 +2259,15 @@ class AgentPayApiApp:
                         "rejection_reason": res.rejection_reason,
                         "trace_id": trace_id,
                     }
+
+                if cred.role is None:
+                    return self._error_response(
+                        403,
+                        "AGENT_CANNOT_APPROVE",
+                        f"Agent '{cred.principal_id}' cannot grant or reject human approvals (§2.1, §20, AP-009)",
+                        request_id,
+                        details={"principal_id": cred.principal_id, "role": "agent"},
+                    )
 
                 approver_id = req.get("approver_id", "")
                 reason = req.get("reason", "")
@@ -2035,6 +2833,8 @@ class ApiTestClient:
             "/api/v1/health",
             "/openapi.json",
             "/api/v1/webhooks/payments",
+            "/api/v1/webhooks/razorpay",
+            "/api/v1/webhooks/stripe",
         ) or (not require_obs_auth and path in ("/api/v1/metrics", "/api/v1/security/sbom"))
 
         # Explicit authentication management (§14)
@@ -2183,4 +2983,125 @@ class ApiTestClient:
             json_body=full_payload,
             auth=False,
             raw_body=raw_body,
+        )
+
+    def post_razorpay_webhook(
+        self,
+        payload: dict[str, Any] | bytes,
+        secret: str | None = None,
+        custom_signature: str | None = None,
+        headers: dict[str, str] | None = None,
+        raw_body: bytes | None = None,
+    ) -> ApiResponse:
+        """Submit a signed Razorpay webhook event with X-Razorpay-Signature (§61)."""
+        effective_secret = (
+            secret
+            if secret is not None
+            else getattr(
+                self.app,
+                "razorpay_webhook_secret",
+                getattr(self.app, "webhook_secret", "whsec_test_secret_32bytes_minimum_length"),
+            )
+        )
+        body_bytes: bytes
+        json_body: Any
+        if isinstance(payload, bytes):
+            body_bytes = payload
+            try:
+                json_body = json.loads(payload.decode("utf-8")) if payload else None
+            except Exception:
+                json_body = None
+        else:
+            json_body = payload
+            body_bytes = (
+                raw_body
+                if raw_body is not None
+                else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            )
+
+        hdrs: dict[str, str] = {}
+        if custom_signature == "__OMIT__":
+            pass
+        elif custom_signature is not None:
+            hdrs["x-razorpay-signature"] = custom_signature
+        else:
+            hdrs["x-razorpay-signature"] = hmac.new(
+                effective_secret.encode("utf-8"),
+                body_bytes,
+                hashlib.sha256,
+            ).hexdigest()
+
+        if headers:
+            hdrs.update(headers)
+
+        return self.request(
+            "POST",
+            "/api/v1/webhooks/razorpay",
+            headers=hdrs,
+            json_body=json_body,
+            auth=False,
+            raw_body=body_bytes,
+        )
+
+    def post_stripe_webhook(
+        self,
+        payload: dict[str, Any] | bytes,
+        secret: str | None = None,
+        timestamp: int | None = None,
+        custom_signature: str | None = None,
+        headers: dict[str, str] | None = None,
+        raw_body: bytes | None = None,
+    ) -> ApiResponse:
+        """Submit a signed Stripe webhook event with Stripe-Signature (§61)."""
+        effective_secret = (
+            secret
+            if secret is not None
+            else getattr(
+                self.app,
+                "stripe_webhook_secret",
+                getattr(self.app, "webhook_secret", "whsec_test_secret_32bytes_minimum_length"),
+            )
+        )
+        body_bytes: bytes
+        json_body: Any
+        if isinstance(payload, bytes):
+            body_bytes = payload
+            try:
+                json_body = json.loads(payload.decode("utf-8")) if payload else None
+            except Exception:
+                json_body = None
+        else:
+            json_body = payload
+            body_bytes = (
+                raw_body
+                if raw_body is not None
+                else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            )
+
+        ts_int = timestamp if timestamp is not None else int(datetime.now(UTC).timestamp())
+        signed_bytes = f"{ts_int}.".encode() + body_bytes
+
+        hdrs: dict[str, str] = {}
+        if custom_signature == "__OMIT__":
+            pass
+        elif custom_signature is not None:
+            hdrs["stripe-signature"] = custom_signature
+        else:
+            sig = hmac.new(
+                effective_secret.encode("utf-8"),
+                signed_bytes,
+                hashlib.sha256,
+            ).hexdigest()
+            hdrs["stripe-signature"] = f"t={ts_int},v1={sig}"
+
+        if headers:
+            hdrs.update(headers)
+
+        return self.request(
+            "POST",
+            "/api/v1/webhooks/stripe",
+            headers=hdrs,
+            json_body=json_body,
+            auth=False,
+            raw_body=body_bytes,
         )
