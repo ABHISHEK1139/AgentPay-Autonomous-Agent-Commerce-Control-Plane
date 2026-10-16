@@ -19,6 +19,7 @@ from agentpay.application.ports.payment_port import (
     PaymentRepository,
     ProviderTransactionMappingRepository,
     ProviderWebhookEventRepository,
+    RefundRepository,
 )
 from agentpay.domain.audit import AuditEventType
 from agentpay.domain.errors import CrossTenantAccessError, InvalidPaymentError
@@ -43,6 +44,7 @@ class PaymentReconciler:
         audit_ledger: AuditLedger | None = None,
         provider_mapping_repo: ProviderTransactionMappingRepository | None = None,
         webhook_event_repo: ProviderWebhookEventRepository | None = None,
+        refund_repo: RefundRepository | None = None,
     ) -> None:
         self._provider = payment_provider
         self._repo = payment_repo
@@ -52,6 +54,7 @@ class PaymentReconciler:
         self._audit_ledger = audit_ledger
         self._provider_mapping_repo = provider_mapping_repo
         self._webhook_event_repo = webhook_event_repo
+        self._refund_repo = refund_repo
 
     def reconcile_unknown_payment(self, tenant_id: str, attempt_id: str) -> PaymentAttempt:
         """Return the authoritative status of an attempt, querying the provider only if UNKNOWN."""
@@ -67,7 +70,14 @@ class PaymentReconciler:
         if stored.status is not PaymentStatus.UNKNOWN:
             return stored
 
-        refreshed = self._provider.get_payment(tenant_id, attempt_id)
+        # Prefer a provider-driven timeout reconciliation when the provider offers
+        # one (e.g. the mock provider resolves simulated timeouts to CAPTURED);
+        # otherwise fall back to querying the provider for the current status.
+        provider_reconcile = getattr(self._provider, "reconcile_timeout", None)
+        if callable(provider_reconcile):
+            refreshed = provider_reconcile(tenant_id, attempt_id)
+        else:
+            refreshed = self._provider.get_payment(tenant_id, attempt_id)
         if refreshed.attempt_id != attempt_id or refreshed.tenant_id != tenant_id:
             raise InvalidPaymentError(
                 f"Provider returned a mismatched attempt for '{attempt_id}' in tenant '{tenant_id}'"
@@ -411,6 +421,9 @@ class PaymentReconciler:
                 amount=attempt.amount,
                 reason=refund_reason,
             )
+
+            if self._refund_repo is not None:
+                self._refund_repo.save(effective_tenant, refund)
 
             # SAGA restock if applicable
             if order is not None and self._order_repo is not None:

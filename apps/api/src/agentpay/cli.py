@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from agentpay.adapters.in_memory.outbox_repository import InMemoryOutboxRepository
 from agentpay.api.factory import create_app
 from agentpay.config.config import AppConfig
 from agentpay.server import run_server
@@ -57,8 +58,19 @@ def _handle_worker(args: argparse.Namespace) -> int:
     interval = args.interval
     print(f"[*] Starting AgentPay Background Worker (poll interval: {interval}s)...")
 
-    # Wire worker with in-memory or database-backed repos
-    worker = BackgroundWorker()
+    # Wire worker with the application's repositories so each tick actually runs
+    # outbox dispatch, payment reconciliation, and approval expiry.
+    config = AppConfig.from_env()
+    db_url = getattr(args, "db", None)
+    if db_url:
+        config = config.with_overrides(database_url=db_url)
+    app = create_app(config=config)
+    worker = BackgroundWorker(
+        outbox_repo=InMemoryOutboxRepository(),
+        payment_repo=app.orchestrator._payment_repo,
+        payment_reconciler=app.reconciler,
+        approval_repo=app.orchestrator._approval_repo,
+    )
     running = True
 
     def _sig_handler(sig: int, frame: Any) -> None:
@@ -156,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     worker_parser.add_argument(
         "--interval", type=float, default=1.0, help="Polling interval in seconds"
     )
+    worker_parser.add_argument("--db", default=None, help="Optional database URL")
 
     # health
     health_parser = subparsers.add_parser("health", help="Check cluster health")

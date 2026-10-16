@@ -20,6 +20,7 @@ import contextlib
 import threading
 import uuid
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from agentpay.adapters.in_memory.payment_repository import (
@@ -166,6 +167,24 @@ class PurchaseOrchestrator:
         )
         self._approval_lock = threading.Lock()
         self._loop_trackers: dict[str, AgentLoopTracker] = {}
+        # (tenant_id, agent_id, utc_date_iso) -> cumulative minor units spent that day.
+        # Backs the daily spending limit: SpendingPolicyRequest.spent_today_minor is
+        # populated from this ledger so the daily cap is enforced across requests (§18).
+        self._daily_spend: dict[tuple[str, str, str], int] = {}
+        self._daily_spend_lock = threading.Lock()
+
+    def _get_spent_today_minor(self, tenant_id: str, agent_id: str) -> int:
+        """Cumulative minor units this agent has spent in the tenant today (UTC)."""
+        day = datetime.now(UTC).date().isoformat()
+        with self._daily_spend_lock:
+            return self._daily_spend.get((tenant_id, agent_id, day), 0)
+
+    def _record_daily_spend(self, tenant_id: str, agent_id: str, amount_minor: int) -> None:
+        """Add a completed purchase to the agent's daily spend ledger."""
+        day = datetime.now(UTC).date().isoformat()
+        with self._daily_spend_lock:
+            key = (tenant_id, agent_id, day)
+            self._daily_spend[key] = self._daily_spend.get(key, 0) + amount_minor
 
     def execute_tool(
         self,
@@ -346,16 +365,20 @@ class PurchaseOrchestrator:
                 if payment_id and self._payment_repo is not None:
                     cached_payment = self._payment_repo.get(tenant_id, payment_id)
                 status_raw = existing.result_data.get("status", "COMPLETED")
-                cached_status = (
-                    ActionStatus(status_raw)
-                    if status_raw in ActionStatus._value2member_map_
-                    else ActionStatus.COMPLETED
-                )
+                try:
+                    cached_status = ActionStatus(status_raw)
+                except ValueError:
+                    cached_status = ActionStatus.COMPLETED
+                decision_raw = existing.result_data.get("decision", "ALLOW")
+                try:
+                    cached_decision = PolicyDecision(decision_raw)
+                except ValueError:
+                    cached_decision = PolicyDecision.ALLOW
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
                     tenant_id=tenant_id,
                     status=cached_status,
-                    decision=PolicyDecision.ALLOW,
+                    decision=cached_decision,
                     order=cached_order,
                     payment=cached_payment,
                 )
@@ -648,7 +671,10 @@ class PurchaseOrchestrator:
             )
 
         policy_result = self._policy_engine.evaluate(
-            request=SpendingPolicyRequest(amount=action.amount),
+            request=SpendingPolicyRequest(
+                amount=action.amount,
+                spent_today_minor=self._get_spent_today_minor(tenant_id, action.agent_id),
+            ),
             limits=limits,
             policy_version="spending-policy-v1",
         )
@@ -685,6 +711,11 @@ class PurchaseOrchestrator:
                 action=action,
                 tenant_id=tenant_id,
                 reason="Amount exceeds autonomous threshold; awaiting human review",
+                merchant_id=(
+                    merchant.merchant_id
+                    if merchant
+                    else (resolved_merchant_id or action.resource.id)
+                ),
             )
             self._audit(
                 AuditEventType.APPROVAL_REQUESTED,
@@ -872,6 +903,7 @@ class PurchaseOrchestrator:
                                 "order_id": cancelled_order.order_id,
                                 "payment_id": payment_attempt.attempt_id,
                                 "status": "FAILED",
+                                "decision": PolicyDecision.ALLOW.value,
                                 "amount_minor": action.amount.minor_units,
                                 "currency": action.amount.currency,
                                 "action_id": action.action_id,
@@ -911,6 +943,7 @@ class PurchaseOrchestrator:
                             result_data={
                                 "payment_id": payment_attempt.attempt_id,
                                 "status": "FAILED",
+                                "decision": PolicyDecision.ALLOW.value,
                                 "amount_minor": action.amount.minor_units,
                                 "currency": action.amount.currency,
                                 "action_id": action.action_id,
@@ -996,12 +1029,17 @@ class PurchaseOrchestrator:
                         "order_id": order.order_id,
                         "payment_id": payment_attempt.attempt_id if payment_attempt else None,
                         "status": "COMPLETED",
+                        "decision": PolicyDecision.ALLOW.value,
                         "amount_minor": action.amount.minor_units,
                         "currency": action.amount.currency,
                         "action_id": action.action_id,
                     },
                 ),
             )
+
+        # Record the completed purchase against the agent's daily spend ledger so the
+        # daily spending limit is enforced across requests (§18, §19).
+        self._record_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
 
         return PurchaseExecutionResult(
             action_id=action.action_id,
@@ -1069,16 +1107,20 @@ class PurchaseOrchestrator:
                 if payment_id and self._payment_repo is not None:
                     cached_payment = self._payment_repo.get(tenant_id, payment_id)
                 status_raw = existing.result_data.get("status", "COMPLETED")
-                cached_status = (
-                    ActionStatus(status_raw)
-                    if status_raw in ActionStatus._value2member_map_
-                    else ActionStatus.COMPLETED
-                )
+                try:
+                    cached_status = ActionStatus(status_raw)
+                except ValueError:
+                    cached_status = ActionStatus.COMPLETED
+                decision_raw = existing.result_data.get("decision", "ALLOW")
+                try:
+                    cached_decision = PolicyDecision(decision_raw)
+                except ValueError:
+                    cached_decision = PolicyDecision.ALLOW
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
                     tenant_id=tenant_id,
                     status=cached_status,
-                    decision=PolicyDecision.ALLOW,
+                    decision=cached_decision,
                     order=cached_order,
                     payment=cached_payment,
                 )
