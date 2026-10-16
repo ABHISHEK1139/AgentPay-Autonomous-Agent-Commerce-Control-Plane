@@ -64,6 +64,7 @@ def test_valid_sandbox_config() -> None:
         "AGENTPAY_PAYMENT_PROVIDER": "razorpay_sandbox",
         "RAZORPAY_KEY_ID": "rzp_test_real12345",
         "RAZORPAY_KEY_SECRET": "sec_real_secret_32bytes_value",
+        "AGENTPAY_WEBHOOK_SECRET": "whsec_sandbox_explicit_secret_32bytes",
         "AGENTPAY_SEED_DEMO_DATA": "false",
     }
     config = AppConfig.from_env(env)
@@ -126,6 +127,44 @@ def test_sandbox_placeholder_key_secret_fails() -> None:
         AppConfig.from_env(env)
 
 
+def test_sandbox_missing_webhook_secret_fails() -> None:
+    """Sandbox mode fails closed when the webhook signing secret is unset (§61)."""
+    env = {
+        "AGENTPAY_ENVIRONMENT": "sandbox",
+        "AGENTPAY_PAYMENT_PROVIDER": "razorpay_sandbox",
+        "RAZORPAY_KEY_ID": "rzp_test_real12345",
+        "RAZORPAY_KEY_SECRET": "sec_real_secret_32bytes_value",
+        "AGENTPAY_SEED_DEMO_DATA": "false",
+    }
+    with pytest.raises(ConfigValidationError, match="RAZORPAY_WEBHOOK_SECRET"):
+        AppConfig.from_env(env)
+
+
+def test_webhook_handler_fails_closed_without_secret() -> None:
+    """Webhook endpoints fail closed (500, explicit code) when no secret is configured (§61)."""
+    from test_purchase_flow import setup_orchestrator
+
+    from agentpay.api.app import AgentPayApiApp
+
+    import time
+
+    orch, *_ = setup_orchestrator(tenant_id="tenant_01")
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret=None)
+    assert app.webhook_secret is None
+
+    status_code, body = app.handle_request(
+        "POST",
+        "/api/v1/webhooks/payments",
+        headers={
+            "x-webhook-signature": "deadbeef",
+            "x-webhook-timestamp": str(int(time.time())),
+        },
+        body={"event_id": "evt_no_secret_01"},
+    )
+    assert status_code == 500
+    assert body["error"]["code"] == "WEBHOOK_SECRET_NOT_CONFIGURED"
+
+
 def test_invalid_environment_string_fails() -> None:
     """Unknown environment string fails closed with ConfigValidationError."""
     with pytest.raises(ConfigValidationError, match="Invalid AGENTPAY_ENVIRONMENT"):
@@ -179,6 +218,7 @@ def test_demo_seed_allowed_in_sandbox_with_override() -> None:
         "AGENTPAY_ENVIRONMENT": "sandbox",
         "AGENTPAY_SEED_DEMO_DATA": "true",
         "AGENTPAY_UNSAFE_ALLOW_DEMO_SEED": "true",
+        "AGENTPAY_WEBHOOK_SECRET": "whsec_sandbox_explicit_signing_secret",
     }
     config = AppConfig.from_env(env)
     assert config.environment == Environment.SANDBOX
@@ -341,6 +381,7 @@ def test_production_accepts_explicit_cors() -> None:
         "AGENTPAY_ENVIRONMENT": "production",
         "AGENTPAY_SEED_DEMO_DATA": "false",
         "AGENTPAY_CORS_ALLOWED_ORIGINS": "https://control.agentpay.internal,https://app.agentpay.internal",
+        "AGENTPAY_WEBHOOK_SECRET": "whsec_prod_explicit_signing_secret",
     }
     cfg = AppConfig.from_env(env)
     assert cfg.environment == Environment.PRODUCTION
@@ -362,6 +403,8 @@ def test_production_fails_on_unmigrated_database() -> None:
         database_url=db_url,
         seed_demo_data=False,
         cors_allowed_origins=("https://control.agentpay.internal",),
+        razorpay_webhook_secret="whsec_prod_explicit_signing_secret",
+        stripe_webhook_secret="whsec_prod_explicit_signing_secret",
     )
     with pytest.raises(ConfigValidationError, match="Database schema is not ready"):
         create_app(config=config)
@@ -384,6 +427,8 @@ def test_production_succeeds_on_migrated_database() -> None:
         database_url=db_url,
         seed_demo_data=False,
         cors_allowed_origins=("https://control.agentpay.internal",),
+        razorpay_webhook_secret="whsec_prod_explicit_signing_secret",
+        stripe_webhook_secret="whsec_prod_explicit_signing_secret",
     )
     app = create_app(config=app_cfg)
     assert app is not None
@@ -419,30 +464,3 @@ def test_documented_sandbox_runbook_configuration() -> None:
     app = create_app(config=cfg)
     assert isinstance(app.orchestrator._payment_provider, RazorpaySandboxProvider)
     assert app.razorpay_webhook_secret == "whsec_runbook_documented_secret"
-
-
-def test_generic_openai_compatible_provider_configuration() -> None:
-    """Any OpenAI-compatible endpoint can be configured independently of hosted vendors."""
-    from agentpay.adapters.model_gateway import ModelGateway
-    from agentpay.adapters.model_gateway.openai_compatible_provider import (
-        OpenAiCompatibleModelProvider,
-    )
-
-    cfg = AppConfig.from_env(
-        {
-            "AGENTPAY_DECISION_ENGINE": "openai_compatible",
-            "AGENTPAY_MODEL_API_KEY": "ollama-local",
-            "AGENTPAY_MODEL_BASE_URL": "http://127.0.0.1:11434/v1",
-            "AGENTPAY_MODEL_NAME": "llamacpp:local",
-            "AGENTPAY_MODEL_PROVIDER_NAME": "ollama-local",
-            "AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK": "true",
-        }
-    )
-    app = create_app(config=cfg)
-    assert isinstance(app.orchestrator._decision_engine, ModelGateway)
-    provider = app.orchestrator._decision_engine._provider
-    assert isinstance(provider, OpenAiCompatibleModelProvider)
-    assert provider.base_url == "http://127.0.0.1:11434/v1"
-    assert provider.model == "llamacpp:local"
-    assert provider.provider_name == "ollama-local"
-    assert provider.allow_private_network is True

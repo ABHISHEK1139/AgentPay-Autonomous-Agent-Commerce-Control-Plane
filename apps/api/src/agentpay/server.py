@@ -195,9 +195,10 @@ def create_request_handler(
             # 4. Convert headers to dictionary
             headers_dict = {k.lower(): v for k, v in self.headers.items()}
 
-            # 5. Dispatch to AgentPay application
+            # 5. Dispatch to AgentPay application (query string stripped so routes
+            # with query parameters still match)
             status_code, response_body = app.handle_request(
-                method, self.path, headers_dict, json_body, raw_body=raw_bytes
+                method, clean_path, headers_dict, json_body, raw_body=raw_bytes
             )
 
             # 6. Write HTTP response

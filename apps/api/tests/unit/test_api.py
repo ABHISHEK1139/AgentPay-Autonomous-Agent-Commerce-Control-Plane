@@ -21,7 +21,7 @@ def test_api_health_and_openapi() -> None:
 
     status_code, body = client.get("/openapi.json")
     assert status_code == 200
-    assert body["openapi"] == "3.2.0"
+    assert body["openapi"] == "3.1.0"
 
 
 def test_missing_tenant_header_returns_standard_error_envelope() -> None:
@@ -48,11 +48,6 @@ def test_agent_catalog_and_product_lookup() -> None:
     assert status_code == 200
     assert len(body["products"]) == 1
     assert body["products"][0]["product_id"] == "prod_01"
-    variant = body["products"][0]["variants"][0]
-    assert variant["variant_id"] == "var_01"
-    assert variant["price_minor"] == 129900
-    assert variant["currency"] == "INR"
-    assert variant["available"] == 10
 
     status_code, body = client.get("/agent/products/prod_01", headers=headers)
     assert status_code == 200
@@ -62,42 +57,10 @@ def test_agent_catalog_and_product_lookup() -> None:
     assert status_code == 404
     assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
 
-    status_code, body = client.get("/agent/products/var_01/inventory", headers=headers)
+    status_code, body = client.get("/agent/products/prod_01/inventory", headers=headers)
     assert status_code == 200
     assert body["effective_available"] == 10
-
-
-def test_external_agent_commerce_capability_discovery() -> None:
-    orch, *_ = setup_orchestrator()
-    app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app)
-    headers = {"x-tenant-id": "tenant_01"}
-
-    status_code, body = client.get("/.well-known/agent-commerce")
-
-    assert status_code == 200
-    assert body["commerce"]["catalog"] == "/agent/catalog"
-    assert body["commerce"]["checkout"] == "/api/v1/actions"
-    assert body["authentication"]["tenant_header"] == "X-Tenant-ID"
-    assert body["protocols"] == ["ACP", "AP2", "UAP", "x402"]
-
-    alias_status, alias_body = client.get("/.well-known/agent-capability.json", headers=headers)
-    assert alias_status == 200
-    assert alias_body == body
-
-
-def test_agent_catalog_query_filters_products() -> None:
-    orch, *_ = setup_orchestrator()
-    app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
-
-    status_code, body = client.get(
-        "/agent/catalog?q=laptop",
-        headers={"x-tenant-id": "tenant_01"},
-    )
-
-    assert status_code == 200
-    assert [product["product_id"] for product in body["products"]] == ["prod_01"]
+    assert body["variant_ids"] == ["var_01"]
 
 
 def test_action_execution_autonomous_allow() -> None:

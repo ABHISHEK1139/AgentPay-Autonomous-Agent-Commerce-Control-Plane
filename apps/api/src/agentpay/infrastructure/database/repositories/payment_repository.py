@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -10,12 +11,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from agentpay.application.ports.payment_port import (
     IdempotencyStore,
     PaymentRepository,
+    RefundRepository,
 )
 from agentpay.domain.errors import CrossTenantAccessError
-from agentpay.domain.payments import IdempotencyRecord, PaymentAttempt
+from agentpay.domain.money import Money
+from agentpay.domain.payments import IdempotencyRecord, PaymentAttempt, Refund
 from agentpay.infrastructure.database.models.payment import PaymentAttemptModel
 from agentpay.infrastructure.database.models.payments import (
     IdempotencyRecordModel,
+    RefundModel,
 )
 from agentpay.infrastructure.database.repositories.base import BaseSqlAlchemyRepository
 from agentpay.infrastructure.database.repositories.order_repository import (
@@ -92,6 +96,64 @@ class SqlAlchemyPaymentRepository(BaseSqlAlchemyRepository, PaymentRepository):
                 existing.provider_payment_id = target_attempt.provider_payment_id
                 existing.failure_reason = target_attempt.failure_reason
                 existing.updated_at = target_attempt.updated_at
+            session.commit()
+
+
+class SqlAlchemyRefundRepository(BaseSqlAlchemyRepository, RefundRepository):
+    """SQLAlchemy-backed repository for Refund persistence with strict tenant scoping."""
+
+    def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
+        super().__init__(session_or_factory)
+
+    def get(self, tenant_id: str, refund_id: str) -> Refund | None:
+        with self._session() as session:
+            stmt = select(RefundModel).where(
+                RefundModel.tenant_id == tenant_id,
+                RefundModel.refund_id == refund_id,
+            )
+            model = session.scalar(stmt)
+            if model is None:
+                return None
+            created_at = model.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            return Refund(
+                refund_id=model.refund_id,
+                payment_attempt_id=model.payment_attempt_id,
+                tenant_id=model.tenant_id,
+                amount=Money(model.amount_minor, model.currency),
+                reason=model.reason or "",
+                created_at=created_at,
+            )
+
+    def save(self, tenant_id: str, refund: Refund) -> None:
+        if refund.tenant_id != tenant_id:
+            raise CrossTenantAccessError(
+                f"Refund tenant '{refund.tenant_id}' does not match partition '{tenant_id}'"
+            )
+        with self._session() as session:
+            stmt = select(RefundModel).where(
+                RefundModel.tenant_id == tenant_id,
+                RefundModel.refund_id == refund.refund_id,
+            )
+            existing = session.scalar(stmt)
+            if existing is None:
+                session.add(
+                    RefundModel(
+                        refund_id=refund.refund_id,
+                        tenant_id=refund.tenant_id,
+                        payment_attempt_id=refund.payment_attempt_id,
+                        amount_minor=refund.amount.minor_units,
+                        currency=refund.amount.currency,
+                        reason=refund.reason,
+                        created_at=refund.created_at,
+                    )
+                )
+            else:
+                existing.payment_attempt_id = refund.payment_attempt_id
+                existing.amount_minor = refund.amount.minor_units
+                existing.currency = refund.amount.currency
+                existing.reason = refund.reason
             session.commit()
 
 

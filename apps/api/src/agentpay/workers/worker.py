@@ -142,11 +142,7 @@ class BackgroundWorker:
             req_time = getattr(app, "requested_at", now)
             if req_time <= cutoff:
                 try:
-                    expired_app = app.reject(
-                        approver_id="system_worker",
-                        reason="Approval request expired past TTL",
-                        decided_at=now,
-                    )
+                    expired_app = app.expire(decided_at=now)
                     if hasattr(self.approval_repo, "save"):
                         self.approval_repo.save(app.tenant_id, expired_app)
                     expired_count += 1

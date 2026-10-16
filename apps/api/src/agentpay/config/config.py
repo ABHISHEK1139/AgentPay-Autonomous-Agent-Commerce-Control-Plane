@@ -105,11 +105,14 @@ class AppConfig:
     # Razorpay credentials
     razorpay_key_id: str | None = None
     razorpay_key_secret: str | None = None
-    razorpay_webhook_secret: str = "whsec_agentpay_default_secure_secret_32bytes"
+    # NOTE: no default value on purpose. A publicly-known default webhook secret
+    # would let anyone forge provider webhooks; sandbox/production fail closed
+    # when this is unset (see __post_init__ rule 7).
+    razorpay_webhook_secret: str | None = None
 
     # Stripe credentials
     stripe_api_key: str | None = None
-    stripe_webhook_secret: str = "whsec_agentpay_default_secure_secret_32bytes"
+    stripe_webhook_secret: str | None = None
 
     # Security & Observability
     require_observability_auth: bool = False
@@ -124,13 +127,6 @@ class AppConfig:
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "apodex/apodex-1.1-mini:free"
-
-    # Provider-neutral OpenAI-compatible model endpoint, including local Ollama (§23)
-    model_api_key: str | None = None
-    model_base_url: str = "http://127.0.0.1:11434/v1"
-    model_name: str = "llama3.2"
-    model_provider_name: str = "openai-compatible"
-    model_allow_private_network: bool = False
 
     # Live payments safety flag (§151)
     live_payments_enabled: bool = False
@@ -203,12 +199,12 @@ class AppConfig:
             )
 
         # 5. Advisory AI / OrcaRouter credential validation (§23)
-        if self.decision_engine == DecisionEngineType.ORCAROUTER and is_placeholder_secret(
-            self.orcarouter_api_key
-        ):
+        if self.decision_engine in (
+            DecisionEngineType.ORCAROUTER,
+            DecisionEngineType.OPENAI_COMPATIBLE,
+        ) and is_placeholder_secret(self.orcarouter_api_key):
             raise ConfigValidationError(
-                "ORCAROUTER_API_KEY is missing or a placeholder string when decision_engine is "
-                "'orcarouter'."
+                f"ORCAROUTER_API_KEY is missing or a placeholder string when decision_engine is '{self.decision_engine.value}'."
             )
 
         # 6. Advisory AI / OpenRouter credential validation (§23)
@@ -218,13 +214,21 @@ class AppConfig:
             raise ConfigValidationError(
                 "OPENROUTER_API_KEY is missing or a placeholder string when decision_engine is 'openrouter'."
             )
-        if self.decision_engine == DecisionEngineType.OPENAI_COMPATIBLE and is_placeholder_secret(
-            self.model_api_key
-        ):
-            raise ConfigValidationError(
-                "AGENTPAY_MODEL_API_KEY is missing or a placeholder string when decision_engine "
-                "is 'openai_compatible'."
-            )
+
+        # 7. Webhook signing secrets must be explicitly configured outside local/dev (§61).
+        #    Verifying HMAC signatures against a publicly-known default secret is
+        #    equivalent to no verification: anyone can forge provider webhooks.
+        if self.is_production_like:
+            for _field_name, _label in (
+                ("razorpay_webhook_secret", "RAZORPAY_WEBHOOK_SECRET"),
+                ("stripe_webhook_secret", "STRIPE_WEBHOOK_SECRET"),
+            ):
+                if is_placeholder_secret(getattr(self, _field_name)):
+                    raise ConfigValidationError(
+                        f"{_label} is missing or a placeholder string in "
+                        f"'{self.environment.value}' environment. Webhook HMAC "
+                        "verification requires an explicitly configured secret (§61)."
+                    )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> AppConfig:
@@ -285,17 +289,9 @@ class AppConfig:
         # 5. Credentials
         rzp_key_id = e.get("RAZORPAY_KEY_ID")
         rzp_key_secret = e.get("RAZORPAY_KEY_SECRET")
-        rzp_wh_secret = (
-            e.get("RAZORPAY_WEBHOOK_SECRET")
-            or e.get("AGENTPAY_WEBHOOK_SECRET")
-            or "whsec_agentpay_default_secure_secret_32bytes"
-        )
+        rzp_wh_secret = e.get("RAZORPAY_WEBHOOK_SECRET") or e.get("AGENTPAY_WEBHOOK_SECRET")
         stripe_key = e.get("STRIPE_API_KEY")
-        stripe_wh_secret = (
-            e.get("STRIPE_WEBHOOK_SECRET")
-            or e.get("AGENTPAY_WEBHOOK_SECRET")
-            or "whsec_agentpay_default_secure_secret_32bytes"
-        )
+        stripe_wh_secret = e.get("STRIPE_WEBHOOK_SECRET") or e.get("AGENTPAY_WEBHOOK_SECRET")
 
         # 6. Observability & AI
         default_obs = environment in (Environment.PRODUCTION, Environment.SANDBOX)
@@ -315,13 +311,6 @@ class AppConfig:
         openrouter_key = e.get("OPENROUTER_API_KEY") or llm_key
         openrouter_base = (e.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").strip()
         openrouter_model = (e.get("OPENROUTER_MODEL") or "apodex/apodex-1.1-mini:free").strip()
-        model_key = e.get("AGENTPAY_MODEL_API_KEY") or e.get("LLM_API_KEY")
-        model_base = (e.get("AGENTPAY_MODEL_BASE_URL") or "http://127.0.0.1:11434/v1").strip()
-        model_name = (e.get("AGENTPAY_MODEL_NAME") or "llama3.2").strip()
-        model_provider_name = (e.get("AGENTPAY_MODEL_PROVIDER_NAME") or "openai-compatible").strip()
-        model_allow_private_network = _parse_bool(
-            e.get("AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK"), default=False
-        )
 
         # 7. Live safety flag (§151)
         live_flag = _parse_bool(
@@ -352,11 +341,6 @@ class AppConfig:
             openrouter_api_key=openrouter_key,
             openrouter_base_url=openrouter_base,
             openrouter_model=openrouter_model,
-            model_api_key=model_key,
-            model_base_url=model_base,
-            model_name=model_name,
-            model_provider_name=model_provider_name,
-            model_allow_private_network=model_allow_private_network,
             live_payments_enabled=live_flag,
         )
 

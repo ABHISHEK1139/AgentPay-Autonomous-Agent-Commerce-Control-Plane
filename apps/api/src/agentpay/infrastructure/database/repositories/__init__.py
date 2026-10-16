@@ -35,6 +35,7 @@ from agentpay.infrastructure.database.repositories.outbox_repository import (
 from agentpay.infrastructure.database.repositories.payment_repository import (
     SqlAlchemyIdempotencyStore,
     SqlAlchemyPaymentRepository,
+    SqlAlchemyRefundRepository,
 )
 from agentpay.infrastructure.database.repositories.provider_mapping_repository import (
     SqlAlchemyProviderTransactionMappingRepository,
@@ -64,6 +65,7 @@ __all__ = [
     "SqlAlchemyProductRepository",
     "SqlAlchemyProviderTransactionMappingRepository",
     "SqlAlchemyProviderWebhookEventRepository",
+    "SqlAlchemyRefundRepository",
     "SqlAlchemyTenantRepository",
     "SqlAlchemyVariantRepository",
 ]
