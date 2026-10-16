@@ -9,7 +9,7 @@ services:
     environment:
       POSTGRES_DB: agentpay
       POSTGRES_USER: agentpay
-      POSTGRES_PASSWORD: agentpay_local_only
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentpay_local_only}
     ports:
       - "5432:5432"
     volumes:

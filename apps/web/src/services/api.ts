@@ -8,7 +8,10 @@ import { DEMO_SCENARIOS } from "./scenarioData.ts";
 export class ControlCenterApiService {
   private _demoMode: boolean = true;
   private _baseUrl: string = "";
-  private _authToken: string = "test_bearer_admin_token";
+  // NOTE: no default credential. The UI must call setAuthToken() after the
+  // operator signs in; shipping a hardcoded admin token would grant anyone
+  // with the built bundle full operator access.
+  private _authToken: string = "";
   private _tenantId: string = "tenant_01";
   private _emergencyState: EmergencyState = { ...INITIAL_EMERGENCY_STATE };
   private _approvals: ApprovalItem[] = [...MOCK_APPROVAL_ITEMS];

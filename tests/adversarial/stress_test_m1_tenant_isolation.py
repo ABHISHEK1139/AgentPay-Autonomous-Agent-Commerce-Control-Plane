@@ -66,7 +66,7 @@ def _seed_environment(
     )
     if payment_provider is not None:
         orch._payment_provider = payment_provider
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     # Seed baseline inventory
