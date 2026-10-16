@@ -39,7 +39,7 @@ def _seed_test_env(
     orch, _, _, _, _, _, _, inventory_repo, _, audit_ledger, _ = setup_orchestrator(
         tenant_id=tenant_id
     )
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     # Seed PaymentAttempt
@@ -466,7 +466,7 @@ def test_webhook_concurrent_20_threads_failed_prevents_inventory_theft() -> None
     import threading
 
     orch, _, _, _, _, _, var_repo, inv_repo, _, audit_ledger, _ = setup_orchestrator("tenant_01")
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     var_repo.save(
@@ -557,7 +557,7 @@ def test_webhook_concurrent_20_threads_captured_prevents_duplicate_capture() -> 
     import threading
 
     orch, _, _, _, _, _, _, _, _, audit_ledger, _ = setup_orchestrator("tenant_01")
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     attempt = PaymentAttempt(
@@ -637,7 +637,7 @@ def test_webhook_concurrent_20_threads_refunded_prevents_double_restock() -> Non
     import threading
 
     orch, _, _, _, _, _, var_repo, inv_repo, _, _, _ = setup_orchestrator("tenant_01")
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     var_repo.save(
@@ -708,7 +708,7 @@ def test_webhook_concurrent_20_threads_refunded_prevents_double_restock() -> Non
 def test_webhook_successive_refunds_distinct_event_ids_preserve_inventory() -> None:
     """Successive delivery of payment.refunded with distinct event IDs must not over-release inventory."""
     orch, _, _, _, _, _, var_repo, inv_repo, _, _, _ = setup_orchestrator("tenant_01")
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     var_repo.save(
@@ -768,7 +768,7 @@ def test_webhook_successive_refunds_distinct_event_ids_preserve_inventory() -> N
 def test_webhook_successive_failed_distinct_event_ids_preserve_inventory() -> None:
     """Successive delivery of payment.failed with distinct event IDs must not repeatedly release inventory."""
     orch, _, _, _, _, _, var_repo, inv_repo, _, _, _ = setup_orchestrator("tenant_01")
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     var_repo.save(
@@ -822,7 +822,7 @@ def test_webhook_successive_failed_distinct_event_ids_preserve_inventory() -> No
 def test_webhook_refund_rejected_on_non_captured_payment() -> None:
     """Refunding a payment attempt that is NOT in CAPTURED status must fail closed and not touch inventory."""
     orch, _, _, _, _, _, var_repo, inv_repo, _, _, _ = setup_orchestrator("tenant_01")
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     var_repo.save(

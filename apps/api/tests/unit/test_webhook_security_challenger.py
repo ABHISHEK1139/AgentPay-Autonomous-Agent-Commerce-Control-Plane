@@ -38,7 +38,7 @@ def _seed_test_env(
     orch, _, _, _, _, _, _, inventory_repo, _, audit_ledger, _ = setup_orchestrator(
         tenant_id=tenant_id
     )
-    app = AgentPayApiApp(orchestrator=orch)
+    app = AgentPayApiApp(orchestrator=orch, webhook_secret="whsec_unit_test_only_secret_32bytes")
     client = ApiTestClient(app)
 
     # Seed PaymentAttempt
