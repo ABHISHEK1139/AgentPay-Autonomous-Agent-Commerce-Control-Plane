@@ -39,6 +39,7 @@ from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.adapters.model_gateway import (
     ModelGateway,
+    OpenAiCompatibleModelProvider,
     OpenRouterModelProvider,
     OrcaRouterModelProvider,
 )
@@ -473,15 +474,22 @@ def create_app(
                     model=cfg.openrouter_model,
                 )
             )
-        elif cfg.decision_engine in (
-            DecisionEngineType.ORCAROUTER,
-            DecisionEngineType.OPENAI_COMPATIBLE,
-        ):
+        elif cfg.decision_engine in (DecisionEngineType.ORCAROUTER,):
             decision_engine = ModelGateway(
                 provider=OrcaRouterModelProvider(
                     api_key=cfg.orcarouter_api_key or "",
                     base_url=cfg.orcarouter_base_url,
                     model=cfg.orcarouter_model,
+                )
+            )
+        elif cfg.decision_engine == DecisionEngineType.OPENAI_COMPATIBLE:
+            decision_engine = ModelGateway(
+                provider=OpenAiCompatibleModelProvider(
+                    api_key=cfg.model_api_key or "",
+                    base_url=cfg.model_base_url,
+                    model=cfg.model_name,
+                    provider_name=cfg.model_provider_name,
+                    allow_private_network=cfg.model_allow_private_network,
                 )
             )
         elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:

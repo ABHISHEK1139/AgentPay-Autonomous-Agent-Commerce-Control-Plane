@@ -419,3 +419,30 @@ def test_documented_sandbox_runbook_configuration() -> None:
     app = create_app(config=cfg)
     assert isinstance(app.orchestrator._payment_provider, RazorpaySandboxProvider)
     assert app.razorpay_webhook_secret == "whsec_runbook_documented_secret"
+
+
+def test_generic_openai_compatible_provider_configuration() -> None:
+    """Any OpenAI-compatible endpoint can be configured independently of hosted vendors."""
+    from agentpay.adapters.model_gateway import ModelGateway
+    from agentpay.adapters.model_gateway.openai_compatible_provider import (
+        OpenAiCompatibleModelProvider,
+    )
+
+    cfg = AppConfig.from_env(
+        {
+            "AGENTPAY_DECISION_ENGINE": "openai_compatible",
+            "AGENTPAY_MODEL_API_KEY": "ollama-local",
+            "AGENTPAY_MODEL_BASE_URL": "http://127.0.0.1:11434/v1",
+            "AGENTPAY_MODEL_NAME": "llamacpp:local",
+            "AGENTPAY_MODEL_PROVIDER_NAME": "ollama-local",
+            "AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK": "true",
+        }
+    )
+    app = create_app(config=cfg)
+    assert isinstance(app.orchestrator._decision_engine, ModelGateway)
+    provider = app.orchestrator._decision_engine._provider
+    assert isinstance(provider, OpenAiCompatibleModelProvider)
+    assert provider.base_url == "http://127.0.0.1:11434/v1"
+    assert provider.model == "llamacpp:local"
+    assert provider.provider_name == "ollama-local"
+    assert provider.allow_private_network is True

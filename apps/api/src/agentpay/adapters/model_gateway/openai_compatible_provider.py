@@ -54,6 +54,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
             Callable[[urllib.request.Request], tuple[int, bytes, dict[str, str]]] | None
         ) = None,
         resolve_dns: bool = True,
+        allow_private_network: bool = False,
     ) -> None:
         self.api_key = (
             api_key.strip()
@@ -75,6 +76,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
         self.extra_headers = dict(extra_headers) if extra_headers else {}
         self._transport = transport
         self.resolve_dns = resolve_dns
+        self.allow_private_network = allow_private_network
 
     def _sanitize_error_message(self, message: str) -> str:
         """Strip API key or sensitive credentials from error messages before propagation (§40)."""
@@ -121,10 +123,16 @@ class OpenAiCompatibleModelProvider(ModelProvider):
         # 1. SSRF pre-flight validation
         if self._transport is None:
             try:
-                validate_outbound_url(
-                    endpoint_url,
-                    config=SSRFConfig(resolve_dns=self.resolve_dns),
-                )
+                validation_config = SSRFConfig(resolve_dns=self.resolve_dns)
+                if self.allow_private_network:
+                    validation_config = SSRFConfig(
+                        allowed_schemes=frozenset({"http", "https"}),
+                        allowed_ports=frozenset({80, 443, 11434}),
+                        blocked_hosts=frozenset(),
+                        allow_private_ips=True,
+                        resolve_dns=self.resolve_dns,
+                    )
+                validate_outbound_url(endpoint_url, config=validation_config)
             except Exception as ssrf_err:
                 logger.warning(
                     "SSRF check rejected AI model endpoint '%s': %s", endpoint_url, ssrf_err

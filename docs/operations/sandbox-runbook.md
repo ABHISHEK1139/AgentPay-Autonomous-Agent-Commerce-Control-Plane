@@ -58,18 +58,37 @@ $env:RAZORPAY_WEBHOOK_SECRET="your_webhook_secret_here"
 $env:DATABASE_URL="sqlite:///agentpay_sandbox.db"
 ```
 
-### 3.2 Advisory AI Intelligence Configuration (OpenRouter / OrcaRouter)
+### 3.2 Advisory AI Intelligence Configuration (Any OpenAI-Compatible Provider)
 
-AgentPay supports external OpenAI-compatible advisory decision routers, including **OpenRouter** (e.g. `apodex/apodex-1.1-mini:free`) and **OrcaRouter** (`orcarouter/auto`). Model evaluations are strictly advisory and sit below the deterministic policy boundary (§2.1, §23):
+AgentPay supports any OpenAI-compatible advisory endpoint. Model evaluations are
+strictly advisory and sit below the deterministic policy boundary (§2.1, §23).
+Use the provider-neutral configuration for Ollama, vLLM, LM Studio, or any hosted
+endpoint that exposes `/v1/chat/completions`:
 
 ```powershell
-# OpenRouter configuration (defaults to apodex/apodex-1.1-mini:free)
-$env:AGENTPAY_DECISION_ENGINE="openrouter"
-$env:OPENROUTER_API_KEY="sk-or-v1-..."
+$env:AGENTPAY_DECISION_ENGINE="openai_compatible"
+$env:AGENTPAY_MODEL_API_KEY="ollama-local"
+$env:AGENTPAY_MODEL_BASE_URL="http://127.0.0.1:11434/v1"
+$env:AGENTPAY_MODEL_NAME="llamacpp:2cf98652fdc60fbb161f69c1c5cd5cca671992211d1214edb11dabeb56434a0d"
+$env:AGENTPAY_MODEL_PROVIDER_NAME="ollama"
+# Required only for explicitly trusted local/private endpoints:
+$env:AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK="true"
+```
 
-# Optional overrides:
-# $env:OPENROUTER_MODEL="apodex/apodex-1.1-mini:free"
-# $env:OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
+For a hosted provider, keep private-network access disabled and replace the
+endpoint, model, and API key:
+
+```powershell
+# OpenRouter-compatible example
+$env:AGENTPAY_DECISION_ENGINE="openai_compatible"
+$env:AGENTPAY_MODEL_API_KEY="provider-api-key"
+$env:AGENTPAY_MODEL_BASE_URL="https://provider.example/v1"
+$env:AGENTPAY_MODEL_NAME="provider/model"
+$env:AGENTPAY_MODEL_PROVIDER_NAME="provider"
+
+# Dedicated OpenRouter mode remains supported:
+# $env:AGENTPAY_DECISION_ENGINE="openrouter"
+# $env:OPENROUTER_API_KEY="sk-or-v1-..."
 ```
 
 ### 3.3 Startup Health Verification
