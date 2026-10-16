@@ -68,6 +68,9 @@ uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py 8/8 pa
 uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py 5/5 passed (simulated Razorpay sandbox E2E)
 Live validation: PostgreSQL migrations/schema passed, Redis `PONG` passed, Razorpay sandbox order creation passed
 with configured test credentials, and PostgreSQL dump/restore passed with 20 restored tables.
+Local AI validation: Ollama model `llamacpp:2cf98652fdc60fbb161f69c1c5cd5cca671992211d1214edb11dabeb56434a0d`
+(7.2 GB) passed through the OpenAI-compatible model gateway: normal commerce returned `ALLOW/LOW`, and
+prompt-injection input returned `DENY/HIGH`.
 uv run python tests/adversarial/stress_test_model_gateway_resilience.py  6/6 passed
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed
 uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
