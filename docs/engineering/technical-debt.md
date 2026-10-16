@@ -45,7 +45,9 @@ resolution is a decision to accept the debt, and should say so explicitly.
   `test_cryptographic_tamper_challenger.py`, `test_concurrency_stress_challenger.py`, `test_protocol_adversarial_challenger.py`)
   exercise all 14 Section 177 attack vectors directly in pytest.
 - **Resolution:** integrate GitHub Secret Scanning, Dependabot, and SAST action runners into CI before production cutover.
-- **Status:** **Open, tracked.**
+- **Status:** **Open, tracked.** The repository CI now includes dependency auditing and
+  CodeQL analysis; commercial scanners and GitHub Secret Scanning remain deployment-owner
+  configuration items.
 
 ## TD-005 — Repository is not under version control
 

@@ -31,8 +31,8 @@ Every pull request must pass all quality gates locally and in CI without excepti
 ```powershell
 uv run ruff format --check .       # Code style & formatting across all Python files
 uv run ruff check .                # Strict linter rules
-uv run mypy                        # Strict static type checking (0 errors across 167 files)
-uv run pytest                      # 748 unit, property, chaos, and live socket network tests
+uv run mypy                        # Strict static type checking (0 errors across 186 files)
+uv run pytest                      # 835 passed, 3 opt-in credential tests skipped
 node --test tests/web.test.mjs     # 5 Control Center web suites (ARIA §121 & live API client)
 ```
 
@@ -53,7 +53,7 @@ uv run python scripts/generate_sbom.py --verify
 
 A contribution is considered complete only when:
 1. **Fully Tested**: New functionality has unit tests, boundary tests, and (if applicable) property or chaos tests.
-2. **Zero Regressions**: All 748+ tests pass cleanly. Never delete or weaken a test to get a green build (§78).
+2. **Zero Regressions**: All 835 currently collected tests pass, with only explicitly opt-in credential tests skipped when credentials are absent. Never delete or weaken a test to get a green build (§78).
 3. **Strict Domain Purity**: The domain layer (`apps/api/src/agentpay/domain/`) must remain pure Python and import zero frameworks or infrastructure ports (§10). Enforced by AST tests.
 4. **Multi-Tenant Isolation**: Every repository and application service operation takes an explicit `tenant_id` (§49–§51).
 5. **Fail-Closed Semantics**: If money, price, inventory, or permissions are uncertain, fail closed (§2.4).

@@ -507,7 +507,7 @@ def test_health_and_openapi_remain_unauthenticated(api_client: ApiTestClient) ->
 
     s2, b2 = api_client.get("/openapi.json", auth=False)
     assert s2 == 200
-    assert b2["openapi"] == "3.1.0"
+    assert b2["openapi"] == "3.2.0"
 
 
 def test_missing_tenant_header_on_authenticated_request_returns_400(

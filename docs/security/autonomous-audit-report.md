@@ -8,6 +8,11 @@
 > **Final Verdict**: **TESTED — 705/705 PASSING, ZERO FAILURES OBSERVED**
 > (autonomous self-assessment; **not** an independent audit and **not** a certification —
 > see §5 and `docs/security/standards-matrix.md`)  
+>
+> **Historical report notice:** This report records the 2026-10-11 audit corpus.
+> It is not the current release-gate result; see
+> [`docs/engineering/current-state.md`](../engineering/current-state.md) for the
+> 2026-10-16 verification refresh.
 
 ---
 

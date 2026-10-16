@@ -298,7 +298,9 @@ def upgrade() -> None:
         sa.Column("reason", sa.String(length=512), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(
-            ["payment_attempt_id"], ["payment_attempts.attempt_id"], ondelete="CASCADE"
+            ["tenant_id", "payment_attempt_id"],
+            ["payment_attempts.tenant_id", "payment_attempts.attempt_id"],
+            ondelete="CASCADE",
         ),
         sa.PrimaryKeyConstraint("refund_id"),
     )

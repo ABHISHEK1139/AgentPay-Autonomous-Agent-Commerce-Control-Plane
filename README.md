@@ -9,7 +9,7 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/mypy-strict-brightgreen.svg" alt="Mypy Strict"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/code_style-ruff-black.svg" alt="Ruff"></a>
-  <a href="https://docs.pytest.org/"><img src="https://img.shields.io/badge/tests-815_passed-brightgreen.svg" alt="Pytest 815 Passed"></a>
+  <a href="https://docs.pytest.org/"><img src="https://img.shields.io/badge/tests-835_passed%20%7C%203_skipped-brightgreen.svg" alt="Pytest 835 passed, 3 skipped"></a>
   <a href="tests/web.test.mjs"><img src="https://img.shields.io/badge/web_tests-5_passed-brightgreen.svg" alt="Web Tests"></a>
   <a href="docs/architecture/architecture.md"><img src="https://img.shields.io/badge/architecture-domain_pure-blue.svg" alt="Domain Purity"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue.svg" alt="License Apache 2.0"></a>
@@ -42,6 +42,43 @@ As AI agents gain the capability to browse the web, compare tools, negotiate pri
 ```
 
 ---
+
+## Unified platform direction
+
+This repository is the merged implementation of the two AgentPay projects in this
+workspace. The `platfrom` codebase is the base because it has the clearest
+domain/application/adapter boundaries and the strongest fail-closed authorization
+and audit guarantees. Razorpay commerce capabilities are integrated as modules,
+not as a second application stack:
+
+| Capability | Unified implementation |
+|---|---|
+| Agent commerce discovery | `/.well-known/agent-commerce` and `/.well-known/agent-capability.json` |
+| Merchant catalog | Tenant-scoped products, variants, prices, and inventory through `/agent/catalog` |
+| Checkout authorization | Canonical `ActionRequest`, deterministic policy evaluation, and bound approvals |
+| Razorpay payments | In-memory simulator for local development and the opt-in Razorpay sandbox adapter |
+| Payment safety | Integer paise/minor units, idempotency, webhook HMAC verification, reconciliation, and audit |
+| Protocol interoperability | ACP, AP2, UAP, and x402 adapters mapped to the same purchase use case |
+
+The standalone `razorpay/agentpay` project remains a source of design patterns
+and merchant-flow requirements; it is not copied wholesale because doing so would
+duplicate authentication, persistence, payment, and authorization boundaries.
+This keeps one source of truth for tenant isolation and prevents a merchant
+checkout path from bypassing the control plane.
+
+External agents can discover the public supported surface without credentials;
+catalog and checkout calls still require tenant authentication:
+
+```powershell
+curl http://127.0.0.1:8000/.well-known/agent-commerce `
+  -H "Authorization: Bearer <token>" `
+  -H "X-Tenant-ID: tenant_01"
+```
+
+Catalog responses include priced variants and effective availability in integer
+minor units, so an agent can compare offers without inventing prices or
+contacting Razorpay directly. All payment creation remains behind the same
+authorization, approval, inventory, idempotency, and audit pipeline.
 
 ## Non-Negotiable Invariants
 
@@ -177,21 +214,28 @@ AgentPay includes pure domain adapters translating external agent commerce stand
 Every commit to AgentPay is verified against strict local and CI quality gates:
 
 ```powershell
-# 1. Code style & formatting (199 files clean)
+# 1. Code style & formatting (203 files clean)
 uv run ruff format --check .
 
 # 2. Strict linting rules (clean)
 uv run ruff check .
 
-# 3. Strict static type checking (182 files clean, 0 errors)
+# 3. Strict static type checking (186 files clean, 0 errors)
 uv run mypy
 
-# 4. Pytest test suite (815 passed, 0 failed, 0 skipped)
+# 4. Pytest test suite (835 passed, 0 failed, 3 skipped opt-in tests)
 uv run pytest
 
 # 5. Web Control Center test suite (5 passed, ARIA §121 & live client)
-npx --yes tsx --test tests/web.test.mjs
+node --test tests/web.test.mjs
 ```
+
+The latest local verification on 2026-10-16 produced **835 passed and 3
+skipped** Python tests, **5 passed** web tests, clean Ruff checks, and clean
+strict mypy checks across **186 source files**. The skipped tests are opt-in
+OpenRouter, OrcaRouter, and Razorpay sandbox calls without credentials.
+PostgreSQL/Redis deployment tests and live provider calls require external
+infrastructure and are not represented as passing local evidence.
 
 ### Dedicated Adversarial Stress Suites (17 Suites)
 
@@ -230,8 +274,8 @@ uv run python scripts/generate_sbom.py --verify                          # Cyclo
 | `POST` | `/api/v1/approvals/{id}/grant` | Grant human approval for a pending action. |
 | `POST` | `/api/v1/approvals/{id}/execute` | Execute an action that has received human approval. |
 | `POST` | `/api/v1/webhooks/payments` | Ingest and reconcile signed Stripe/Razorpay payment webhooks. |
-| `POST` | `/api/v1/system/pause` | Emergency kill switch: pause autonomous actions globally or by tenant. |
-| `POST` | `/api/v1/system/resume` | Resume operations after resolving an incident. |
+| `POST` | `/api/v1/emergency/pause` | Emergency kill switch: pause autonomous actions globally or by tenant. |
+| `POST` | `/api/v1/emergency/resume` | Resume operations after resolving an incident. |
 | `GET` | `/api/v1/metrics` | Real-time operational counters, latencies, and transaction metrics. |
 | `GET` | `/api/v1/security/sbom` | Export CycloneDX 1.5 Software Bill of Materials. |
 | `GET` | `/api/v1/health` | Service health and component status check. |
@@ -252,7 +296,7 @@ agentpay/
 │   │   ├── adapters/protocols/ # ACP, AP2, UAP, x402 protocol adapters
 │   │   ├── server.py        # Pure standard-library multi-threaded HTTP server
 │   │   └── cli.py           # CLI runner (agentpay serve, worker, health, migrate)
-│   ├── api/tests/unit/      # 815 unit, property, chaos, adversarial & socket tests
+│   ├── api/tests/unit/      # 835 passing unit, property, chaos, adversarial & socket tests
 │   ├── worker/              # Distributed outbox worker runtime with lease management
 │   └── web/                 # React/TypeScript Control Center (pipeline visualizer & UI)
 ├── packages/

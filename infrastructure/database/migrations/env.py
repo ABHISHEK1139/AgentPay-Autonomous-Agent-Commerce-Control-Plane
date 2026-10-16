@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
@@ -18,6 +19,9 @@ if str(src_dir) not in sys.path:
 from agentpay.infrastructure.database.models import Base  # noqa: E402
 
 config = context.config
+database_url = os.environ.get("AGENTPAY_DATABASE_URL") or os.environ.get("DATABASE_URL")
+if database_url:
+    config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)

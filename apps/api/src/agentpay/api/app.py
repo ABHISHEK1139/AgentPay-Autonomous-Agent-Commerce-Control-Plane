@@ -23,6 +23,7 @@ from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import parse_qs
 
 from agentpay.adapters.in_memory.emergency_pause_store import (
     InMemoryEmergencyPauseStore,
@@ -1746,11 +1747,17 @@ class AgentPayApiApp:
         # 2. OpenAPI Specification
         if path == "/openapi.json" and method == "GET":
             return 200, {
-                "openapi": "3.1.0",
+                "openapi": "3.2.0",
                 "info": {"title": "AgentPay API", "version": "1.0.0"},
                 "paths": {
                     "/api/v1/actions": {"post": {"summary": "Submit ActionRequest"}},
                     "/agent/catalog": {"get": {"summary": "Agent Catalog Discovery"}},
+                    "/.well-known/agent-commerce": {
+                        "get": {"summary": "Agent Commerce Capability Discovery"}
+                    },
+                    "/.well-known/agent-capability.json": {
+                        "get": {"summary": "Agent Capability Discovery"}
+                    },
                     "/api/v1/emergency/pause": {"post": {"summary": "Kill Switch Pause"}},
                     "/api/v1/tools/{tool_name}/invoke": {
                         "post": {"summary": "Invoke Registered Tool"}
@@ -1794,6 +1801,34 @@ class AgentPayApiApp:
             return self._handle_stripe_webhook(
                 headers, body, request_id, tenant_id, trace_id, raw_body=raw_body
             )
+
+        # Public machine-readable discovery. Tenant-scoped commerce routes remain gated.
+        if path in ("/.well-known/agent-commerce", "/.well-known/agent-capability.json"):
+            provider = self.config.payment_provider.value if self.config is not None else "mock"
+            return 200, {
+                "name": "AgentPay",
+                "version": "1.0",
+                "commerce": {
+                    "catalog": "/agent/catalog",
+                    "checkout": "/api/v1/actions",
+                    "payment_webhook": "/api/v1/webhooks/razorpay",
+                },
+                "authentication": {
+                    "schemes": ["Bearer", "ApiKey"],
+                    "tenant_header": "X-Tenant-ID",
+                },
+                "payments": {
+                    "provider": "razorpay" if "razorpay" in provider else provider,
+                    "mode": (
+                        "sandbox"
+                        if self.config is not None and self.config.environment.value == "sandbox"
+                        else "mock"
+                    ),
+                    "currency": "INR",
+                    "minor_unit": "paise",
+                },
+                "protocols": ["ACP", "AP2", "UAP", "x402"],
+            }
 
         # --- AUTHENTICATION ENFORCEMENT (§14) ---
         cred, auth_err = self._authenticate_request(headers, request_id)
@@ -1902,11 +1937,13 @@ class AgentPayApiApp:
             status_code, err_body, _ = rate_limit_err
             return status_code, err_body
 
-        # 4. Agent Catalog endpoints (§38)
-        if path == "/agent/catalog" and method == "GET":
+        # 5. Agent Catalog endpoints (§38)
+        catalog_path, _, catalog_query = path.partition("?")
+        if catalog_path == "/agent/catalog" and method == "GET":
+            query = parse_qs(catalog_query).get("q", [""])[0].strip()
             products = []
             if self.orchestrator._product_repo is not None:
-                products = self.orchestrator._product_repo.search(tenant_id, "")
+                products = self.orchestrator._product_repo.search(tenant_id, query)
             return 200, {
                 "products": [
                     {
@@ -1914,6 +1951,35 @@ class AgentPayApiApp:
                         "name": p.name,
                         "category": p.category,
                         "merchant_id": p.merchant_id,
+                        "variants": [
+                            {
+                                "variant_id": variant.variant_id,
+                                "sku": variant.sku,
+                                "name": variant.name,
+                                "price_minor": variant.price.minor_units,
+                                "currency": variant.price.currency,
+                                "available": (
+                                    inventory.effective_available
+                                    if (
+                                        self.orchestrator._inventory_repo is not None
+                                        and (
+                                            inventory := self.orchestrator._inventory_repo.get(
+                                                tenant_id, variant.variant_id
+                                            )
+                                        )
+                                        is not None
+                                    )
+                                    else 0
+                                ),
+                            }
+                            for variant in (
+                                self.orchestrator._variant_repo.list_by_product(
+                                    tenant_id, p.product_id
+                                )
+                                if self.orchestrator._variant_repo is not None
+                                else []
+                            )
+                        ],
                     }
                     for p in products
                 ]
@@ -2837,6 +2903,8 @@ class ApiTestClient:
             "/api/v1/webhooks/payments",
             "/api/v1/webhooks/razorpay",
             "/api/v1/webhooks/stripe",
+            "/.well-known/agent-commerce",
+            "/.well-known/agent-capability.json",
         ) or (not require_obs_auth and path in ("/api/v1/metrics", "/api/v1/security/sbom"))
 
         # Explicit authentication management (§14)

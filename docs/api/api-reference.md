@@ -2,7 +2,7 @@
 
 > **Document Status**: Production API Reference  
 > **Governing Specifications**: `AGENTS.md` (§13 API Design & Envelopes, §14 Authentication, §21 Kill Switch, §38 Agent Commerce API, §47 Tracing)  
-> **API Version**: `1.0.0` (OpenAPI 3.1.0 compliant)  
+> **API Version**: `1.0.0` (OpenAPI 3.2.0 compliant)
 > **Last Updated**: Sprint 13 Hardening (2026-10-10)  
 
 ---
@@ -65,7 +65,7 @@ All non-2xx responses adhere to the standard RFC error format:
 
 ### 3.1 System & Discovery
 - `GET /api/v1/health`: Cluster health and kill switch state (Unauthenticated).
-- `GET /openapi.json`: Machine-readable OpenAPI 3.1 schema (Unauthenticated).
+- `GET /openapi.json`: Machine-readable OpenAPI 3.2 schema (Unauthenticated).
 
 ### 3.2 Agent Commerce & Discovery (§38)
 - `GET /agent/catalog`: List available products and variants for tenant.

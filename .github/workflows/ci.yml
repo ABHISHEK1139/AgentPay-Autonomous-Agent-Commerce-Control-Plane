@@ -47,7 +47,11 @@ jobs:
         run: uv run pytest
 
       - name: Web UI & Accessibility tests
-        run: npx --yes tsx --test tests/web.test.mjs
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run Web UI & Accessibility tests
+        run: node --test tests/web.test.mjs
 
       - name: Database migrations integrity
         run: uv run pytest apps/api/tests/unit/test_database_migrations.py

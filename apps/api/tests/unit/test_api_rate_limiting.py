@@ -354,7 +354,7 @@ def test_health_and_openapi_endpoints_bypass_rate_limiting() -> None:
 
     status_o, body_o = client.get("/openapi.json", auth=False)
     assert status_o == 200
-    assert body_o["openapi"] == "3.1.0"
+    assert body_o["openapi"] == "3.2.0"
 
 
 def test_rate_limit_refill_recovery() -> None:

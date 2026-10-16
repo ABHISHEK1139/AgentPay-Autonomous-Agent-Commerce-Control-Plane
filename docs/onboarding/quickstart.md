@@ -38,7 +38,8 @@ That's it! `uv sync` reads the locked dependencies from `uv.lock`. You never nee
 
 ## 3. Launch the Live HTTP Server
 
-AgentPay comes with a zero-dependency, production-ready multi-threaded HTTP server and CLI:
+AgentPay comes with a zero-dependency developer-preview multi-threaded HTTP server and CLI.
+It is suitable for local and sandbox validation; live-money processing is disabled:
 
 ```powershell
 # Launch the API server on http://127.0.0.1:8000 with pre-seeded demo data
@@ -71,7 +72,7 @@ Output:
 
 You can also inspect live Prometheus metrics and OpenAPI specifications:
 - **Metrics**: `http://127.0.0.1:8000/api/v1/metrics`
-- **OpenAPI Schema**: `http://127.0.0.1:8000/api/v1/openapi.json`
+- **OpenAPI Schema**: `http://127.0.0.1:8000/openapi.json`
 
 ---
 
@@ -107,40 +108,42 @@ client = AgentPay(
 )
 
 # 1. Discover catalog products
-products = client.list_products()
+catalog = client.catalog.list_products()
+products = catalog["products"]
 print(f"Discovered {len(products)} products in catalog:")
 for p in products:
-    print(f" - {p['id']}: {p['title']}")
+    print(f" - {p['product_id']}: {p['name']}")
 
 # 2. Execute an autonomous purchase under the spending limit
-response = client.purchase(
+response = client.actions.request_purchase(
     agent_id="agent_01",
     product_id="prod_01",
     variant_id="var_01",
-    amount_minor_units=149900,
+    amount_minor=149900,
     currency="INR",
-    intent="Autonomous hardware requisition",
+    intent_purpose="Autonomous hardware requisition",
 )
 
 print(f"Purchase Status: {response['status']}")
 print(f"Order ID: {response['order_id']}")
-print(f"Action Request ID: {response['action_request_id']}")
+print(f"Action Request ID: {response['action_id']}")
 ```
 
 ### Option B: Using cURL / HTTP Directly
 
 ```powershell
-curl -X POST http://127.0.0.1:8000/api/v1/purchases `
+curl -X POST http://127.0.0.1:8000/api/v1/actions `
   -H "Authorization: Bearer test_bearer_agent_token" `
   -H "Content-Type: application/json" `
   -d '{
-    "tenant_id": "tenant_01",
+    "action_id": "act_demo_01",
+    "principal_id": "user_01",
     "agent_id": "agent_01",
-    "product_id": "prod_01",
+    "resource_id": "prod_01",
     "variant_id": "var_01",
-    "amount_minor_units": 149900,
+    "amount_minor": 149900,
     "currency": "INR",
-    "intent": "Hardware upgrade for CI agent"
+    "intent_purpose": "Hardware upgrade for CI agent"
   }'
 ```
 
@@ -153,17 +156,18 @@ When an agent attempts a transaction that exceeds its autonomous policy limit (o
 1. **Trigger Human Review**:
    Request a purchase of ₹4,999 (499,900 minor units) — higher than the ₹2,000 autonomous limit:
    ```powershell
-   curl -X POST http://127.0.0.1:8000/api/v1/purchases `
+   curl -X POST http://127.0.0.1:8000/api/v1/actions `
      -H "Authorization: Bearer test_bearer_agent_token" `
      -H "Content-Type: application/json" `
      -d '{
-       "tenant_id": "tenant_01",
+       "action_id": "act_demo_high_value",
+       "principal_id": "user_01",
        "agent_id": "agent_01",
-       "product_id": "prod_01",
+       "resource_id": "prod_01",
        "variant_id": "var_01",
-       "amount_minor_units": 499900,
+       "amount_minor": 499900,
        "currency": "INR",
-       "intent": "High-value workstation purchase"
+       "intent_purpose": "High-value workstation purchase"
      }'
    ```
    **Response**:
@@ -222,10 +226,10 @@ curl -X POST http://127.0.0.1:8000/api/v1/emergency/resume `
 AgentPay maintains a zero-tolerance policy for test failures, lint errors, or type regressions. To run the full verification battery:
 
 ```powershell
-uv run ruff format --check .       # Code style (199 files clean)
+uv run ruff format --check .       # Code style (203 files clean)
 uv run ruff check .                # Lint rules (clean)
-uv run mypy                        # Strict static type checking (0 errors across 182 files)
-uv run pytest                      # 815 unit, property, chaos, persistence & live socket tests
+uv run mypy                        # Strict static type checking (0 errors across 186 files)
+uv run pytest                      # 835 passed, 3 opt-in credential tests skipped
 node --test tests/web.test.mjs     # 5 Control Center web tests (ARIA §121 & live client)
 ```
 

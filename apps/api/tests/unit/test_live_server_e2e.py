@@ -73,7 +73,7 @@ def test_live_server_health_and_openapi(live_server: tuple[str, int]) -> None:
     with urllib.request.urlopen(req_open, timeout=5) as resp:
         assert resp.status == 200
         body = json.loads(resp.read().decode("utf-8"))
-        assert body["openapi"] == "3.1.0"
+        assert body["openapi"] == "3.2.0"
         assert "/api/v1/actions" in body["paths"]
 
     # 3. Metrics exposition

@@ -1,5 +1,8 @@
 # Current State
 
+> **Evidence refresh:** 2026-10-16. Counts and status below reflect commands
+> actually run in this workspace, not historical README claims.
+
 Verified on this machine (Windows, PowerShell 5.1) with Python 3.12.10, Node v22.14.0, uv 0.12.22, ruff 0.16.10,
 mypy 2.4.0, pytest 9.1.1.
 
@@ -33,7 +36,7 @@ mypy 2.4.0, pytest 9.1.1.
 | Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, live API client integration (§14, §21, §66, §67), approval UI (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
 | Ports & Adapters | implemented | Thread-safe in-memory repositories, Stripe & Razorpay payment adapters with HMAC-SHA256 signature verification and anti-replay windows, mock JEV decision engine |
 | Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), Alembic migrations `0001_initial_schema` covering all 17 tables, verified on in-memory SQLite and offline SQL DDL generation |
-| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.1, HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
+| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.2, HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
 | Operational Runbooks | implemented | All 9 named runbooks in `docs/runbooks/` (§133) |
 | Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-006 (§87) |
 | Security Assurance | implemented | OWASP ASVS v4.0.3 verification matrix, YAML index, exceptions in `security/asvs/` (§53) |
@@ -47,10 +50,10 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            199 files already formatted
+uv run ruff format --check .                                            203 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 182 source files
-uv run pytest                                                           815 passed
+uv run mypy                                                             Success: no issues found in 186 source files
+uv run pytest                                                           835 passed, 3 skipped
 node --test tests/web.test.mjs                                          5 passed (incl. live API & §121 accessibility)
 uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
@@ -62,7 +65,9 @@ uv run python tests/adversarial/stress_test_m4_approval_binding.py       8/8 pas
 uv run python tests/adversarial/stress_test_m4_challenger_edge_cases.py   6/6 passed (immutability & 30-thread race)
 uv run python tests/adversarial/stress_test_m6_shared_operational_controls.py 6/6 passed (multi-instance shared pause)
 uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py 8/8 passed (auth header vs token claims)
-uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py 5/5 passed (Razorpay sandbox E2E)
+uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py 5/5 passed (simulated Razorpay sandbox E2E)
+Live validation: PostgreSQL migrations/schema passed, Redis `PONG` passed, Razorpay sandbox order creation passed
+with configured test credentials, and PostgreSQL dump/restore passed with 20 restored tables.
 uv run python tests/adversarial/stress_test_model_gateway_resilience.py  6/6 passed
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed
 uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
@@ -75,11 +80,15 @@ uv run python scripts/generate_sbom.py --verify                          Verifie
 
 All property-based tests completed their full budgets.
 
+The three skipped tests are explicitly opt-in live-provider checks: OpenRouter,
+OrcaRouter, and the pytest Razorpay credential test were not configured in the
+test process. A separate live Razorpay sandbox order-creation check passed.
+
 ## Environment constraints
 
 - `make`, `just`, and `psql` are **not installed**. The blueprint's §9 `Makefile`/`justfile` are
   therefore not provided; use the `uv run` and `node --test` commands instead.
-- The **Docker daemon is not running**, so the declared Postgres/Redis services cannot start. All
-  domain, application, API, protocol adapter, chaos, and security suites are hermetic and run entirely in-memory.
+- The default domain, application, API, protocol adapter, chaos, and security suites remain
+  hermetic; live PostgreSQL/Redis validation is performed separately with `docker compose`.
 - The project directory is named `platfrom` (one `a`). That is the intended path.
 - Shell is PowerShell 5.1: no `&&`, no heredocs.

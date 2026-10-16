@@ -166,8 +166,8 @@ Verified by: `test_b_wh_04_cross_tenant_event_replay_defense` in `test_webhooks.
 
 All repository documentation has been synchronized with exact measured gate command outputs:
 - `pytest`: **745 passed** (0 failed, 0 skipped)
-- `mypy`: **167 source files** (0 issues)
-- `ruff format`: **175 files** clean
+- `mypy`: **186 source files** (0 issues)
+- `ruff format`: **203 files** clean
 - `web tests`: **5 passed**
 
 Updated in: `AGENTS.md`, `README.md`, `docs/engineering/current-state.md`, `docs/onboarding/quickstart.md`, and `docs/security/autonomous-audit-report.md`.
@@ -641,5 +641,5 @@ Windows, PowerShell 5.1, Python 3.12.10, uv 0.12.22, ruff 0.16.10, mypy 2.4.0, p
 Docker daemon is **not running**, so persistence tests use SQLite in-memory; PostgreSQL runtime
 behaviour is unverified. No external security assessment has been performed.
 
-Gates at time of writing: `ruff format` 175 files clean, `ruff check` clean, `mypy` 167 files clean,
-`pytest` 748 passed / 0 skipped.
+Gates at the latest local verification: `ruff format` 203 files clean, `ruff check` clean,
+`mypy` 186 files clean, `pytest` 835 passed / 3 opt-in credential tests skipped.

@@ -18,8 +18,8 @@
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (175 files), `ruff check` (clean), `mypy --strict`
-  (167 files, clean), `pytest` (**748 passed, 0 failed, 0 skipped**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (203 files), `ruff check` (clean), `mypy --strict`
+  (186 files, clean), `pytest` (**835 passed, 0 failed, 3 explicitly opt-in skips**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
 - **Auxiliary suites, all green:** 5 node web tests (`node --test tests/web.test.mjs`, including §121
   ARIA accessibility, keyboard contracts, and authenticated live API client integration), 70/70 protocol
@@ -52,10 +52,10 @@ This section is the map of what actually exists:
   landmarks/roles and keyboard navigation (§121).
 - **Docs confirmed present:** ADRs, architecture, threat model, standards matrix, runbooks
   (`docs/operations/`, `docs/runbooks/`), `docs/security/autonomous-audit-report.md`.
-- **Still NOT real:** no live Postgres/Redis server (Docker daemon down; SQLAlchemy schema and
-  repositories are verified on in-memory SQLite, not a running PostgreSQL cluster), no real payment
-  provider SDK, no real model/JEV SDK, no deployed HTTP server, no external security assessment or
-  certification of any kind.
+- **Still NOT real:** no real model/JEV SDK, no deployed HTTP server, no external security
+  assessment or certification of any kind. Local PostgreSQL and Redis containers have now been
+  started and verified; the Razorpay sandbox order-creation path has also been exercised with
+  configured test credentials. OpenRouter and OrcaRouter live calls remain unverified.
 - **Git exists now** (`master`, commits through Sprint 14 work) but has **no remote**, so the CI
   workflow (`.github/workflows/ci.yml`) has never executed. Local gates are the only evidence.
 - A test **enforces §10** for the domain layer (`apps/api/tests/unit/test_architecture_boundaries.py`)
@@ -116,8 +116,7 @@ Facts a future agent would otherwise get wrong:
 - `ruff format` is configured with `extend-exclude = ["*.md"]` **on purpose** so it cannot rewrite
   the Python snippets inside this blueprint. Do not remove that exclusion.
 - The default test suite requires **no external services**. Postgres and Redis are declared in
-  `docker-compose.yml` for later sprints, but the **Docker daemon is not running** on this machine
-  (`docker info` fails), so any suite needing them cannot run locally.
+  `docker-compose.yml`; live local-container validation is separate from the hermetic suite.
 
 ## 0.3 Environment Facts
 

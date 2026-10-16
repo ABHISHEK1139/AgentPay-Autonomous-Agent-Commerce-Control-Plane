@@ -73,7 +73,7 @@ Per `AGENTS.md` §108 and §144, AgentPay adheres to strict truth-in-documentati
 | **V12.2.1** | **V12 File/Resources**: Fixed tool registry with risk tiers (`READ`, `WRITE_LOW`, `WRITE_MEDIUM`, `FINANCIAL`, `DESTRUCTIVE`, `SECURITY_SENSITIVE`). | L2 | `VERIFIED` | `domain/safety.py` | `apps/api/tests/unit/test_tool_registry.py` (7/7 passed) |
 | **V13.1.1** | **V13 API/Web Service**: Risk-tiered sliding-window rate limiting returning HTTP 429 `RATE_LIMIT_EXCEEDED` with `Retry-After`. | L2 / L3 | `VERIFIED` | `adapters/in_memory/rate_limiter.py`, `api/app.py` | `apps/api/tests/unit/test_rate_limiter.py`, `test_api_rate_limiting.py` |
 | **V13.2.1** | **V13 API/Web Service**: Idempotency collision prevention: re-submitting an idempotency key with modified payload raises `IdempotencyConflictError` (HTTP 409). | L2 / L3 | `VERIFIED` | `adapters/in_memory/idempotency_store.py` | `apps/api/tests/unit/test_adversarial_threat_harness.py` |
-| **V13.3.1** | **V13 API/Web Service**: Authoritative OpenAPI 3.1.0 specification exposed at `/openapi.json`. | L2 | `VERIFIED` | `apps/api/src/agentpay/api/app.py` | `apps/api/tests/unit/test_api.py` |
+| **V13.3.1** | **V13 API/Web Service**: Authoritative OpenAPI 3.2.0 specification exposed at `/openapi.json`. | L2 | `VERIFIED` | `apps/api/src/agentpay/api/app.py` | `apps/api/tests/unit/test_api.py` |
 | **V14.1.1** | **V14 Configuration**: In-process Emergency Kill Switch (`POST /api/v1/emergency/pause`) immediately intercepting all mutating financial transactions with HTTP 503 while preserving read-only diagnostic routes. | L2 | `VERIFIED` | `apps/api/src/agentpay/api/app.py` | `apps/api/tests/unit/test_protocol_adapters.py`, `test_release_hardening_e2e.py` |
 | **V14.2.1** | **V14 Configuration**: Secure-by-default configuration: autonomous payments disabled by default in production; require explicit human configuration. | L2 | `VERIFIED` | `domain/policy.py` | `apps/api/tests/unit/test_policy.py` |
 
@@ -145,7 +145,7 @@ Per `AGENTS.md` §108 and §144, AgentPay adheres to strict truth-in-documentati
 ### Chapter V13: API and Web Service Verification
 - **Assurance Level**: Level 2 / Level 3
 - **Rate Limiting**: Sliding-window rate limiters protect mutating endpoints, returning HTTP 429 with `Retry-After` headers.
-- **Schema Contracts**: Standardized OpenAPI 3.1.0 specification exposed at `/openapi.json`.
+- **Schema Contracts**: Standardized OpenAPI 3.2.0 specification exposed at `/openapi.json`.
 
 ### Chapter V14: Configuration Verification
 - **Assurance Level**: Level 2

@@ -122,7 +122,7 @@ class LiveApiTester:
         st, b, _, el = self._request("GET", "/openapi.json")
         self.assert_test(
             "3. OpenAPI Specification",
-            st == 200 and b.get("openapi") == "3.1.0",
+            st == 200 and b.get("openapi") == "3.2.0",
             f"({el:.1f}ms)",
             st,
             b,

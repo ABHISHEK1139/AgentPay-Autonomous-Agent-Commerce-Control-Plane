@@ -152,7 +152,7 @@ def test_alembic_offline_sql_generation(capsys: pytest.CaptureFixture[str]) -> N
 
 
 def test_alembic_current_and_heads_inspection() -> None:
-    """Alembic heads and script directory inspection reports 0003_add_approval_binding_principal (§49)."""
+    """Alembic heads and script directory inspection reports the migration chain (§49)."""
     config = get_alembic_config("sqlite:///:memory:")
     from alembic.script import ScriptDirectory
 
@@ -169,7 +169,7 @@ def test_alembic_current_and_heads_inspection() -> None:
     assert rev2.doc == "add_provider_webhook_events"
     assert rev2.down_revision == "0001_initial_schema"
 
-    rev3 = script.get_revision("0003_add_approval_binding_principal")
+    rev3 = script.get_revision("0003_approval_binding")
     assert rev3 is not None
     assert rev3.doc == "add_approval_binding_principal"
     assert rev3.down_revision == "0002_add_provider_webhook_events"
@@ -177,4 +177,4 @@ def test_alembic_current_and_heads_inspection() -> None:
     rev4 = script.get_revision("0004_add_emergency_pause_records")
     assert rev4 is not None
     assert rev4.doc == "add_emergency_pause_records"
-    assert rev4.down_revision == "0003_add_approval_binding_principal"
+    assert rev4.down_revision == "0003_approval_binding"

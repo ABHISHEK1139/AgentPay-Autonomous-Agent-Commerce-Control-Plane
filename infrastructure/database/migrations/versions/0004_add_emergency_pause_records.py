@@ -1,7 +1,7 @@
 """add_emergency_pause_records
 
 Revision ID: 0004_add_emergency_pause_records
-Revises: 0003_add_approval_binding_principal
+Revises: 0003_approval_binding
 Create Date: 2026-10-12 14:30:00.000000
 
 """
@@ -13,7 +13,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "0004_add_emergency_pause_records"
-down_revision: str | Sequence[str] | None = "0003_add_approval_binding_principal"
+down_revision: str | Sequence[str] | None = "0003_approval_binding"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

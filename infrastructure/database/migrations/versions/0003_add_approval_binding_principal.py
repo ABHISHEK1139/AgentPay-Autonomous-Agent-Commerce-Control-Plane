@@ -1,6 +1,6 @@
 """add_approval_binding_principal
 
-Revision ID: 0003_add_approval_binding_principal
+Revision ID: 0003_approval_binding
 Revises: 0002_add_provider_webhook_events
 Create Date: 2026-10-12 14:00:00.000000
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0003_add_approval_binding_principal"
+revision: str = "0003_approval_binding"
 down_revision: str | Sequence[str] | None = "0002_add_provider_webhook_events"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
