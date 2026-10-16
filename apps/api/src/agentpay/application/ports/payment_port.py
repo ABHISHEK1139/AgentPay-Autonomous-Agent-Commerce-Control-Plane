@@ -66,6 +66,19 @@ class PaymentRepository(Protocol):
 
 
 @runtime_checkable
+class RefundRepository(Protocol):
+    """Port for persisting Refund records (§41, §44)."""
+
+    def get(self, tenant_id: str, refund_id: str) -> Refund | None:
+        """Retrieve a refund by ID."""
+        ...
+
+    def save(self, tenant_id: str, refund: Refund) -> None:
+        """Persist or update a refund."""
+        ...
+
+
+@runtime_checkable
 class OrderRepository(Protocol):
     """Port for persisting commercial Order commitments."""
 

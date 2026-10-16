@@ -45,11 +45,13 @@ class InMemoryStripeSimulator(PaymentProvider):
     def __init__(
         self,
         api_key: str = "sk_test_placeholder_key_for_testing",
-        webhook_secret: str = "whsec_test_stripe_secret_32bytes_min",
+        webhook_secret: str | None = None,
         auto_capture: bool = True,
     ) -> None:
         self.api_key = api_key
-        self.webhook_secret = webhook_secret
+        # Test double: keep an explicit test-only default so direct
+        # construction in unit tests keeps working; never used with real money.
+        self.webhook_secret = webhook_secret or "whsec_test_stripe_secret_32bytes_min"
         self.auto_capture = auto_capture
         self._lock = threading.Lock()
         # Storage: (tenant_id, attempt_id) -> PaymentAttempt

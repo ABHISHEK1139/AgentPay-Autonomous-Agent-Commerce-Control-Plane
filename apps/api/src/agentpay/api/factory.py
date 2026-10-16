@@ -8,6 +8,7 @@ or SQLAlchemy 2.0 relational database repositories (for persistent deployments).
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -34,12 +35,12 @@ from agentpay.adapters.in_memory.payment_repository import (
     InMemoryOrderRepository,
     InMemoryPaymentRepository,
     InMemoryProviderWebhookEventRepository,
+    InMemoryRefundRepository,
 )
 from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.adapters.model_gateway import (
     ModelGateway,
-    OpenAiCompatibleModelProvider,
     OpenRouterModelProvider,
     OrcaRouterModelProvider,
 )
@@ -110,6 +111,7 @@ from agentpay.infrastructure.database.repositories.order_repository import (
 from agentpay.infrastructure.database.repositories.payment_repository import (
     SqlAlchemyIdempotencyStore,
     SqlAlchemyPaymentRepository,
+    SqlAlchemyRefundRepository,
 )
 from agentpay.infrastructure.database.repositories.tenant_repository import (
     SqlAlchemyTenantRepository,
@@ -367,6 +369,30 @@ def create_app(
     if require_observability_auth is not None:
         overrides["require_observability_auth"] = require_observability_auth
 
+    # Webhook signing must never silently fall back to a publicly-known value.
+    # Sandbox/production already fail closed in AppConfig.__post_init__; for
+    # local/dev convenience generate a random per-process secret so the demo
+    # server (`agentpay serve`) keeps working out of the box.
+    cfg_for_secret_check = cfg.with_overrides(**overrides) if overrides else cfg
+    if not cfg_for_secret_check.razorpay_webhook_secret:
+        if cfg_for_secret_check.is_production_like:
+            # AppConfig.__post_init__ raises for from_env configs; this covers
+            # programmatically-built configs that bypass from_env.
+            raise ConfigValidationError(
+                "RAZORPAY_WEBHOOK_SECRET is required in "
+                f"'{cfg_for_secret_check.environment.value}' environment (§61)."
+            )
+        _ephemeral = secrets.token_hex(32)
+        logging.getLogger("agentpay.factory").warning(
+            "No webhook signing secret configured; generated an ephemeral "
+            "per-process secret for local/dev use. Set RAZORPAY_WEBHOOK_SECRET "
+            "for stable verification across restarts."
+        )
+        overrides["razorpay_webhook_secret"] = _ephemeral
+        overrides["stripe_webhook_secret"] = _ephemeral
+        if webhook_secret is None:
+            webhook_secret = _ephemeral
+
     if overrides:
         cfg = cfg.with_overrides(**overrides)
 
@@ -381,6 +407,7 @@ def create_app(
     evidence_repo: Any
     approval_repo: Any
     payment_repo: Any
+    refund_repo: Any
     order_repo: Any
     idempotency_store: Any
     audit_ledger: Any
@@ -406,6 +433,7 @@ def create_app(
         evidence_repo = SqlAlchemyEvidenceRepository(session_factory)
         approval_repo = SqlAlchemyApprovalRepository(session_factory)
         payment_repo = SqlAlchemyPaymentRepository(session_factory)
+        refund_repo = SqlAlchemyRefundRepository(session_factory)
         order_repo = SqlAlchemyOrderRepository(session_factory)
         idempotency_store = SqlAlchemyIdempotencyStore(session_factory)
         audit_ledger = SqlAlchemyAuditRepository(session_factory)
@@ -423,6 +451,7 @@ def create_app(
         evidence_repo = InMemoryEvidenceRepository()
         approval_repo = InMemoryApprovalRepository()
         payment_repo = InMemoryPaymentRepository()
+        refund_repo = InMemoryRefundRepository()
         order_repo = InMemoryOrderRepository()
         idempotency_store = InMemoryIdempotencyStore()
         audit_ledger = InMemoryAuditLedger()
@@ -474,22 +503,15 @@ def create_app(
                     model=cfg.openrouter_model,
                 )
             )
-        elif cfg.decision_engine in (DecisionEngineType.ORCAROUTER,):
+        elif cfg.decision_engine in (
+            DecisionEngineType.ORCAROUTER,
+            DecisionEngineType.OPENAI_COMPATIBLE,
+        ):
             decision_engine = ModelGateway(
                 provider=OrcaRouterModelProvider(
                     api_key=cfg.orcarouter_api_key or "",
                     base_url=cfg.orcarouter_base_url,
                     model=cfg.orcarouter_model,
-                )
-            )
-        elif cfg.decision_engine == DecisionEngineType.OPENAI_COMPATIBLE:
-            decision_engine = ModelGateway(
-                provider=OpenAiCompatibleModelProvider(
-                    api_key=cfg.model_api_key or "",
-                    base_url=cfg.model_base_url,
-                    model=cfg.model_name,
-                    provider_name=cfg.model_provider_name,
-                    allow_private_network=cfg.model_allow_private_network,
                 )
             )
         elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
@@ -560,6 +582,7 @@ def create_app(
         idempotency_store=idempotency_store,
         webhook_event_repo=webhook_event_repo,
         emergency_pause_store=emergency_pause_store,
+        refund_repo=refund_repo,
         webhook_secret=cfg.razorpay_webhook_secret,
         require_observability_auth=cfg.require_observability_auth,
         config=cfg,

@@ -46,12 +46,14 @@ class InMemoryRazorpaySimulator(PaymentProvider):
         self,
         key_id: str = "rzp_test_placeholder_id",
         key_secret: str = "rzp_test_placeholder_secret",
-        webhook_secret: str = "whsec_test_razorpay_secret_32bytes",
+        webhook_secret: str | None = None,
         auto_capture: bool = True,
     ) -> None:
         self.key_id = key_id
         self.key_secret = key_secret
-        self.webhook_secret = webhook_secret
+        # Test double: keep an explicit test-only default so direct
+        # construction in unit tests keeps working; never used with real money.
+        self.webhook_secret = webhook_secret or "whsec_test_razorpay_secret_32bytes"
         self.auto_capture = auto_capture
         self._lock = threading.Lock()
         # Storage: (tenant_id, attempt_id) -> PaymentAttempt

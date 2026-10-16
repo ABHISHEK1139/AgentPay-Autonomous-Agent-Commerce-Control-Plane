@@ -11,6 +11,7 @@ from agentpay.application.ports.payment_port import (
     PaymentRepository,
     ProviderTransactionMappingRepository,
     ProviderWebhookEventRepository,
+    RefundRepository,
 )
 from agentpay.domain.errors import CrossTenantAccessError
 from agentpay.domain.payments import (
@@ -19,6 +20,7 @@ from agentpay.domain.payments import (
     PaymentAttempt,
     ProviderTransactionMapping,
     ProviderWebhookEvent,
+    Refund,
     WebhookEventStatus,
 )
 
@@ -43,6 +45,28 @@ class InMemoryPaymentRepository(PaymentRepository):
         with self._lock:
             tenant_store = self._attempts.setdefault(tenant_id, {})
             tenant_store[attempt.attempt_id] = attempt
+
+
+class InMemoryRefundRepository(RefundRepository):
+    """Thread-safe in-memory store for Refunds."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # tenant_id -> refund_id -> Refund
+        self._refunds: dict[str, dict[str, Refund]] = {}
+
+    def get(self, tenant_id: str, refund_id: str) -> Refund | None:
+        with self._lock:
+            return self._refunds.get(tenant_id, {}).get(refund_id)
+
+    def save(self, tenant_id: str, refund: Refund) -> None:
+        if refund.tenant_id != tenant_id:
+            raise CrossTenantAccessError(
+                f"Refund tenant '{refund.tenant_id}' does not match context '{tenant_id}'"
+            )
+        with self._lock:
+            tenant_store = self._refunds.setdefault(tenant_id, {})
+            tenant_store[refund.refund_id] = refund
 
 
 class InMemoryOrderRepository(OrderRepository):

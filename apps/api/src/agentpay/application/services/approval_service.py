@@ -33,6 +33,7 @@ class ApprovalService:
         tenant_id: str,
         reason: str | None = None,
         requested_at: datetime | None = None,
+        merchant_id: str | None = None,
     ) -> Approval:
         """Create a pending approval request strictly bound to the action request (§20)."""
         if action.tenant_id != tenant_id:
@@ -41,13 +42,15 @@ class ApprovalService:
         if action.amount is None:
             raise InvalidApprovalError("Cannot create approval for action without amount")
 
-        merchant_id = action.resource.id
+        # Bind the true merchant (resolved variant→product→merchant by the caller);
+        # fall back to the resource id only when the merchant is unknown.
+        bound_merchant_id = merchant_id or action.resource.id
         resource_id = action.resource.id
 
         binding = ApprovalBinding(
             action_id=action.action_id,
             amount=action.amount,
-            merchant_id=merchant_id,
+            merchant_id=bound_merchant_id,
             resource_id=resource_id,
             currency=action.amount.currency,
             action_version=action.version,

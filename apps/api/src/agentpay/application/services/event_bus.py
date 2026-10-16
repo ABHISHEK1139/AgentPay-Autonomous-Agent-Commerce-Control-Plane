@@ -65,13 +65,13 @@ class EventBus:
                 )
                 errors.append(exc)
 
-        with self._lock:
-            self._processed_events.add(event.event_id)
-
         if errors:
             raise RuntimeError(f"EventBus handler errors ({len(errors)}): {errors[0]}") from errors[
                 0
             ]
+
+        with self._lock:
+            self._processed_events.add(event.event_id)
 
         return executed
 
