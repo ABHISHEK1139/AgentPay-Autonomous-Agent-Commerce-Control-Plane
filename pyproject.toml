@@ -16,7 +16,7 @@ agentpay = "agentpay.cli:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
+    "pytest>=9.1.1",
     "hypothesis>=6.100",
     "ruff>=0.6",
     "mypy>=1.11",
