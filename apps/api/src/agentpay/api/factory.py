@@ -15,6 +15,7 @@ from typing import Any
 from agentpay.adapters.in_memory.approval_repository import InMemoryApprovalRepository
 from agentpay.adapters.in_memory.audit_ledger import InMemoryAuditLedger
 from agentpay.adapters.in_memory.commerce_repository import (
+    InMemoryCartRepository,
     InMemoryEvidenceRepository,
     InMemoryInventoryRepository,
     InMemoryMerchantRepository,
@@ -41,6 +42,7 @@ from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.adapters.model_gateway import (
     ModelGateway,
+    OpenAiCompatibleModelProvider,
     OpenRouterModelProvider,
     OrcaRouterModelProvider,
 )
@@ -91,6 +93,9 @@ from agentpay.infrastructure.database.repositories.approval_repository import (
 )
 from agentpay.infrastructure.database.repositories.audit_ledger import (
     SqlAlchemyAuditRepository,
+)
+from agentpay.infrastructure.database.repositories.cart_repository import (
+    SqlAlchemyCartRepository,
 )
 from agentpay.infrastructure.database.repositories.commerce_repository import (
     SqlAlchemyEvidenceRepository,
@@ -156,7 +161,7 @@ def seed_initial_demo_data(
         tenant_id=tenant_id,
         principal_id="user_01",
         issuer="https://auth.agentpay.local",
-        capabilities=("catalog.search", "payment.request", "checkout.prepare"),
+        capabilities=("catalog.search", "cart.create", "payment.request", "checkout.prepare"),
         scopes=("commerce:read", "commerce:write"),
         created_at=now,
         expires_at=now + timedelta(days=365),
@@ -168,7 +173,7 @@ def seed_initial_demo_data(
     perms = AgentPermissions(
         agent_id="agent_01",
         tenant_id=tenant_id,
-        capabilities=("catalog.search", "payment.request", "checkout.prepare"),
+        capabilities=("catalog.search", "cart.create", "payment.request", "checkout.prepare"),
         limits=SpendingLimits(
             per_transaction_minor=2000000,  # ₹20,000 hard ceiling (§112 Scenario 3)
             daily_minor=5000000,  # ₹50,000 daily limit
@@ -311,6 +316,8 @@ def _verify_database_schema_ready(engine: Any) -> None:
         "products",
         "product_variants",
         "inventory",
+        "carts",
+        "cart_items",
         "approvals",
         "payment_attempts",
         "orders",
@@ -405,6 +412,7 @@ def create_app(
     variant_repo: Any
     inventory_repo: Any
     evidence_repo: Any
+    cart_repo: Any
     approval_repo: Any
     payment_repo: Any
     refund_repo: Any
@@ -431,6 +439,7 @@ def create_app(
         variant_repo = SqlAlchemyVariantRepository(session_factory)
         inventory_repo = SqlAlchemyInventoryRepository(session_factory)
         evidence_repo = SqlAlchemyEvidenceRepository(session_factory)
+        cart_repo = SqlAlchemyCartRepository(session_factory)
         approval_repo = SqlAlchemyApprovalRepository(session_factory)
         payment_repo = SqlAlchemyPaymentRepository(session_factory)
         refund_repo = SqlAlchemyRefundRepository(session_factory)
@@ -449,6 +458,7 @@ def create_app(
         variant_repo = InMemoryVariantRepository()
         inventory_repo = InMemoryInventoryRepository()
         evidence_repo = InMemoryEvidenceRepository()
+        cart_repo = InMemoryCartRepository()
         approval_repo = InMemoryApprovalRepository()
         payment_repo = InMemoryPaymentRepository()
         refund_repo = InMemoryRefundRepository()
@@ -477,7 +487,7 @@ def create_app(
             payment_provider = RazorpaySandboxProvider(
                 key_id=cfg.razorpay_key_id or "",
                 key_secret=cfg.razorpay_key_secret or "",
-                webhook_secret=cfg.razorpay_webhook_secret,
+                webhook_secret=cfg.razorpay_webhook_secret or "",
             )
         elif cfg.payment_provider in (
             PaymentProviderType.IN_MEMORY_RAZORPAY,
@@ -503,15 +513,22 @@ def create_app(
                     model=cfg.openrouter_model,
                 )
             )
-        elif cfg.decision_engine in (
-            DecisionEngineType.ORCAROUTER,
-            DecisionEngineType.OPENAI_COMPATIBLE,
-        ):
+        elif cfg.decision_engine in (DecisionEngineType.ORCAROUTER,):
             decision_engine = ModelGateway(
                 provider=OrcaRouterModelProvider(
                     api_key=cfg.orcarouter_api_key or "",
                     base_url=cfg.orcarouter_base_url,
                     model=cfg.orcarouter_model,
+                )
+            )
+        elif cfg.decision_engine == DecisionEngineType.OPENAI_COMPATIBLE:
+            decision_engine = ModelGateway(
+                provider=OpenAiCompatibleModelProvider(
+                    api_key=cfg.model_api_key or "",
+                    base_url=cfg.model_base_url,
+                    model=cfg.model_name,
+                    provider_name=cfg.model_provider_name,
+                    allow_private_network=cfg.model_allow_private_network,
                 )
             )
         elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
@@ -553,6 +570,7 @@ def create_app(
         variant_repo=variant_repo,
         inventory_repo=inventory_repo,
         evidence_repo=evidence_repo,
+        cart_repo=cart_repo,
         decision_engine=decision_engine,
         approval_service=approval_service,
         approval_repo=approval_repo,

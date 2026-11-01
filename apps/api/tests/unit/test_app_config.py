@@ -57,6 +57,32 @@ def test_explicit_development_mode() -> None:
     assert config.allow_unsafe_demo_seed is True
 
 
+def test_development_mode_defaults_do_not_seed_demo_data() -> None:
+    """A bare development environment must construct cleanly and must not seed demo data.
+
+    Regression: development previously defaulted ``seed_demo_data`` to True and then
+    rejected its own default in ``__post_init__``, so the documented mode could not
+    boot without setting an unrelated override.
+    """
+    config = AppConfig.from_env({"AGENTPAY_ENVIRONMENT": "development"})
+    assert config.environment == Environment.DEVELOPMENT
+    assert config.seed_demo_data is False
+    assert config.allow_unsafe_demo_seed is False
+
+
+def test_demo_seed_rejected_in_development_without_override() -> None:
+    """Explicit development demo seeding still fails closed without the unsafe override."""
+    env = {
+        "AGENTPAY_ENVIRONMENT": "development",
+        "AGENTPAY_SEED_DEMO_DATA": "true",
+        "AGENTPAY_UNSAFE_ALLOW_DEMO_SEED": "false",
+    }
+    with pytest.raises(
+        ConfigValidationError, match="Demo data seeding is rejected in 'development'"
+    ):
+        AppConfig.from_env(env)
+
+
 def test_valid_sandbox_config() -> None:
     """Valid sandbox credentials construct AppConfig cleanly."""
     env = {
@@ -142,11 +168,11 @@ def test_sandbox_missing_webhook_secret_fails() -> None:
 
 def test_webhook_handler_fails_closed_without_secret() -> None:
     """Webhook endpoints fail closed (500, explicit code) when no secret is configured (§61)."""
+    import time
+
     from test_purchase_flow import setup_orchestrator
 
     from agentpay.api.app import AgentPayApiApp
-
-    import time
 
     orch, *_ = setup_orchestrator(tenant_id="tenant_01")
     app = AgentPayApiApp(orchestrator=orch, webhook_secret=None)
@@ -464,3 +490,30 @@ def test_documented_sandbox_runbook_configuration() -> None:
     app = create_app(config=cfg)
     assert isinstance(app.orchestrator._payment_provider, RazorpaySandboxProvider)
     assert app.razorpay_webhook_secret == "whsec_runbook_documented_secret"
+
+
+def test_generic_openai_compatible_provider_configuration() -> None:
+    """Any OpenAI-compatible endpoint can be configured independently of hosted vendors."""
+    from agentpay.adapters.model_gateway import ModelGateway
+    from agentpay.adapters.model_gateway.openai_compatible_provider import (
+        OpenAiCompatibleModelProvider,
+    )
+
+    cfg = AppConfig.from_env(
+        {
+            "AGENTPAY_DECISION_ENGINE": "openai_compatible",
+            "AGENTPAY_MODEL_API_KEY": "ollama-local",
+            "AGENTPAY_MODEL_BASE_URL": "http://127.0.0.1:11434/v1",
+            "AGENTPAY_MODEL_NAME": "llamacpp:local",
+            "AGENTPAY_MODEL_PROVIDER_NAME": "ollama-local",
+            "AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK": "true",
+        }
+    )
+    app = create_app(config=cfg)
+    assert isinstance(app.orchestrator._decision_engine, ModelGateway)
+    provider = app.orchestrator._decision_engine._provider
+    assert isinstance(provider, OpenAiCompatibleModelProvider)
+    assert provider.base_url == "http://127.0.0.1:11434/v1"
+    assert provider.model == "llamacpp:local"
+    assert provider.provider_name == "ollama-local"
+    assert provider.allow_private_network is True

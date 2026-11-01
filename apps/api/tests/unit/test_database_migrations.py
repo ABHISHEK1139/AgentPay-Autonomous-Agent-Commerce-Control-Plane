@@ -1,7 +1,7 @@
 """Comprehensive tests for Alembic database migrations and schema lifecycle (§49, §50).
 
 Verifies:
-1. Programmatic Alembic upgrade('head') applies all 17 core relational tables.
+1. Programmatic Alembic upgrade('head') applies all core relational tables.
 2. Migrated database matches Base.metadata table specifications.
 3. Domain repository round-trip persistence works against migrated tables.
 4. Programmatic Alembic downgrade('base') cleanly removes all migrated tables.
@@ -40,7 +40,7 @@ def get_alembic_config(db_url: str) -> Config:
 
 
 def test_alembic_upgrade_and_downgrade_lifecycle() -> None:
-    """Alembic upgrade applies all 17 tables, verifies schema, and downgrade cleans up (§49)."""
+    """Alembic upgrade applies all core tables, verifies schema, and downgrade cleans up (§49)."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp_db:
         db_path = tmp_db.name
 
@@ -56,7 +56,7 @@ def test_alembic_upgrade_and_downgrade_lifecycle() -> None:
         # 2. Run upgrade to head
         command.upgrade(config, "head")
 
-        # 3. Verify all 17 tables + alembic_version exist
+        # 3. Verify all core tables + alembic_version exist
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
         assert "alembic_version" in tables
@@ -158,7 +158,7 @@ def test_alembic_current_and_heads_inspection() -> None:
 
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0004_add_emergency_pause_records"]
+    assert heads == ["0007_add_order_cancellation_reason"]
 
     rev1 = script.get_revision("0001_initial_schema")
     assert rev1 is not None
@@ -178,3 +178,18 @@ def test_alembic_current_and_heads_inspection() -> None:
     assert rev4 is not None
     assert rev4.doc == "add_emergency_pause_records"
     assert rev4.down_revision == "0003_approval_binding"
+
+    rev5 = script.get_revision("0005_add_cart_tables")
+    assert rev5 is not None
+    assert rev5.doc == "add_cart_tables"
+    assert rev5.down_revision == "0004_add_emergency_pause_records"
+
+    rev6 = script.get_revision("0006_add_approval_agent_id")
+    assert rev6 is not None
+    assert rev6.doc == "add_approval_binding_agent"
+    assert rev6.down_revision == "0005_add_cart_tables"
+
+    rev7 = script.get_revision("0007_add_order_cancellation_reason")
+    assert rev7 is not None
+    assert rev7.doc == "add_order_cancellation_reason"
+    assert rev7.down_revision == "0006_add_approval_agent_id"

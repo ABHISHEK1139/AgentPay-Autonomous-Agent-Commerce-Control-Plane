@@ -29,25 +29,32 @@ resolution is a decision to accept the debt, and should say so explicitly.
 
 ## TD-003 — No `Makefile` or `justfile`
 
-- **Reason:** `make` and `just` are not installed on the development machine, and a task runner
+- **Reason:** `make` and `just` were not installed on the development machine, and a task runner
   that cannot run is worse than none.
-- **Impact:** the commands are not discoverable from a single entry point; a new engineer must read
-  this file or `README.md`.
-- **Resolution:** add one when a runner is actually available in the build environment, delegating to `uv run` and `node --test`.
-- **Status:** **Open, low priority.**
+- **Impact:** the commands were not discoverable from a single entry point; a new engineer had to
+  read this file or `README.md`.
+- **Resolution:** `make` and `just` are now installed (winget) and a `Makefile` and `justfile`
+  were added, delegating to the verified `uv run` / `node --test` commands. `make all` (and
+  `just all`) runs the full gate battery and was verified green.
+- **Status:** **Resolved** (`Makefile`, `justfile`; verified via `make all` → 904 passed tests).
 
 ## TD-004 — No automated commercial security scanning in CI
 
-- **Reason:** the pipeline currently runs format, lint, type check, and tests. Commercial external scanning tools
-  (Snyk, SonarQube, Prisma) are not yet integrated into the repository.
-- **Impact:** no automated external evidence for secret scanning, dependency CVE risk, or static binary analysis.
+- **Reason:** the pipeline originally ran only format, lint, type check, and tests. Commercial
+  external scanning tools (Snyk, SonarQube, Prisma) were not integrated.
+- **Impact:** no automated external evidence for secret scanning, dependency CVE risk, or binary
+  analysis.
 - **Mitigation in Sprint 12:** comprehensive internal adversarial harnesses (`test_adversarial_threat_harness.py`,
   `test_cryptographic_tamper_challenger.py`, `test_concurrency_stress_challenger.py`, `test_protocol_adversarial_challenger.py`)
   exercise all 14 Section 177 attack vectors directly in pytest.
-- **Resolution:** integrate GitHub Secret Scanning, Dependabot, and SAST action runners into CI before production cutover.
-- **Status:** **Open, tracked.** The repository CI now includes dependency auditing and
-  CodeQL analysis; commercial scanners and GitHub Secret Scanning remain deployment-owner
-  configuration items.
+- **Resolution:** Resolved. CI now runs a dedicated `security-scan` job with **gitleaks** (secret
+  scanning, configured in `.gitleaks.toml`, verified 0 findings), **`scripts/dependency_audit.py`**
+  (pip-audit against `uv.lock`, fails closed on any known advisory), and **Trivy** filesystem
+  scanning (`aquasecurity/trivy-action@0.28.0`, HIGH/CRITICAL fail the build). CodeQL analysis
+  runs in a separate workflow. These are open-source scanners, not the commercial tools named
+  above; commercial scanners and external penetration testing remain deployment-owner items.
+- **Status:** **Resolved** (CI `security-scan` job green; secret, dependency, and filesystem
+  vulnerability scanning now automated).
 
 ## TD-005 — Repository is not under version control
 

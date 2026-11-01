@@ -13,35 +13,39 @@
 
 # 0. Working in This Repository
 
-## 0.1 Current State — Full Slice on In-Memory & SQLite Adapters, No Live External Daemons
+## 0.1 Current State — Full Slice with Local Service and Provider Validation
 
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (203 files), `ruff check` (clean), `mypy --strict`
-  (186 files, clean), `pytest` (**835 passed, 0 failed, 3 explicitly opt-in skips**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (213 files), `ruff check` (clean), `mypy --strict`
+  (196 files, clean), `pytest` (**943 passed, 0 failed, 3 explicitly opt-in skips**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
-- **Auxiliary suites, all green:** 5 node web tests (`node --test tests/web.test.mjs`, including §121
+- **Auxiliary suites, all green:** 6 node web tests (`node --test tests/web.test.mjs`, including §121
   ARIA accessibility, keyboard contracts, and authenticated live API client integration), 70/70 protocol
   adversarial probes, 4/4 concurrency probes, 6/6 test-client privilege probes (including strict unconfigured
-  fail-closed verification), 6/6 currency/money probes, 6/6 webhook replay/concurrency probes,
+  fail-closed verification), 6/6 currency/money probes, 8/8 webhook replay/concurrency probes,
   9/9 SSRF & circuit breaker probes, 6/6 model gateway resilience probes, 8/8 SAGA concurrency probes,
   audit-chain verifier CLI (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
   (`scripts/generate_sbom.py --verify`).
-- **Backend confirmed present:** 16 domain modules (`Money` + ISO 4217 `currencies` exponent table,
+- **Backend confirmed present:** 17 domain modules (`Money` + ISO 4217 `currencies` exponent table,
   `ActionRequest`, identity, policy, approval with exact 8-field binding, SHA-256 chained audit
-  ledger with redaction, commerce, evidence conflicts, payments, decision, safety budgets, tool
+  ledger with redaction, commerce, multi-item `Cart` (ADR-0006, single-merchant), evidence conflicts,
+  payments, decision, safety budgets, tool
   registry, `OutboxEvent`, `SecurityEvent`); application ports, services (`AgentAuthorizationService`,
-  `ApprovalService`, `PaymentReconciler` with webhook state-machine guards, `PurchaseOrchestrator`,
+  `ApprovalService`, `PaymentReconciler` with webhook state-machine guards, `PurchaseOrchestrator`
+  with single-variant and multi-item cart checkout,
   `EventBus`, `AbuseDetector`), background worker runtime (`OutboxDispatcher`, `BackgroundWorker`),
   infrastructure resilience (`CircuitBreaker`, `RetryPolicy`), outbound SSRF filter, `ModelGateway`,
   structured zero-dependency observability (`Tracer`, `Meter`, `GET /api/v1/metrics`), and an
-  in-process API app (`AgentPayApiApp`, `/api/v1/*`, including `POST /api/v1/webhooks/payments`
+  in-process API app (`AgentPayApiApp`, `/api/v1/*`, including cart endpoints
+  (`POST/GET /agent/carts…`, `POST /agent/checkout`) and `POST /api/v1/webhooks/payments`
   with HMAC-SHA256 verification and replay locking) exercised through a least-privilege in-process
   test client (`ApiTestClient`, strictly requiring explicit caller personas or bearer credentials).
 - **Adapters confirmed present:** tenant-partitioned, lock-guarded in-memory repositories AND
   SQLAlchemy 2.0 relational models/repositories (`infrastructure/database/`, verified against
-  in-memory SQLite and Alembic migrations `0001_initial_schema` covering all 17 relational tables);
+  in-memory SQLite and Alembic migrations `0001_initial_schema` … `0005_add_cart_tables`
+  covering all 22 relational tables);
   `StripePaymentProvider` and `RazorpayPaymentProvider` with cryptographic HMAC-SHA256 signature
   verification, timestamp tolerance windows, and webhook event normalization; `MockPaymentProvider`;
   `MockDecisionEngine`; protocol adapters ACP/AP2/UAP/x402; atomic single-use approval consumption;
@@ -53,11 +57,11 @@ This section is the map of what actually exists:
 - **Docs confirmed present:** ADRs, architecture, threat model, standards matrix, runbooks
   (`docs/operations/`, `docs/runbooks/`), `docs/security/autonomous-audit-report.md`.
 - **Still NOT real:** no real model/JEV SDK, no deployed HTTP server, no external security
-  assessment or certification of any kind. Local PostgreSQL and Redis containers have now been
-  started and verified; the Razorpay sandbox order-creation path has also been exercised with
-  configured test credentials. OpenRouter and OrcaRouter live calls remain unverified.
-- **Git exists now** (`master`, commits through Sprint 14 work) but has **no remote**, so the CI
-  workflow (`.github/workflows/ci.yml`) has never executed. Local gates are the only evidence.
+  assessment or certification of any kind. Local PostgreSQL and Redis containers, PostgreSQL
+  backup/restore, the Razorpay sandbox order-creation path, and a local Ollama model have been
+  verified. OpenRouter and OrcaRouter live calls remain unverified.
+- **GitHub CI and CodeQL have executed successfully** for the current branch; hosted-provider,
+  deployment, and external-assessment evidence remains separate from local validation.
 - A test **enforces §10** for the domain layer (`apps/api/tests/unit/test_architecture_boundaries.py`)
   and the checker tests itself, so it cannot pass vacuously.
 
@@ -94,12 +98,12 @@ uv run pytest --hypothesis-show-statistics   # proves property tests really ran 
 Auxiliary verification suites (outside `pytest`; all verified green):
 
 ```powershell
-node --test tests/web.test.mjs                                           # 5 web tests (forwards to apps/web/tests/)
-uv run python tests/adversarial/stress_test_protocols.py                 # 51/51 adversarial probes
+node --test tests/web.test.mjs                                           # 6 web tests (forwards to apps/web/tests/)
+uv run python tests/adversarial/stress_test_protocols.py                 # 70/70 adversarial probes
 uv run python tests/adversarial/stress_test_concurrency.py               # 4/4 concurrency probes
 uv run python tests/adversarial/stress_test_client_privilege.py          # 6/6 least-privilege client probes
 uv run python tests/adversarial/stress_test_money.py                     # 6/6 ISO 4217 currency & rational FX probes
-uv run python tests/adversarial/stress_test_webhooks.py                  # 6/6 HMAC webhook & replay probes
+uv run python tests/adversarial/stress_test_webhooks.py                  # 8/8 HMAC webhook & replay probes
 uv run python tests/adversarial/stress_test_ssrf_resilience.py          # 9/9 SSRF & circuit breaker probes
 uv run python tests/adversarial/stress_test_model_gateway_resilience.py  # 6/6 model gateway resilience probes
 uv run python scripts/verify_audit_chain.py --help                       # audit-chain verifier CLI
@@ -108,8 +112,9 @@ uv run python scripts/generate_sbom.py --verify                          # Cyclo
 
 Facts a future agent would otherwise get wrong:
 
-- **There is no `make`, `just`, `npm`, or `pytest` entry point.** `make` and `just` are not
-  installed on this machine, so §9's `Makefile`/`justfile` deliberately do not exist (TD-003).
+- **`make all` and `just all` now exist (TD-003 resolved)** — `Makefile` and `justfile` delegate to
+  the same verified commands below. `make`/`just` are installed via winget but not on the default
+  PATH; prepend the winget package bin dirs (see §0.3) or keep using `uv run …` directly.
   Never invent a command and never report the result of one you did not run.
 - **Do not run bare `pytest`, `ruff`, or `mypy`.** Use `uv run …` so the locked, correct versions
   are used; the global installs may differ.
@@ -120,9 +125,12 @@ Facts a future agent would otherwise get wrong:
 
 ## 0.3 Environment Facts
 
-- Present: `git`, Python 3.12.10, `node`/`npm`, `uv` 0.12.22, `docker` CLI (daemon down), and
+- Present: `git`, Python 3.12.10, `node`/`npm`, `uv` 0.12.22, `docker` CLI (daemon available),
+  `make` and `just` (winget, **not on default PATH**; prepend
+  `C:\Users\ak612\AppData\Local\Microsoft\WinGet\Packages\ezwinports.make_Microsoft.Winget.Source_8wekyb3d8bbwe\bin`
+  and the `Casey.Just` package bin dir), and
   locked dev tools `ruff` 0.16.10, `mypy` 2.4.0, `pytest` 9.1.1, `hypothesis` 6.168.5.
-  Missing: `make`, `just`, `psql`. Prefer `uv` over raw `pip`.
+  Missing: `psql`. Prefer `uv` over raw `pip`.
 - Shell is **Windows PowerShell 5.1**: no `&&`, no heredocs. Chain with `; if ($?) { ... }`, and use
   the Write/Edit tools rather than here-strings or `Set-Content`.
 - The directory name is misspelled **`platfrom`** (missing the second `a`). That is the intended

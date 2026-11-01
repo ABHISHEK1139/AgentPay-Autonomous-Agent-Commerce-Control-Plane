@@ -935,6 +935,7 @@ def test_b_wh_01_raw_bytes_hmac_verification() -> None:
         b'"attempt_id": "att_test_01", "event_type": "payment.captured", "tenant_id": "tenant_01"}'
     )
     secret = app.webhook_secret
+    assert secret is not None
     psp_sig = hmac.new(secret.encode("utf-8"), raw_payload_bytes, hashlib.sha256).hexdigest()
 
     resp = client.post_webhook(

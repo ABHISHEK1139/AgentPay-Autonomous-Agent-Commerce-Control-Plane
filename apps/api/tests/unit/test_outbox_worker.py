@@ -273,6 +273,8 @@ def test_background_worker_run_once_integration() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_w",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     stale_approval = Approval(
         approval_id="app_stale",
@@ -306,10 +308,10 @@ def test_background_worker_run_once_integration() -> None:
     # Verify reconciler called
     reconciler.reconcile_timeout.assert_called_once_with(stuck_payment)
 
-    # Verify approval transitioned to REJECTED (expired past TTL)
+    # Verify approval transitioned to EXPIRED (dedicated domain state past TTL, §125)
     updated_app = approval_repo.get("tenant_w", "app_stale")
     assert updated_app is not None
-    assert updated_app.status == ApprovalStatus.REJECTED
+    assert updated_app.status == ApprovalStatus.EXPIRED
     assert "expired" in (updated_app.reason or "").lower()
 
 
@@ -353,6 +355,8 @@ def test_standalone_agentpay_worker_runtime() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_s",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     stale_app = Approval(
         approval_id="app_standalone_stale",
@@ -383,7 +387,7 @@ def test_standalone_agentpay_worker_runtime() -> None:
 
     updated_app = approval_repo.get("tenant_s", "app_standalone_stale")
     assert updated_app is not None
-    assert updated_app.status == ApprovalStatus.REJECTED
+    assert updated_app.status == ApprovalStatus.EXPIRED
     assert "expired" in (updated_app.reason or "").lower()
 
 

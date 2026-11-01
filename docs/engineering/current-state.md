@@ -1,6 +1,6 @@
 # Current State
 
-> **Evidence refresh:** 2026-10-16. Counts and status below reflect commands
+> **Evidence refresh:** 2026-10-18. Counts and status below reflect commands
 > actually run in this workspace, not historical README claims.
 
 Verified on this machine (Windows, PowerShell 5.1) with Python 3.12.10, Node v22.14.0, uv 0.12.22, ruff 0.16.10,
@@ -10,20 +10,19 @@ mypy 2.4.0, pytest 9.1.1.
 
 | Component | State | Scope & Verification |
 | --- | --- | --- |
-| Component | State | Scope & Verification |
-| --- | --- | --- |
 | `pyproject.toml`, `uv.lock` | locked | Dependencies locked (including `sqlalchemy>=2.0.0`), zero forbidden imports in domain |
 | Monorepo layout (§9) | verified | `apps/api`, `apps/web`, `apps/worker`, `packages/*`, `scripts/`, `security/`, `tests/`, `docs/*`. |
 | Version Control | active | Git initialized, provenance tracked |
 | Domain: `Money` & ISO 4217 `currencies` | implemented | 58 ISO 4217 currencies (0/2/3-decimal exponents), integer decimal parsing, rational `ExchangeRate` (§122, §123, TD-002 resolved) |
 | Domain: `ActionRequest` | implemented | Canonical lifecycle abstraction (§6, §7) |
 | Domain: `Identity & Tenancy` | implemented | Tenant, User, Agent, AgentPermissions, Credential, TokenClaims (§14, §15, §16, §49) |
-| Domain: `Commerce & Evidence` | implemented | Merchant, Product, Variant, Inventory, Conflict Detector (§30, §32) |
+| Domain: `Commerce & Evidence` | implemented | Merchant, Product, Variant, Inventory, Conflict Detector, persisted catalog evidence snapshots via `EvidenceRepository` (§30, §32) |
+| Domain: `Cart` | implemented | `Cart`, `CartItem`, `CartStatus` single-merchant aggregate (ADR-0006); merge/remove/lifecycle invariants; pure domain (no imports beyond `errors`) |
 | Domain: `Decision & Approval` | implemented | JEV Decision models with prompt/tool/policy metadata (§29, §118), ApprovalBinding, state machine (§18, §20) |
 | Domain: `Payments & Orders` | implemented | PaymentAttempt, Order, Idempotency, Saga compensation (§39, §41, §42) |
 | Domain: `Audit Ledger` | implemented | SHA-256 hash chaining, sensitive field redaction (§29, §45) |
 | Domain: `Safety & Protection` | implemented | Loop tracker, tool call budget, financial safety budget, sliding window RateLimiter (§52, §62, §64, §65) |
-| Domain: `Tool Registry` | implemented | Fixed tool registry, ToolSpec/ToolDefinition, capability gating, risk classification (§26, §27) |
+| Domain: `Tool Registry` | implemented | Fixed tool registry, ToolSpec/ToolDefinition, capability gating, risk classification; implemented tools execute against real data and unbuilt ones fail closed with `TOOL_EXECUTION_UNAVAILABLE` (§26, §27) |
 | Domain: `Outbox & SecurityEvent` | implemented | `OutboxEvent` transactional lifecycle (§106), `SecurityEvent` abuse detection models (§62, §63) |
 | Application Layer | implemented | `AgentAuthorizationService`, `ApprovalService`, `PaymentReconciler`, `PurchaseOrchestrator`, `EventBus`, `AbuseDetector` |
 | Resilience & SSRF Filter | implemented | `CircuitBreaker` (3-state machine), `RetryPolicy` (financial non-retryability), Outbound SSRF validator (§60, §102, §103) |
@@ -33,10 +32,10 @@ mypy 2.4.0, pytest 9.1.1.
 | Supply Chain & Provenance | implemented | CycloneDX 1.5 JSON SBOM & SLSA 1.2 build provenance attestation CLI generator (`scripts/generate_sbom.py`, §57, §130) |
 | Protocol Adapters | implemented | ACP, AP2, UAP, x402 adapters mapping to canonical `ActionRequest` (§107, §108) |
 | Developer SDK | implemented | Thin typed Python client (`from agentpay import AgentPay`, §109) |
-| Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, live API client integration (§14, §21, §66, §67), approval UI (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
+| Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, live API client integration (§14, §21, §66, §67), fail-closed approval grant→execute round-trip (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
 | Ports & Adapters | implemented | Thread-safe in-memory repositories, Stripe & Razorpay payment adapters with HMAC-SHA256 signature verification and anti-replay windows, mock JEV decision engine |
-| Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), Alembic migrations `0001_initial_schema` covering all 17 tables, verified on in-memory SQLite and offline SQL DDL generation |
-| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.2, HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
+| Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), Alembic migrations `0001_initial_schema` … `0005_add_cart_tables` covering all 22 tables, verified on in-memory SQLite and offline SQL DDL generation |
+| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.2, agent-facing evidence endpoint (`GET /agent/products/{id}/evidence`, §32, §38), agent-facing cart endpoints (`POST /agent/carts`, `GET /agent/carts/{id}`, `POST /agent/carts/{id}/items`, `POST /agent/carts/{id}/items/remove`) and multi-item `POST /agent/checkout` with 8-field bound approvals (ADR-0006), HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
 | Operational Runbooks | implemented | All 9 named runbooks in `docs/runbooks/` (§133) |
 | Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-006 (§87) |
 | Security Assurance | implemented | OWASP ASVS v4.0.3 verification matrix, YAML index, exceptions in `security/asvs/` (§53) |
@@ -50,21 +49,21 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            203 files already formatted
+uv run ruff format --check .                                            211 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 186 source files
-uv run pytest                                                           835 passed, 3 skipped
-node --test tests/web.test.mjs                                          5 passed (incl. live API & §121 accessibility)
+uv run mypy                                                             Success: no issues found in 194 source files
+uv run pytest                                                           904 passed, 3 skipped
+node --test tests/web.test.mjs                                          6 passed (incl. live API & §121 accessibility)
 uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
-uv run python tests/adversarial/stress_test_m1_tenant_isolation.py       10/10 passed (tenant partition enforcement)
-uv run python tests/adversarial/stress_test_m2_durable_webhooks.py       8/8 passed (durable replay & crash survival)
+uv run python tests/adversarial/stress_test_m1_tenant_isolation.py       4/4 passed (tenant partition enforcement)
+uv run python tests/adversarial/stress_test_m2_durable_webhooks.py       5/5 passed (durable replay & crash survival)
 uv run python tests/adversarial/stress_test_m2_saga_concurrency.py       8/8 passed (SAGA stock compensation)
-uv run python tests/adversarial/stress_test_m3_sandbox_config.py         10/10 passed (fail-closed environment profiles)
-uv run python tests/adversarial/stress_test_m4_approval_binding.py       8/8 passed (8-field exact binding)
+uv run python tests/adversarial/stress_test_m3_sandbox_config.py         103/103 passed (fail-closed environment profiles)
+uv run python tests/adversarial/stress_test_m4_approval_binding.py       6/6 passed (8-field exact binding)
 uv run python tests/adversarial/stress_test_m4_challenger_edge_cases.py   6/6 passed (immutability & 30-thread race)
-uv run python tests/adversarial/stress_test_m6_shared_operational_controls.py 6/6 passed (multi-instance shared pause)
-uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py 8/8 passed (auth header vs token claims)
+uv run python tests/adversarial/stress_test_m6_shared_operational_controls.py 4/4 passed (multi-instance shared pause)
+uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py 5/5 passed (auth header vs token claims)
 uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py 5/5 passed (simulated Razorpay sandbox E2E)
 Live validation: PostgreSQL migrations/schema passed, Redis `PONG` passed, Razorpay sandbox order creation passed
 with configured test credentials, and PostgreSQL dump/restore passed with 20 restored tables.
@@ -75,8 +74,8 @@ uv run python tests/adversarial/stress_test_model_gateway_resilience.py  6/6 pas
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed
 uv run python tests/adversarial/stress_test_protocols.py                70/70 passed
 uv run python tests/adversarial/stress_test_ssrf_resilience.py          9/9 passed
-uv run python tests/adversarial/stress_test_webhook_crypto.py           8/8 passed (strict raw-byte HMAC verification)
-uv run python tests/adversarial/stress_test_webhooks.py                 6/6 passed
+uv run python tests/adversarial/stress_test_webhook_crypto.py           53/53 checks passed across 5 probes (strict raw-byte HMAC verification)
+uv run python tests/adversarial/stress_test_webhooks.py                 8/8 passed
 uv run python scripts/verify_audit_chain.py --help                      Verified working
 uv run python scripts/generate_sbom.py --verify                          Verified working (CycloneDX 1.5 + SLSA 1.2)
 ```
@@ -89,9 +88,13 @@ test process. A separate live Razorpay sandbox order-creation check passed.
 
 ## Environment constraints
 
-- `make`, `just`, and `psql` are **not installed**. The blueprint's §9 `Makefile`/`justfile` are
-  therefore not provided; use the `uv run` and `node --test` commands instead.
-- The default domain, application, API, protocol adapter, chaos, and security suites remain
-  hermetic; live PostgreSQL/Redis validation is performed separately with `docker compose`.
+- `make` and `just` are **installed via winget but not on the default PATH**; prepend
+  `C:\Users\ak612\AppData\Local\Microsoft\WinGet\Packages\ezwinports.make_Microsoft.Winget.Source_8wekyb3d8bbwe\bin`
+  and the `Casey.Just` package bin directory, or use the `uv run` / `node --test` commands directly.
+  `Makefile` and `justfile` exist and delegate to the verified commands (TD-003 resolved).
+- `psql` is **not installed**; use `docker exec` into the Postgres container for the live validation
+  workflows described above.
+- The Docker daemon is available and was used for the live local PostgreSQL/Redis validation above;
+  the default domain, application, API, protocol adapter, chaos, and security suites remain hermetic.
 - The project directory is named `platfrom` (one `a`). That is the intended path.
 - Shell is PowerShell 5.1: no `&&`, no heredocs.

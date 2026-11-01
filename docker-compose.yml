@@ -1,7 +1,8 @@
 # Development services for later sprints.
 #
 # Not started by the default test suite: the domain layer requires no external services.
-# Requires a running Docker daemon; `docker info` failed on the current development machine.
+# Requires a running Docker daemon; local PostgreSQL/Redis validation has been performed
+# with the daemon up (see docs/engineering/current-state.md).
 
 services:
   postgres:

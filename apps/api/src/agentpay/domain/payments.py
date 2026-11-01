@@ -223,6 +223,7 @@ class Order:
     status: OrderStatus = OrderStatus.PENDING_PAYMENT
     payment_attempt_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    cancellation_reason: str | None = None
 
     def __post_init__(self) -> None:
         strings: tuple[tuple[str, object], ...] = (
@@ -248,6 +249,13 @@ class Order:
         if self.created_at.tzinfo is None or self.created_at.utcoffset() is None:
             raise InvalidPaymentError("created_at must be timezone-aware (UTC)")
 
+        if self.cancellation_reason is not None:
+            reason_obj: object = self.cancellation_reason
+            if not isinstance(reason_obj, str) or not reason_obj.strip():
+                raise InvalidPaymentError(
+                    "cancellation_reason must be a non-empty string when provided"
+                )
+
     def confirm(self, payment_attempt_id: str) -> Order:
         if self.status is not OrderStatus.PENDING_PAYMENT:
             raise InvalidPaymentError(f"Cannot confirm order in status '{self.status.value}'")
@@ -263,9 +271,28 @@ class Order:
             status=OrderStatus.CONFIRMED,
             payment_attempt_id=payment_attempt_id,
             created_at=self.created_at,
+            cancellation_reason=self.cancellation_reason,
         )
 
     def cancel(self, reason: str | None = None) -> Order:
+        """Cancel the order, persisting an auditable reason (§41, §45, §125).
+
+        Cancellation is idempotent: cancelling an already-cancelled order returns the
+        existing record unchanged so a retried compensation cannot erase the original
+        reason. A refunded order may never be cancelled.
+        """
+        if self.status is OrderStatus.CANCELLED:
+            return self
+        if self.status is OrderStatus.REFUNDED:
+            raise InvalidPaymentError("Cannot cancel a refunded order")
+
+        cancellation_reason = self.cancellation_reason
+        if reason is not None:
+            reason_obj: object = reason
+            if not isinstance(reason_obj, str) or not reason_obj.strip():
+                raise InvalidPaymentError("cancellation reason must be a non-empty string")
+            cancellation_reason = reason_obj.strip()
+
         return Order(
             order_id=self.order_id,
             tenant_id=self.tenant_id,
@@ -278,6 +305,7 @@ class Order:
             status=OrderStatus.CANCELLED,
             payment_attempt_id=self.payment_attempt_id,
             created_at=self.created_at,
+            cancellation_reason=cancellation_reason,
         )
 
 

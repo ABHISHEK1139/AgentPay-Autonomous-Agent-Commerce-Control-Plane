@@ -43,6 +43,8 @@ def run_probe_1_production_tenant_derivation_and_mismatch() -> bool:
         database_url="sqlite:///:memory:",
         cors_allowed_origins=("https://app.agentpay.internal",),
         seed_demo_data=False,
+        razorpay_webhook_secret="whsec_m7_prod_signing_secret",
+        stripe_webhook_secret="whsec_m7_prod_signing_secret",
     )
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, config=prod_config)
@@ -109,7 +111,7 @@ def run_probe_3_agent_cannot_approve_decisions() -> bool:
     """Probe 3: Authenticated agent cannot grant or reject human approvals (§2.1, §20, AP-009)."""
     orch, *_, variant_repo, inv_repo, _, _, _approval_repo = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client_buyer = ApiTestClient(app).as_buyer()
+    client_buyer = ApiTestClient(app).as_buyer(principal_id="user_01")
     client_agent = ApiTestClient(app).as_agent("agent_01", tenant_id="tenant_01")
     client_admin = ApiTestClient(app).as_admin()
 
@@ -176,7 +178,7 @@ def run_probe_3_agent_cannot_approve_decisions() -> bool:
     status_admin, body_admin = client_admin.post(
         f"/api/v1/approvals/{approval_id}/approve",
         headers={"x-tenant-id": "tenant_01"},
-        json_body={"approver_id": "human_supervisor_01"},
+        json_body={"approver_id": "usr_test_admin"},
     )
     assert status_admin == 200
     assert body_admin["status"] == "APPROVED"
@@ -191,6 +193,7 @@ def run_probe_4_production_observability_auth_default() -> bool:
             "AGENTPAY_ENVIRONMENT": "sandbox",
             "RAZORPAY_KEY_ID": "rzp_test_real_key_32bytes",
             "RAZORPAY_KEY_SECRET": "rzp_secret_real_secret_32bytes",
+            "AGENTPAY_WEBHOOK_SECRET": "whsec_m7_sandbox_signing_secret",
         }
     )
     assert sandbox_cfg.require_observability_auth is True
@@ -201,6 +204,7 @@ def run_probe_4_production_observability_auth_default() -> bool:
             "AGENTPAY_ENVIRONMENT": "production",
             "AGENTPAY_DATABASE_URL": "postgresql://user:pass@localhost:5432/agentpay",
             "AGENTPAY_CORS_ALLOWED_ORIGINS": "https://control.agentpay.internal",
+            "AGENTPAY_WEBHOOK_SECRET": "whsec_m7_prod_signing_secret",
         }
     )
     assert prod_cfg.require_observability_auth is True

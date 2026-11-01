@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Multi-Item Cart Checkout (ADR-0006, §38, §41, §44)**: `Cart` domain aggregate (single-merchant,
+  merge/remove/lifecycle invariants), tenant-scoped `CartRepository` port with in-memory and
+  SQLAlchemy 2.0 implementations, and Alembic migration `0005_add_cart_tables` (`carts`, `cart_items`).
+- **Agent-Facing Cart API (§38)**: `POST /agent/carts`, `GET /agent/carts/{id}`,
+  `POST /agent/carts/{id}/items`, `POST /agent/carts/{id}/items/remove`, and multi-item
+  `POST /agent/checkout` with asserted-total verification, per-line price/inventory conflict
+  checks, emergency-pause fail-closed behavior, and agent impersonation denial. Cart checkouts
+  bind 8-field approvals to the cart (`action="checkout"`, `resource.type="cart"`) and execute
+  through `POST /api/v1/approvals/{id}/execute`.
+- **Cart Checkout Orchestration**: reserve-all → one payment → N single-variant CONFIRMED orders
+  (shared `payment_attempt_id`) → cart `CHECKED_OUT`, with saga compensation (release reservations /
+  refund) on partial failure, UNKNOWN-payment reservation retention, and cart-bound idempotency.
+- **Task Runner Entry Points (TD-003)**: `Makefile` and `justfile` delegating to the verified
+  `uv run` / `node --test` commands (`make all` / `just all` run the full gate battery).
+- **CI Security Scanning Job (TD-004)**: `.gitleaks.toml` secret scanning, `scripts/dependency_audit.py`
+  (pip-audit against `uv.lock`, fail-closed), and Trivy filesystem vulnerability scanning in
+  `.github/workflows/ci.yml`, plus live local PostgreSQL/Redis/Docker validation.
+- **Cart Test Coverage**: `test_cart.py` (domain invariants), `test_cart_flow.py` (19 orchestrator
+  scenarios incl. approvals, saga compensation, idempotency, cross-tenant denial, and
+  per-cart checkout-lock concurrency regressions),
+  `test_api_cart.py` (HTTP lifecycle, impersonation, pause, error envelopes, OpenAPI/discovery
+  contract), and cart persistence and migration-chain coverage.
+- **Agent-Facing Evidence API (§32, §38)**: `GET /agent/products/{id}/evidence` serves the persisted catalog provenance chain (price, inventory, specification, merchant) for a product or variant, with tenant partitioning and fail-closed 404 `PRODUCT_NOT_FOUND`.
+- **Executable Read-Only Tools (§26, §27)**: `get_evidence`, `compare_products` (live availability + lowest-price ranking), and `calculate_total` (exact integer minor-unit arithmetic) are now genuinely implemented in `PurchaseOrchestrator.execute_tool`.
+- **Domain Error `TOOL_EXECUTION_UNAVAILABLE`**: fail-closed `ToolExecutionUnavailableError` for registered-but-unimplemented tools, mapped to HTTP 501 with guidance to the canonical action/approval endpoints.
+
+### Changed
+- Verified gate counts refreshed: 904 Python tests passing (3 opt-in skips), mypy clean across
+  194 source files, ruff clean across 211 files, 6 web tests passing.
+
+### Fixed
+- **B-WEB-01 (HIGH)**: Web approval resolution now calls the backend (grant/reject with `res.ok` checks, then chained execution on approval), surfaces execution failures instead of fabricating success, synchronizes live approval data, and keeps the deterministic demo simulation only in demo mode.
+- **B-TOOL-01 (MEDIUM)**: `execute_tool` no longer returns fabricated `"status": "executed"` for unimplemented tools — it fails closed with `TOOL_EXECUTION_UNAVAILABLE` (§2.4, §135).
+- **B-EVID-01 (MEDIUM)**: Purchases now persist immutable catalog evidence snapshots through `EvidenceRepository`, making recommendation provenance auditable after the fact (§2.3, §32).
+- **B-MERGE-01 (HIGH)**: `AgentPayApiApp` now accepts the `refund_repo` argument passed by `create_app()`, wiring it into the `PaymentReconciler` instead of raising `TypeError` on app construction.
+- **B-MERGE-02 (HIGH)**: Approval binding verification now compares the resolved merchant identity (variant→product→merchant) on both creation and execution sides, matching the §20 exact-binding contract.
+- **B-MERGE-03 (MEDIUM)**: Generic, Razorpay, and Stripe webhook handlers fail closed with `500 WEBHOOK_SECRET_NOT_CONFIGURED` when no signing secret is configured instead of raising `TypeError` → `INTERNAL_ERROR`.
+- **B-MERGE-04 (MEDIUM)**: Restored the deleted capability-discovery and catalog-filter tests and corrected wrong OpenAPI/inventory assertions in `test_api.py` (§13, §78).
+- **B-MERGE-05 (MEDIUM)**: Restored the provider-neutral `AGENTPAY_MODEL_*` OpenAI-compatible configuration (fields, env parsing, validation rule 5b, factory wiring) that was silently removed while still documented in the sandbox runbook.
+- **B-MERGE-06 (LOW)**: Worker approval sweeps use the dedicated `EXPIRED` state; tests and adversarial harnesses updated to the `EXPIRED` semantics.
+- **B-MERGE-07 (LOW)**: Resolved the merge's `mypy --strict` and `ruff` regressions (payment attempt annotation, `str | None` webhook secrets, import ordering).
+- **B-SRV-01 (LOW)**: The live-server oversized-body rejection test now tolerates the Windows TCP reset race (WinError 10053) while still asserting the 413 `PAYLOAD_TOO_LARGE` envelope on every received response; success responses still hard-fail.
+- **B-CART-01 (HIGH)**: Two concurrent checkouts of the same ACTIVE cart with distinct idempotency keys could both pass the ACTIVE-cart check and reach the payment pipeline (duplicate payment, duplicate orders, and a lost inventory reservation update). Cart checkout is now serialized by process-local striped per-`(tenant, cart)` locks spanning decision → reservation → payment → `CHECKED_OUT` in both `execute_cart_purchase` and `execute_approved_cart_purchase`; the loser observes `CHECKED_OUT` and fails closed. Regression tests: deterministic lock-contract test, 3-round barrier race with injected decision latency, and a same-key concurrent replay test that must yield one payment. Multi-process deployments still require a database-level cart claim (recorded in Known Limitations).
+- **B-API-03 (LOW)**: `/openapi.json` and `/.well-known/agent-commerce` now publish the cart surface (`POST /agent/carts`, `GET /agent/carts/{cart_id}`, `POST /agent/carts/{cart_id}/items`, `POST /agent/carts/{cart_id}/items/remove`, `POST /agent/checkout`, plus `commerce.carts` / `commerce.cart_checkout` discovery keys), with contract assertions in `test_api_cart.py` (§13, §38).
+
 ## [0.1.0] - 2026-10-11
 
 ### Added

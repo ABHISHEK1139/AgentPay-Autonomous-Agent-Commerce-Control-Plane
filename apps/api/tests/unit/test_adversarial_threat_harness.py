@@ -64,7 +64,7 @@ from agentpay.domain.errors import (
     MissingCapabilityError,
     PrivilegeEscalationAttemptError,
 )
-from agentpay.domain.identity import Agent, AgentStatus
+from agentpay.domain.identity import Agent, AgentStatus, UserRole
 from agentpay.domain.money import Money
 from agentpay.domain.policy import PolicyDecision
 from agentpay.domain.safety import AgentLoopBudget, AgentLoopTracker
@@ -691,7 +691,11 @@ def test_vector_10_approval_replay_multi_execution_and_status_consumption() -> N
     # 2. Human grants approval
     approval_svc = ApprovalService(approval_repo=approval_repo)
     approved_rec = approval_svc.grant_approval(
-        approval_id=appr_id, approver_id="approver_jane", tenant_id="tenant_01"
+        approval_id=appr_id,
+        approver_id="approver_jane",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="approver_jane",
     )
     assert approved_rec.status == ApprovalStatus.APPROVED
 
@@ -844,7 +848,7 @@ def test_vector_13_silent_failure_unexpected_error_standard_500_envelope() -> No
     """Vector 13: Unexpected exceptions return standardized §13 HTTP 500 error envelopes without traceback leaks."""
     orch, _, _, _, _, _, _, _, _, _, _ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
 
     # 1. Inject unexpected internal runtime error into orchestrator
     orch.execute_purchase = MagicMock(side_effect=ZeroDivisionError("simulated internal bug"))  # type: ignore[method-assign]

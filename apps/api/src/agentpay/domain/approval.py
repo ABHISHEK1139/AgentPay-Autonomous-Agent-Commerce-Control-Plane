@@ -36,7 +36,8 @@ class ApprovalBinding:
     """Immutable cryptographically/logically bound scope of an approval (§20, §0.4).
 
     Approval binds to the EXACT action_id, amount, merchant, resource, currency,
-    action version, tenant, and principal. An approval granted for ₹5,000 never authorizes ₹50,000,
+    action version, tenant, agent, and principal. An approval granted for ₹5,000 never
+    authorizes ₹50,000, an approval granted to agent Alice never authorizes agent Bob,
     and an approval granted to principal Alice never authorizes principal Bob.
     """
 
@@ -47,7 +48,8 @@ class ApprovalBinding:
     currency: str
     action_version: int
     tenant_id: str
-    principal_id: str = "user_01"
+    agent_id: str
+    principal_id: str
 
     def __post_init__(self) -> None:
         strings: tuple[tuple[str, object], ...] = (
@@ -56,6 +58,7 @@ class ApprovalBinding:
             ("resource_id", self.resource_id),
             ("currency", self.currency),
             ("tenant_id", self.tenant_id),
+            ("agent_id", self.agent_id),
             ("principal_id", self.principal_id),
         )
         for name, val in strings:
@@ -88,7 +91,8 @@ class ApprovalBinding:
         currency: str,
         action_version: int,
         tenant_id: str,
-        principal_id: str = "user_01",
+        agent_id: str,
+        principal_id: str,
     ) -> bool:
         """Check whether this binding matches the execution request exactly (§20)."""
         return (
@@ -99,6 +103,7 @@ class ApprovalBinding:
             and self.currency == currency
             and self.action_version == action_version
             and self.tenant_id == tenant_id
+            and self.agent_id == agent_id
             and self.principal_id == principal_id
         )
 
@@ -111,12 +116,17 @@ class ApprovalBinding:
         currency: str,
         action_version: int,
         tenant_id: str,
-        principal_id: str = "user_01",
+        agent_id: str,
+        principal_id: str,
     ) -> None:
         """Assert exact match or raise ApprovalBindingMismatchError (§0.4, §20)."""
         if self.tenant_id != tenant_id:
             raise ApprovalBindingMismatchError(
                 f"Tenant mismatch: approval bound to '{self.tenant_id}', got '{tenant_id}'"
+            )
+        if self.agent_id != agent_id:
+            raise ApprovalBindingMismatchError(
+                f"Agent mismatch: approval bound to '{self.agent_id}', got '{agent_id}'"
             )
         if self.principal_id != principal_id:
             raise ApprovalBindingMismatchError(

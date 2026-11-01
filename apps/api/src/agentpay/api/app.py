@@ -58,6 +58,7 @@ from agentpay.application.ports.payment_port import (
     IdempotencyStore,
     ProviderTransactionMappingRepository,
     ProviderWebhookEventRepository,
+    RefundRepository,
 )
 from agentpay.application.ports.rate_limit_port import RateLimiter
 from agentpay.application.services.reconciliation_service import PaymentReconciler
@@ -72,15 +73,18 @@ from agentpay.domain.action_request import (
     Intent,
     ResourceRef,
 )
-from agentpay.domain.approval import ApprovalAlreadyConsumedError
+from agentpay.domain.approval import Approval, ApprovalAlreadyConsumedError
 from agentpay.domain.errors import (
+    ApprovalAuthorizationError,
     ApprovalBindingMismatchError,
+    ApprovalConcurrencyError,
     CrossTenantAccessError,
     DomainError,
     IdempotencyConflictError,
     InsufficientInventoryError,
     PrivilegeEscalationAttemptError,
     RateLimitExceededError,
+    ToolExecutionUnavailableError,
     UnauthorizedToolAccessError,
     UnknownToolError,
 )
@@ -150,13 +154,14 @@ class AgentPayApiApp:
         read_agent_refill_rate: float = 20.0,
         read_tenant_capacity: int = 500,
         read_tenant_refill_rate: float = 100.0,
-        webhook_secret: str = "whsec_test_secret_32bytes_minimum_length",
+        webhook_secret: str | None = "whsec_test_secret_32bytes_minimum_length",
         razorpay_webhook_secret: str | None = None,
         stripe_webhook_secret: str | None = None,
         reconciler: PaymentReconciler | None = None,
         idempotency_store: IdempotencyStore | None = None,
         provider_mapping_repo: ProviderTransactionMappingRepository | None = None,
         webhook_event_repo: ProviderWebhookEventRepository | None = None,
+        refund_repo: RefundRepository | None = None,
         require_observability_auth: bool = False,
         config: AppConfig | None = None,
         emergency_pause_store: EmergencyPauseStore | None = None,
@@ -182,7 +187,7 @@ class AgentPayApiApp:
         self._read_agent_refill_rate = read_agent_refill_rate
         self._read_tenant_capacity = read_tenant_capacity
         self._read_tenant_refill_rate = read_tenant_refill_rate
-        self.webhook_secret: str = webhook_secret
+        self.webhook_secret: str | None = webhook_secret
 
         env_req_obs = os.environ.get("AGENTPAY_REQUIRE_OBSERVABILITY_AUTH", "").lower() in (
             "true",
@@ -212,6 +217,9 @@ class AgentPayApiApp:
             or InMemoryProviderWebhookEventRepository()
         )
         self.webhook_event_repo: ProviderWebhookEventRepository = wb_repo
+        self.refund_repo: RefundRepository | None = refund_repo or getattr(
+            orchestrator, "_refund_repo", None
+        )
 
         if reconciler is not None:
             self.reconciler = reconciler
@@ -219,6 +227,11 @@ class AgentPayApiApp:
                 self.reconciler._provider_mapping_repo = mapping_repo
             if getattr(self.reconciler, "_webhook_event_repo", None) is None:
                 self.reconciler._webhook_event_repo = wb_repo
+            if (
+                getattr(self.reconciler, "_refund_repo", None) is None
+                and self.refund_repo is not None
+            ):
+                self.reconciler._refund_repo = self.refund_repo
         else:
             provider = getattr(orchestrator, "_payment_provider", None) or MockPaymentProvider()
             pay_repo = getattr(orchestrator, "_payment_repo", None) or InMemoryPaymentRepository()
@@ -230,17 +243,18 @@ class AgentPayApiApp:
                 audit_ledger=getattr(orchestrator, "_audit_ledger", None),
                 provider_mapping_repo=mapping_repo,
                 webhook_event_repo=wb_repo,
+                refund_repo=self.refund_repo,
             )
 
         self.provider_mapping_repo = mapping_repo
-        self.razorpay_webhook_secret: str = (
+        self.razorpay_webhook_secret: str | None = (
             razorpay_webhook_secret
             or os.environ.get("RAZORPAY_WEBHOOK_SECRET")
             or os.environ.get("AGENTPAY_WEBHOOK_SECRET")
             or getattr(getattr(self.reconciler, "_provider", None), "webhook_secret", None)
             or webhook_secret
         )
-        self.stripe_webhook_secret: str = (
+        self.stripe_webhook_secret: str | None = (
             stripe_webhook_secret
             or os.environ.get("STRIPE_WEBHOOK_SECRET")
             or os.environ.get("AGENTPAY_WEBHOOK_SECRET")
@@ -474,13 +488,17 @@ class AgentPayApiApp:
         if method != "POST":
             return False
         return (
-            path in ("/api/v1/actions", "/agent/actions")
+            path in ("/api/v1/actions", "/agent/actions", "/agent/checkout")
+            or path.startswith("/agent/carts")
             or path.startswith("/api/v1/protocols/")
             or path.startswith("/api/v1/tools/")
             or path.startswith("/agent/tools/")
             or (
                 path.startswith("/api/v1/approvals/")
-                and any(path.endswith(f"/{action}") for action in ("approve", "reject", "grant"))
+                and any(
+                    path.endswith(f"/{action}")
+                    for action in ("approve", "reject", "grant", "execute")
+                )
             )
         )
 
@@ -489,7 +507,43 @@ class AgentPayApiApp:
         return method == "GET" and (
             path == "/agent/catalog"
             or path.startswith("/agent/products/")
-            or path == "/api/v1/approvals"
+            or path.startswith("/agent/carts")
+            or path.startswith("/api/v1/approvals")
+        )
+
+    def _required_scope(self, path: str, method: str) -> str | None:
+        """Map a route to the credential scope it requires (§14, §17)."""
+        if self._is_mutating_route(path, method):
+            return "commerce:write"
+        if self._is_read_route(path, method):
+            return "commerce:read"
+        return None
+
+    def _check_scope(
+        self,
+        cred: Credential,
+        path: str,
+        method: str,
+        request_id: str,
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Reject credentials that lack the scope required by this route (§14, §17).
+
+        Scopes were previously stored but never enforced, so any authenticated
+        credential could reach any commerce endpoint. Enforcement is explicit per
+        route class rather than implicit from role.
+        """
+        required = self._required_scope(path, method)
+        if required is None or cred.has_scope(required):
+            return None
+        return self._error_response(
+            403,
+            "INSUFFICIENT_SCOPE",
+            f"Credential lacks required scope '{required}' for {method} {path}",
+            request_id,
+            details={
+                "required_scope": required,
+                "granted_scopes": sorted(cred.scopes),
+            },
         )
 
     def _check_rate_limits(
@@ -638,6 +692,18 @@ class AgentPayApiApp:
                 request_id,
             )
 
+        # Defense in depth (§14): the lookup is indexed by hash, but the presented
+        # secret must still verify against the record that was returned. This keeps
+        # authentication correct even if a repository returns a colliding or stale
+        # row, rather than trusting the index alone.
+        if not cred.verify_secret(raw_secret):
+            return None, self._error_response(
+                401,
+                "UNAUTHENTICATED",
+                "Invalid authentication credentials",
+                request_id,
+            )
+
         if cred.status is CredentialStatus.REVOKED:
             return None, self._error_response(
                 401,
@@ -663,6 +729,200 @@ class AgentPayApiApp:
             )
 
         return cred, None
+
+    #: Roles permitted to initiate or execute commerce actions (§16, §151).
+    #: Auditors are read-only and merchant administrators own catalog data, so neither
+    #: may spend a tenant's money through the buyer surface.
+    _COMMERCE_ACTOR_ROLES: frozenset[UserRole] = frozenset(
+        {UserRole.BUYER, UserRole.ADMIN, UserRole.AGENT_OPERATOR, UserRole.FINANCE}
+    )
+    #: Roles trusted to act for any principal or agent inside their own tenant (§16).
+    _ACT_ON_BEHALF_ROLES: frozenset[UserRole] = frozenset(
+        {UserRole.ADMIN, UserRole.AGENT_OPERATOR, UserRole.FINANCE}
+    )
+    #: Roles that may read every approval in their tenant (§16, §66).
+    _APPROVAL_READ_ALL_ROLES: frozenset[UserRole] = frozenset(
+        {UserRole.ADMIN, UserRole.AGENT_OPERATOR, UserRole.FINANCE, UserRole.AUDITOR}
+    )
+    #: Roles that may execute an approved action for any agent in their tenant (§16, §20).
+    _APPROVAL_EXECUTE_ALL_ROLES: frozenset[UserRole] = frozenset(
+        {UserRole.ADMIN, UserRole.AGENT_OPERATOR, UserRole.FINANCE}
+    )
+
+    def _check_actor_identity(
+        self,
+        cred: Credential,
+        *,
+        tenant_id: str,
+        agent_id: str | None,
+        principal_id: str | None,
+        request_id: str,
+        context: str,
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Reject callers asserting an identity they do not own (§14, §15, AP-009).
+
+        The authenticated credential is the only source of truth. An agent may only
+        act as itself; a buyer may only act for its own principal using an agent bound
+        to that principal. Tenant operator roles (ADMIN, AGENT_OPERATOR, FINANCE) may
+        act on behalf of any principal in their own tenant, which the caller has
+        already proven by passing the tenant-binding check. Auditors and merchant
+        administrators may not initiate commerce actions at all.
+        """
+        if cred.role is None:
+            if agent_id is not None and agent_id != cred.principal_id:
+                return self._error_response(
+                    403,
+                    "AGENT_IMPERSONATION_DENIED",
+                    f"Authenticated agent '{cred.principal_id}' cannot act as agent "
+                    f"'{agent_id}' for {context}",
+                    request_id,
+                    details={
+                        "authenticated_agent": cred.principal_id,
+                        "asserted_agent": agent_id,
+                    },
+                )
+            return None
+
+        if cred.role not in self._COMMERCE_ACTOR_ROLES:
+            return self._error_response(
+                403,
+                "ROLE_NOT_PERMITTED",
+                f"Role '{cred.role.value}' may not perform {context}",
+                request_id,
+                details={"role": cred.role.value, "context": context},
+            )
+
+        if cred.role in self._ACT_ON_BEHALF_ROLES:
+            return None
+
+        # BUYER: may only act for its own principal (§16, §20).
+        if principal_id is not None and principal_id != cred.principal_id:
+            return self._error_response(
+                403,
+                "PRINCIPAL_IMPERSONATION_DENIED",
+                f"Authenticated principal '{cred.principal_id}' cannot act for "
+                f"principal '{principal_id}' during {context}",
+                request_id,
+                details={
+                    "authenticated_principal": cred.principal_id,
+                    "asserted_principal": principal_id,
+                },
+            )
+        if agent_id is not None and self.orchestrator._agent_repo is not None:
+            agent = self.orchestrator._agent_repo.get(tenant_id, agent_id)
+            if agent is not None and agent.principal_id != cred.principal_id:
+                return self._error_response(
+                    403,
+                    "AGENT_IMPERSONATION_DENIED",
+                    f"Agent '{agent_id}' is not delegated by principal '{cred.principal_id}'",
+                    request_id,
+                    details={
+                        "authenticated_principal": cred.principal_id,
+                        "asserted_agent": agent_id,
+                        "agent_principal": agent.principal_id,
+                    },
+                )
+        return None
+
+    def _approval_visible_to(self, cred: Credential, approval: Approval) -> bool:
+        """Return whether a caller may read this approval record (§49, §50, §66).
+
+        Auditors and approver roles see the whole tenant; agents and ordinary humans
+        see only approvals bound to their own agent or principal identity.
+        """
+        if cred.role in self._APPROVAL_READ_ALL_ROLES:
+            return True
+        if cred.role is None:
+            return cred.principal_id == approval.binding.agent_id
+        return cred.principal_id == approval.binding.principal_id
+
+    def _authorize_approval_execution(
+        self, cred: Credential, approval: Approval, request_id: str
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Authorize a caller to execute the action bound to an approval (§20, §66).
+
+        An agent may only execute its own approvals. Operator roles may execute on
+        behalf of any agent in the tenant; a buyer may execute only approvals bound to
+        their own principal. Auditors and merchant administrators may never execute.
+        """
+        if cred.role is None:
+            if cred.principal_id != approval.binding.agent_id:
+                return self._error_response(
+                    403,
+                    "AGENT_IMPERSONATION_DENIED",
+                    f"Authenticated agent '{cred.principal_id}' cannot execute approval "
+                    f"'{approval.approval_id}' bound to agent '{approval.binding.agent_id}'",
+                    request_id,
+                    details={
+                        "authenticated_agent": cred.principal_id,
+                        "bound_agent": approval.binding.agent_id,
+                    },
+                )
+            return None
+        if cred.role in self._APPROVAL_EXECUTE_ALL_ROLES:
+            return None
+        if cred.role is UserRole.BUYER and cred.principal_id == approval.binding.principal_id:
+            return None
+        return self._error_response(
+            403,
+            "APPROVAL_AUTHORIZATION_DENIED",
+            f"Role '{cred.role.value}' may not execute approvals on behalf of principal "
+            f"'{approval.binding.principal_id}'",
+            request_id,
+            details={
+                "principal_id": cred.principal_id,
+                "role": cred.role.value,
+                "bound_principal": approval.binding.principal_id,
+            },
+        )
+
+    def _binding_override_error(
+        self,
+        approval: Approval,
+        body: dict[str, Any],
+        request_id: str,
+    ) -> tuple[int, dict[str, Any]] | None:
+        """Reject body fields that contradict the immutable approval binding (§20, §0.4).
+
+        Bound parameters are read from the approval record, never from the request.
+        Supplying a contradicting value is rejected rather than silently ignored so a
+        caller cannot believe it changed what was approved.
+        """
+        mismatches: dict[str, dict[str, Any]] = {}
+        checks: tuple[tuple[str, str, Any, Any], ...] = (
+            ("action_id", "Action ID", body.get("action_id"), approval.binding.action_id),
+            ("agent_id", "Agent", body.get("agent_id"), approval.binding.agent_id),
+            (
+                "principal_id",
+                "Principal",
+                body.get("principal_id"),
+                approval.binding.principal_id,
+            ),
+            ("resource_id", "Resource", body.get("resource_id"), approval.binding.resource_id),
+            (
+                "amount_minor",
+                "Amount",
+                body.get("amount_minor"),
+                approval.binding.amount.minor_units,
+            ),
+            ("currency", "Currency", body.get("currency"), approval.binding.currency),
+        )
+        messages: list[str] = []
+        for field_name, label, supplied, bound in checks:
+            if supplied is None:
+                continue
+            if str(supplied) != str(bound):
+                mismatches[field_name] = {"supplied": supplied, "bound": bound}
+                messages.append(f"{label} mismatch: supplied '{supplied}' != bound '{bound}'")
+        if not mismatches:
+            return None
+        return self._error_response(
+            422,
+            "APPROVAL_BINDING_MISMATCH",
+            "; ".join(messages),
+            request_id,
+            details={"mismatches": mismatches},
+        )
 
     def handle_request(
         self,
@@ -866,7 +1126,17 @@ class AgentPayApiApp:
                 rec = rec[3:]
             received_sigs.append(rec)
 
-        secret_bytes = self.webhook_secret.encode("utf-8")
+        # Fail closed when no signing secret is configured: an absent key would let
+        # anyone forge provider webhooks (§61).
+        generic_secret = self.webhook_secret
+        if not generic_secret:
+            return self._error_response(
+                500,
+                "WEBHOOK_SECRET_NOT_CONFIGURED",
+                "Webhook signing secret is not configured; refusing to verify signatures",
+                request_id,
+            )
+        secret_bytes = generic_secret.encode("utf-8")
         signature_valid = False
         for cand_bytes in candidate_byte_payloads:
             expected_sig = hmac.new(secret_bytes, cand_bytes, hashlib.sha256).hexdigest()
@@ -1072,11 +1342,21 @@ class AgentPayApiApp:
                 request_id,
             )
 
-        # 2. Cryptographic constant-time HMAC-SHA256 verification
+        # 2. Cryptographic constant-time HMAC-SHA256 verification.
+        #    Fail closed when no signing secret is configured: verifying against an
+        #    absent/empty key would let anyone forge provider webhooks (§61).
+        razorpay_secret = self.razorpay_webhook_secret
+        if not razorpay_secret:
+            return self._error_response(
+                500,
+                "WEBHOOK_SECRET_NOT_CONFIGURED",
+                "Razorpay webhook signing secret is not configured; refusing to verify signatures",
+                request_id,
+            )
         secret_candidates = (
-            [s.strip() for s in self.razorpay_webhook_secret.split(",") if s.strip()]
-            if "," in self.razorpay_webhook_secret
-            else [self.razorpay_webhook_secret]
+            [s.strip() for s in razorpay_secret.split(",") if s.strip()]
+            if "," in razorpay_secret
+            else [razorpay_secret]
         )
 
         signature_valid = False
@@ -1379,12 +1659,21 @@ class AgentPayApiApp:
                 },
             )
 
-        # 4. Cryptographic constant-time HMAC-SHA256 verification
+        # 4. Cryptographic constant-time HMAC-SHA256 verification.
+        #    Fail closed when no signing secret is configured (§61).
         signed_payload = f"{ts_val}.".encode() + raw_bytes
+        stripe_secret = self.stripe_webhook_secret
+        if not stripe_secret:
+            return self._error_response(
+                500,
+                "WEBHOOK_SECRET_NOT_CONFIGURED",
+                "Stripe webhook signing secret is not configured; refusing to verify signatures",
+                request_id,
+            )
         secret_candidates = (
-            [s.strip() for s in self.stripe_webhook_secret.split(",") if s.strip()]
-            if "," in self.stripe_webhook_secret
-            else [self.stripe_webhook_secret]
+            [s.strip() for s in stripe_secret.split(",") if s.strip()]
+            if "," in stripe_secret
+            else [stripe_secret]
         )
 
         signature_valid = False
@@ -1617,6 +1906,9 @@ class AgentPayApiApp:
         trace_id: str = "",
         raw_body: bytes | None = None,
     ) -> tuple[int, dict[str, Any]]:
+        # Normalize path: strip query string and trailing slashes (§13)
+        path, _, query_string = path.partition("?")
+        path = path.rstrip("/") or "/"
 
         # Guard against non-object JSON bodies on mutating routes (§13, B-API-01)
         if method in ("POST", "PUT", "PATCH") and body is not None and not isinstance(body, dict):
@@ -1752,6 +2044,13 @@ class AgentPayApiApp:
                 "paths": {
                     "/api/v1/actions": {"post": {"summary": "Submit ActionRequest"}},
                     "/agent/catalog": {"get": {"summary": "Agent Catalog Discovery"}},
+                    "/agent/carts": {"post": {"summary": "Create Shopping Cart"}},
+                    "/agent/carts/{cart_id}": {"get": {"summary": "Read Shopping Cart"}},
+                    "/agent/carts/{cart_id}/items": {"post": {"summary": "Add Cart Item"}},
+                    "/agent/carts/{cart_id}/items/remove": {
+                        "post": {"summary": "Remove Cart Item"}
+                    },
+                    "/agent/checkout": {"post": {"summary": "Execute Cart Checkout"}},
                     "/.well-known/agent-commerce": {
                         "get": {"summary": "Agent Commerce Capability Discovery"}
                     },
@@ -1811,6 +2110,8 @@ class AgentPayApiApp:
                 "commerce": {
                     "catalog": "/agent/catalog",
                     "checkout": "/api/v1/actions",
+                    "carts": "/agent/carts",
+                    "cart_checkout": "/agent/checkout",
                     "payment_webhook": "/api/v1/webhooks/razorpay",
                 },
                 "authentication": {
@@ -1921,10 +2222,15 @@ class AgentPayApiApp:
                 },
             )
 
+        # --- CREDENTIAL SCOPE ENFORCEMENT (§14, §17) ---
+        scope_err = self._check_scope(cred, path, method, request_id)
+        if scope_err is not None:
+            return scope_err
+
         # --- RATE LIMITING ENFORCEMENT (§52, §62) ---
+        # Bucket by the authenticated principal only. A body-supplied agent_id must
+        # never rotate the bucket, or a caller could evade its own limit (§62).
         effective_principal = cred.principal_id
-        if isinstance(body, dict) and body.get("agent_id"):
-            effective_principal = str(body["agent_id"])
 
         rate_limit_err = self._check_rate_limits(
             path=path,
@@ -1938,9 +2244,8 @@ class AgentPayApiApp:
             return status_code, err_body
 
         # 5. Agent Catalog endpoints (§38)
-        catalog_path, _, catalog_query = path.partition("?")
-        if catalog_path == "/agent/catalog" and method == "GET":
-            query = parse_qs(catalog_query).get("q", [""])[0].strip()
+        if path == "/agent/catalog" and method == "GET":
+            query = parse_qs(query_string).get("q", [""])[0].strip()
             products = []
             if self.orchestrator._product_repo is not None:
                 products = self.orchestrator._product_repo.search(tenant_id, query)
@@ -1987,6 +2292,13 @@ class AgentPayApiApp:
 
         if path.startswith("/agent/products/") and method == "GET":
             parts = path.strip("/").split("/")
+            if len(parts) < 3 or not parts[2]:
+                return self._error_response(
+                    404,
+                    "PRODUCT_NOT_FOUND",
+                    "Product endpoint requires a valid product ID",
+                    request_id,
+                )
             product_id = parts[2]
             if len(parts) == 3:
                 # GET /agent/products/{id}
@@ -2015,6 +2327,368 @@ class AgentPayApiApp:
                     "reserved": inv.reserved if inv else 0,
                     "effective_available": inv.effective_available if inv else 0,
                 }
+            elif len(parts) == 4 and parts[3] == "evidence":
+                # GET /agent/products/{id}/evidence (§32, §38)
+                payload = self.orchestrator.list_catalog_evidence(tenant_id, product_id)
+                if payload["product_id"] is None and payload["variant_id"] is None:
+                    return self._error_response(
+                        404,
+                        "PRODUCT_NOT_FOUND",
+                        f"Product or variant '{product_id}' not found",
+                        request_id,
+                    )
+                return 200, payload
+
+        # 4a. Shopping Cart endpoints (§38, ADR-0006)
+        if path == "/agent/carts" or path.startswith("/agent/carts/"):
+            parts = path.strip("/").split("/")
+            cart_repo = self.orchestrator._cart_repo
+
+            if path == "/agent/carts" and method == "POST":
+                req = body or {}
+                agent_id = str(req.get("agent_id") or cred.principal_id)
+
+                asserted_principal = req.get("principal_id")
+                identity_err = self._check_actor_identity(
+                    cred,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    principal_id=str(asserted_principal) if asserted_principal else None,
+                    request_id=request_id,
+                    context="cart creation",
+                )
+                if identity_err is not None:
+                    return identity_err
+
+                principal_id = req.get("principal_id")
+                if principal_id:
+                    principal_id = str(principal_id)
+                else:
+                    agent_obj = (
+                        self.orchestrator._agent_repo.get(tenant_id, agent_id)
+                        if self.orchestrator._agent_repo is not None
+                        else None
+                    )
+                    if agent_obj is None:
+                        return self._error_response(
+                            404,
+                            "AGENT_NOT_FOUND",
+                            f"Agent '{agent_id}' not found",
+                            request_id,
+                        )
+                    principal_id = agent_obj.principal_id
+
+                try:
+                    cart = self.orchestrator.create_cart(
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        principal_id=principal_id,
+                        trace_id=trace_id,
+                    )
+                except DomainError as err:
+                    return self._error_response(400, err.code, str(err), request_id)
+
+                created_payload = self.orchestrator.get_cart_payload(tenant_id, cart.cart_id)
+                if created_payload is None:
+                    return self._error_response(
+                        404, "CART_NOT_FOUND", f"Cart '{cart.cart_id}' not found", request_id
+                    )
+                created_payload["trace_id"] = trace_id
+                return 201, created_payload
+
+            if len(parts) == 3 and method == "GET":
+                cart_id = parts[2]
+                cart_payload = self.orchestrator.get_cart_payload(tenant_id, cart_id)
+                if cart_payload is None:
+                    return self._error_response(
+                        404, "CART_NOT_FOUND", f"Cart '{cart_id}' not found", request_id
+                    )
+                identity_err = self._check_actor_identity(
+                    cred,
+                    tenant_id=tenant_id,
+                    agent_id=str(cart_payload["agent_id"]),
+                    principal_id=str(cart_payload["principal_id"]),
+                    request_id=request_id,
+                    context="cart read",
+                )
+                if identity_err is not None:
+                    return identity_err
+                cart_payload["trace_id"] = trace_id
+                return 200, cart_payload
+
+            if len(parts) == 4 and parts[3] == "items" and method == "POST":
+                cart_id = parts[2]
+                req = body or {}
+                variant_id = req.get("variant_id")
+                if not isinstance(variant_id, str) or not variant_id.strip():
+                    return self._error_response(
+                        422,
+                        "INVALID_REQUEST_BODY",
+                        "variant_id must be a non-empty string",
+                        request_id,
+                    )
+                qty_raw = req.get("quantity", 1)
+                if (
+                    isinstance(qty_raw, (bool, float))
+                    or not isinstance(qty_raw, int)
+                    or qty_raw <= 0
+                ):
+                    return self._error_response(
+                        422,
+                        "INVALID_QUANTITY",
+                        "quantity must be a positive integer",
+                        request_id,
+                        details={"received": qty_raw},
+                    )
+
+                if cart_repo is not None:
+                    existing_cart = cart_repo.get(tenant_id, cart_id)
+                    if existing_cart is None:
+                        return self._error_response(
+                            404, "CART_NOT_FOUND", f"Cart '{cart_id}' not found", request_id
+                        )
+                    identity_err = self._check_actor_identity(
+                        cred,
+                        tenant_id=tenant_id,
+                        agent_id=existing_cart.agent_id,
+                        principal_id=existing_cart.principal_id,
+                        request_id=request_id,
+                        context="cart item addition",
+                    )
+                    if identity_err is not None:
+                        return identity_err
+
+                try:
+                    cart = self.orchestrator.add_cart_item(
+                        tenant_id=tenant_id,
+                        cart_id=cart_id,
+                        variant_id=variant_id,
+                        quantity=qty_raw,
+                        trace_id=trace_id,
+                    )
+                except InsufficientInventoryError as err:
+                    return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+                except CrossTenantAccessError as err:
+                    return self._error_response(
+                        403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id
+                    )
+                except DomainError as err:
+                    return self._error_response(400, err.code, str(err), request_id)
+
+                item_payload = self.orchestrator.get_cart_payload(tenant_id, cart.cart_id)
+                if item_payload is None:
+                    return self._error_response(
+                        404, "CART_NOT_FOUND", f"Cart '{cart.cart_id}' not found", request_id
+                    )
+                item_payload["trace_id"] = trace_id
+                return 200, item_payload
+
+            if (
+                len(parts) == 5
+                and parts[3] == "items"
+                and parts[4] == "remove"
+                and method == "POST"
+            ):
+                cart_id = parts[2]
+                req = body or {}
+                variant_id = req.get("variant_id")
+                if not isinstance(variant_id, str) or not variant_id.strip():
+                    return self._error_response(
+                        422,
+                        "INVALID_REQUEST_BODY",
+                        "variant_id must be a non-empty string",
+                        request_id,
+                    )
+
+                if cart_repo is not None:
+                    existing_cart = cart_repo.get(tenant_id, cart_id)
+                    if existing_cart is None:
+                        return self._error_response(
+                            404, "CART_NOT_FOUND", f"Cart '{cart_id}' not found", request_id
+                        )
+                    identity_err = self._check_actor_identity(
+                        cred,
+                        tenant_id=tenant_id,
+                        agent_id=existing_cart.agent_id,
+                        principal_id=existing_cart.principal_id,
+                        request_id=request_id,
+                        context="cart item removal",
+                    )
+                    if identity_err is not None:
+                        return identity_err
+
+                try:
+                    cart = self.orchestrator.remove_cart_item(
+                        tenant_id=tenant_id,
+                        cart_id=cart_id,
+                        variant_id=variant_id,
+                        trace_id=trace_id,
+                    )
+                except CrossTenantAccessError as err:
+                    return self._error_response(
+                        403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id
+                    )
+                except DomainError as err:
+                    return self._error_response(400, err.code, str(err), request_id)
+
+                remove_payload = self.orchestrator.get_cart_payload(tenant_id, cart.cart_id)
+                if remove_payload is None:
+                    return self._error_response(
+                        404, "CART_NOT_FOUND", f"Cart '{cart.cart_id}' not found", request_id
+                    )
+                remove_payload["trace_id"] = trace_id
+                return 200, remove_payload
+
+            return self._error_response(
+                404, "ENDPOINT_NOT_FOUND", f"Cannot {method} {path}", request_id
+            )
+
+        if path == "/agent/checkout" and method == "POST":
+            if self.is_emergency_paused_for(tenant_id):
+                return self._error_response(
+                    503,
+                    "EMERGENCY_PAUSE_ACTIVE",
+                    "Autonomous payment processing is temporarily suspended by emergency control",
+                    request_id,
+                )
+
+            req = body or {}
+            cart_repo = self.orchestrator._cart_repo
+            checkout_cart_id = req.get("cart_id") or req.get("resource_id")
+            if not isinstance(checkout_cart_id, str) or not checkout_cart_id.strip():
+                return self._error_response(
+                    422,
+                    "INVALID_REQUEST_BODY",
+                    "cart_id must be a non-empty string",
+                    request_id,
+                )
+
+            checkout_cart = (
+                cart_repo.get(tenant_id, checkout_cart_id) if cart_repo is not None else None
+            )
+            if checkout_cart is None:
+                return self._error_response(
+                    404, "CART_NOT_FOUND", f"Cart '{checkout_cart_id}' not found", request_id
+                )
+
+            # The cart is the source of truth for who is paying and which agent is
+            # executing. Contradicting body values are rejected rather than silently
+            # ignored so the caller cannot believe it changed the bound identities (§20).
+            agent_id = checkout_cart.agent_id
+            asserted_agent = req.get("agent_id")
+            if asserted_agent is not None and str(asserted_agent) != agent_id:
+                return self._error_response(
+                    422,
+                    "AGENT_BINDING_MISMATCH",
+                    f"agent_id '{asserted_agent}' does not match cart agent '{agent_id}'",
+                    request_id,
+                )
+            asserted_principal = req.get("principal_id")
+            identity_err = self._check_actor_identity(
+                cred,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                principal_id=(
+                    str(asserted_principal) if asserted_principal else checkout_cart.principal_id
+                ),
+                request_id=request_id,
+                context="cart checkout",
+            )
+            if identity_err is not None:
+                return identity_err
+
+            if asserted_principal is not None and str(asserted_principal) != (
+                checkout_cart.principal_id
+            ):
+                return self._error_response(
+                    422,
+                    "PRINCIPAL_BINDING_MISMATCH",
+                    f"principal_id '{asserted_principal}' does not match cart principal "
+                    f"'{checkout_cart.principal_id}'",
+                    request_id,
+                )
+
+            amt_raw = req.get("amount_minor")
+            if amt_raw is None:
+                return self._error_response(
+                    422,
+                    "INVALID_REQUEST_BODY",
+                    "Missing required field: amount_minor",
+                    request_id,
+                )
+            if isinstance(amt_raw, (bool, float)) or not isinstance(amt_raw, int) or amt_raw <= 0:
+                return self._error_response(
+                    422,
+                    "INVALID_AMOUNT",
+                    "amount_minor must be a positive integer in minor units",
+                    request_id,
+                    details={"received": amt_raw},
+                )
+
+            action = ActionRequest(
+                action_id=str(req.get("action_id") or f"act_{uuid.uuid4().hex[:12]}"),
+                tenant_id=tenant_id,
+                principal_id=checkout_cart.principal_id,
+                agent_id=agent_id,
+                domain=str(req.get("domain", "commerce")),
+                action="checkout",
+                resource=ResourceRef(type="cart", id=checkout_cart_id),
+                requested_at=datetime.now(UTC),
+                intent=Intent(purpose=str(req.get("intent_purpose", "cart checkout"))),
+                amount=Money(amt_raw, str(req.get("currency", "INR"))),
+                authorization_mode=AuthorizationMode.AUTONOMOUS,
+            )
+
+            approval_id = req.get("approval_id")
+
+            try:
+                if approval_id:
+                    cart_res = self.orchestrator.execute_approved_cart_purchase(
+                        approval_id=str(approval_id),
+                        action=action,
+                        tenant_id=tenant_id,
+                        idempotency_key=req.get("idempotency_key"),
+                        trace_id=trace_id,
+                    )
+                else:
+                    cart_res = self.orchestrator.execute_cart_purchase(
+                        action=action,
+                        tenant_id=tenant_id,
+                        cart_id=checkout_cart_id,
+                        idempotency_key=req.get("idempotency_key"),
+                        trace_id=trace_id,
+                    )
+            except ApprovalAlreadyConsumedError as err:
+                return self._error_response(409, "APPROVAL_ALREADY_CONSUMED", str(err), request_id)
+            except ApprovalBindingMismatchError as err:
+                return self._error_response(422, "APPROVAL_BINDING_MISMATCH", str(err), request_id)
+            except CrossTenantAccessError as err:
+                return self._error_response(403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id)
+            except PrivilegeEscalationAttemptError as err:
+                return self._error_response(
+                    403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                )
+            except InsufficientInventoryError as err:
+                return self._error_response(409, "INSUFFICIENT_INVENTORY", str(err), request_id)
+            except IdempotencyConflictError as err:
+                return self._error_response(409, "IDEMPOTENCY_CONFLICT", str(err), request_id)
+            except DomainError as err:
+                return self._error_response(400, err.code, str(err), request_id)
+
+            order_ids = [order.order_id for order in cart_res.orders]
+            return 200, {
+                "action_id": cart_res.action_id,
+                "status": cart_res.status.value,
+                "decision": cart_res.decision.value,
+                "cart_id": cart_res.cart.cart_id if cart_res.cart else checkout_cart_id,
+                "cart_status": cart_res.cart.status.value if cart_res.cart else None,
+                "order_id": order_ids[0] if order_ids else None,
+                "order_ids": order_ids,
+                "payment_id": cart_res.payment.attempt_id if cart_res.payment else None,
+                "approval_id": cart_res.approval.approval_id if cart_res.approval else None,
+                "rejection_reason": cart_res.rejection_reason,
+                "trace_id": trace_id,
+            }
 
         # 4b. Tool Execution endpoints (§26, §27)
         is_v1_tool = path.startswith("/api/v1/tools/") and method == "POST"
@@ -2058,6 +2732,8 @@ class AgentPayApiApp:
                 return self._error_response(
                     403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
                 )
+            except ToolExecutionUnavailableError as err:
+                return self._error_response(501, err.code, str(err), request_id)
             except DomainError as err:
                 return self._error_response(400, err.code, str(err), request_id)
 
@@ -2073,6 +2749,41 @@ class AgentPayApiApp:
 
             req = body or {}
             try:
+                amt_raw = req.get("amount_minor")
+                if amt_raw is None:
+                    return self._error_response(
+                        422,
+                        "INVALID_REQUEST_BODY",
+                        "Missing required field: amount_minor",
+                        request_id,
+                    )
+                if (
+                    isinstance(amt_raw, (bool, float))
+                    or not isinstance(amt_raw, int)
+                    or amt_raw <= 0
+                ):
+                    return self._error_response(
+                        422,
+                        "INVALID_AMOUNT",
+                        "amount_minor must be a positive integer in minor units",
+                        request_id,
+                        details={"received": amt_raw},
+                    )
+
+                qty_raw = req.get("quantity", 1)
+                if (
+                    isinstance(qty_raw, (bool, float))
+                    or not isinstance(qty_raw, int)
+                    or qty_raw <= 0
+                ):
+                    return self._error_response(
+                        422,
+                        "INVALID_QUANTITY",
+                        "quantity must be a positive integer",
+                        request_id,
+                        details={"received": qty_raw},
+                    )
+
                 sub = ActionSubmissionRequest(
                     action_id=req["action_id"],
                     principal_id=req["principal_id"],
@@ -2081,11 +2792,11 @@ class AgentPayApiApp:
                     action=req.get("action", "purchase"),
                     resource_type=req.get("resource_type", "product"),
                     resource_id=req["resource_id"],
-                    amount_minor=int(req["amount_minor"]),
+                    amount_minor=amt_raw,
                     currency=req.get("currency", "INR"),
                     intent_purpose=req.get("intent_purpose", "procurement"),
                     variant_id=req["variant_id"],
-                    quantity=int(req.get("quantity", 1)),
+                    quantity=qty_raw,
                     idempotency_key=req.get("idempotency_key"),
                     approval_id=req.get("approval_id"),
                 )
@@ -2094,34 +2805,33 @@ class AgentPayApiApp:
                     422, "INVALID_REQUEST_BODY", f"Missing or invalid field: {err}", request_id
                 )
 
-            # --- AGENT IMPERSONATION PREVENTION (§14, §15, AP-009) ---
-            if cred.role is None and sub.agent_id != cred.principal_id:
-                return self._error_response(
-                    403,
-                    "AGENT_IMPERSONATION_DENIED",
-                    f"Authenticated agent '{cred.principal_id}' cannot act as agent '{sub.agent_id}'",
-                    request_id,
-                    details={
-                        "authenticated_agent": cred.principal_id,
-                        "asserted_agent": sub.agent_id,
-                    },
-                )
-
-            action = ActionRequest(
-                action_id=sub.action_id,
+            # --- ACTOR IDENTITY BINDING (§14, §15, AP-009) ---
+            identity_err = self._check_actor_identity(
+                cred,
                 tenant_id=tenant_id,
-                principal_id=sub.principal_id,
                 agent_id=sub.agent_id,
-                domain=sub.domain,
-                action=sub.action,
-                resource=ResourceRef(type=sub.resource_type, id=sub.resource_id),
-                requested_at=datetime.now(UTC),
-                intent=Intent(purpose=sub.intent_purpose),
-                amount=Money(sub.amount_minor, sub.currency),
-                authorization_mode=AuthorizationMode.AUTONOMOUS,
+                principal_id=sub.principal_id,
+                request_id=request_id,
+                context="action submission",
             )
+            if identity_err is not None:
+                return identity_err
 
             try:
+                action = ActionRequest(
+                    action_id=sub.action_id,
+                    tenant_id=tenant_id,
+                    principal_id=sub.principal_id,
+                    agent_id=sub.agent_id,
+                    domain=sub.domain,
+                    action=sub.action,
+                    resource=ResourceRef(type=sub.resource_type, id=sub.resource_id),
+                    requested_at=datetime.now(UTC),
+                    intent=Intent(purpose=sub.intent_purpose),
+                    amount=Money(sub.amount_minor, sub.currency),
+                    authorization_mode=AuthorizationMode.AUTONOMOUS,
+                )
+
                 if sub.approval_id:
                     res: PurchaseExecutionResult = self.orchestrator.execute_approved_purchase(
                         approval_id=sub.approval_id,
@@ -2176,10 +2886,15 @@ class AgentPayApiApp:
                 repo = self.orchestrator._approval_repo
                 pending_approvals = repo.list_pending(tenant_id)
                 for a in pending_approvals:
+                    # Approvals are tenant-scoped but not tenant-public: agents and
+                    # ordinary humans only see requests bound to their own identity (§49, §50).
+                    if not self._approval_visible_to(cred, a):
+                        continue
                     pending_list.append(
                         {
                             "approval_id": a.approval_id,
                             "tenant_id": a.tenant_id,
+                            "agent_id": a.binding.agent_id,
                             "principal_id": a.binding.principal_id,
                             "action_id": a.binding.action_id,
                             "status": a.status.value,
@@ -2206,9 +2921,17 @@ class AgentPayApiApp:
                     return self._error_response(
                         404, "NOT_FOUND", f"Approval '{approval_id}' not found", request_id
                     )
+                if not self._approval_visible_to(cred, appr_obj):
+                    return self._error_response(
+                        403,
+                        "APPROVAL_AUTHORIZATION_DENIED",
+                        f"Caller '{cred.principal_id}' may not read approval '{approval_id}'",
+                        request_id,
+                    )
                 return 200, {
                     "approval_id": appr_obj.approval_id,
                     "tenant_id": appr_obj.tenant_id,
+                    "agent_id": appr_obj.binding.agent_id,
                     "principal_id": appr_obj.binding.principal_id,
                     "action_id": appr_obj.binding.action_id,
                     "status": appr_obj.status.value,
@@ -2248,39 +2971,137 @@ class AgentPayApiApp:
                             404, "NOT_FOUND", f"Approval '{approval_id}' not found", request_id
                         )
 
-                    action_id = str(req.get("action_id") or appr.binding.action_id)
-                    agent_id = str(req.get("agent_id") or "agent_01")
-                    resource_id = str(req.get("resource_id") or appr.binding.resource_id)
-                    variant_id = str(req.get("variant_id") or resource_id)
-                    quantity = int(req.get("quantity", 1))
-                    amount_minor = int(req.get("amount_minor", appr.binding.amount.minor_units))
-                    currency = str(req.get("currency", appr.binding.amount.currency))
+                    # The caller must be entitled to act for the agent/principal the
+                    # approval is bound to, and may never override bound parameters.
+                    exec_err = self._authorize_approval_execution(cred, appr, request_id)
+                    if exec_err is not None:
+                        return exec_err
+                    override_err = self._binding_override_error(appr, req, request_id)
+                    if override_err is not None:
+                        return override_err
 
-                    body_principal = req.get("principal_id")
-                    if body_principal:
-                        principal_id = str(body_principal)
-                    elif cred.role == UserRole.ADMIN:
-                        principal_id = appr.binding.principal_id
-                    else:
-                        principal_id = cred.principal_id
-
-                    action = ActionRequest(
-                        action_id=action_id,
-                        tenant_id=tenant_id,
-                        principal_id=principal_id,
-                        agent_id=agent_id,
-                        domain=str(req.get("domain", "commerce")),
-                        action=str(req.get("action", "purchase")),
-                        resource=ResourceRef(
-                            type=str(req.get("resource_type", "product")), id=resource_id
-                        ),
-                        requested_at=datetime.now(UTC),
-                        intent=Intent(purpose=str(req.get("intent_purpose", "procurement"))),
-                        amount=Money(amount_minor, currency),
-                        authorization_mode=AuthorizationMode.AUTONOMOUS,
-                        version=appr.binding.action_version,
+                    # Cart checkout approvals dispatch to the multi-item pipeline (ADR-0006)
+                    cart_for_approval = (
+                        self.orchestrator._cart_repo.get(tenant_id, appr.binding.resource_id)
+                        if self.orchestrator._cart_repo is not None
+                        else None
                     )
+                    if cart_for_approval is not None or str(req.get("resource_type", "")) == "cart":
+                        try:
+                            cart_action = ActionRequest(
+                                action_id=appr.binding.action_id,
+                                tenant_id=tenant_id,
+                                principal_id=appr.binding.principal_id,
+                                agent_id=appr.binding.agent_id,
+                                domain=str(req.get("domain", "commerce")),
+                                action="checkout",
+                                resource=ResourceRef(type="cart", id=appr.binding.resource_id),
+                                requested_at=datetime.now(UTC),
+                                intent=Intent(
+                                    purpose=str(req.get("intent_purpose", "cart checkout"))
+                                ),
+                                amount=Money(
+                                    appr.binding.amount.minor_units,
+                                    appr.binding.currency,
+                                ),
+                                authorization_mode=AuthorizationMode.AUTONOMOUS,
+                                version=appr.binding.action_version,
+                            )
+                            cart_res = self.orchestrator.execute_approved_cart_purchase(
+                                approval_id=approval_id,
+                                action=cart_action,
+                                tenant_id=tenant_id,
+                                idempotency_key=req.get("idempotency_key"),
+                                trace_id=trace_id,
+                            )
+                        except ApprovalAlreadyConsumedError as err:
+                            return self._error_response(
+                                409, "APPROVAL_ALREADY_CONSUMED", str(err), request_id
+                            )
+                        except ApprovalBindingMismatchError as err:
+                            return self._error_response(
+                                422, "APPROVAL_BINDING_MISMATCH", str(err), request_id
+                            )
+                        except CrossTenantAccessError as err:
+                            return self._error_response(
+                                403, "CROSS_TENANT_ACCESS_DENIED", str(err), request_id
+                            )
+                        except PrivilegeEscalationAttemptError as err:
+                            return self._error_response(
+                                403, "PRIVILEGE_ESCALATION_DENIED", str(err), request_id
+                            )
+                        except InsufficientInventoryError as err:
+                            return self._error_response(
+                                409, "INSUFFICIENT_INVENTORY", str(err), request_id
+                            )
+                        except IdempotencyConflictError as err:
+                            return self._error_response(
+                                409, "IDEMPOTENCY_CONFLICT", str(err), request_id
+                            )
+                        except DomainError as err:
+                            return self._error_response(400, err.code, str(err), request_id)
+
+                        cart_order_ids = [order.order_id for order in cart_res.orders]
+                        return 200, {
+                            "action_id": cart_res.action_id,
+                            "status": cart_res.status.value,
+                            "decision": cart_res.decision.value,
+                            "cart_id": (
+                                cart_res.cart.cart_id if cart_res.cart else appr.binding.resource_id
+                            ),
+                            "cart_status": cart_res.cart.status.value if cart_res.cart else None,
+                            "order_id": cart_order_ids[0] if cart_order_ids else None,
+                            "order_ids": cart_order_ids,
+                            "payment_id": (
+                                cart_res.payment.attempt_id if cart_res.payment else None
+                            ),
+                            "approval_id": approval_id,
+                            "rejection_reason": cart_res.rejection_reason,
+                            "trace_id": trace_id,
+                        }
+
+                    qty_raw = req.get("quantity", 1)
+                    if (
+                        isinstance(qty_raw, (bool, float))
+                        or not isinstance(qty_raw, int)
+                        or qty_raw <= 0
+                    ):
+                        return self._error_response(
+                            422,
+                            "INVALID_QUANTITY",
+                            "quantity must be a positive integer",
+                            request_id,
+                            details={"received": qty_raw},
+                        )
+
+                    # Every bound field comes from the approval record. The caller may
+                    # supply operational hints only; contradictions were rejected above.
+                    action_id = appr.binding.action_id
+                    agent_id = appr.binding.agent_id
+                    principal_id = appr.binding.principal_id
+                    resource_id = appr.binding.resource_id
+                    variant_id = str(req.get("variant_id") or resource_id)
+                    quantity = qty_raw
+                    amount_minor = appr.binding.amount.minor_units
+                    currency = appr.binding.currency
+
                     try:
+                        action = ActionRequest(
+                            action_id=action_id,
+                            tenant_id=tenant_id,
+                            principal_id=principal_id,
+                            agent_id=agent_id,
+                            domain=str(req.get("domain", "commerce")),
+                            action=str(req.get("action", "purchase")),
+                            resource=ResourceRef(
+                                type=str(req.get("resource_type", "product")), id=resource_id
+                            ),
+                            requested_at=datetime.now(UTC),
+                            intent=Intent(purpose=str(req.get("intent_purpose", "procurement"))),
+                            amount=Money(amount_minor, currency),
+                            authorization_mode=AuthorizationMode.AUTONOMOUS,
+                            version=appr.binding.action_version,
+                        )
                         res = self.orchestrator.execute_approved_purchase(
                             approval_id=approval_id,
                             action=action,
@@ -2337,12 +3158,21 @@ class AgentPayApiApp:
                         details={"principal_id": cred.principal_id, "role": "agent"},
                     )
 
-                approver_id = req.get("approver_id", "")
-                reason = req.get("reason", "")
+                approver_id = str(req.get("approver_id") or cred.principal_id)
+                reason = str(req.get("reason", ""))
 
-                if not approver_id:
+                # The recorded approver is always the authenticated caller. A body
+                # value naming somebody else is a forged approval attempt (§20, §66).
+                if approver_id != cred.principal_id:
                     return self._error_response(
-                        422, "MISSING_APPROVER_ID", "approver_id is required", request_id
+                        403,
+                        "APPROVAL_AUTHORIZATION_DENIED",
+                        "approver_id must match the authenticated principal",
+                        request_id,
+                        details={
+                            "authenticated_principal": cred.principal_id,
+                            "supplied_approver_id": approver_id,
+                        },
                     )
 
                 try:
@@ -2351,6 +3181,8 @@ class AgentPayApiApp:
                             approval_id=approval_id,
                             approver_id=approver_id,
                             tenant_id=tenant_id,
+                            approver_role=cred.role,
+                            caller_principal_id=cred.principal_id,
                         )
                     elif sub_action == "reject":
                         updated = self.orchestrator._approval_service.reject_approval(
@@ -2358,11 +3190,17 @@ class AgentPayApiApp:
                             approver_id=approver_id,
                             reason=reason,
                             tenant_id=tenant_id,
+                            approver_role=cred.role,
+                            caller_principal_id=cred.principal_id,
                         )
                     else:
                         return self._error_response(
                             404, "NOT_FOUND", f"Unknown approval action '{sub_action}'", request_id
                         )
+                except ApprovalAuthorizationError as err:
+                    return self._error_response(403, err.code, str(err), request_id)
+                except ApprovalConcurrencyError as err:
+                    return self._error_response(409, err.code, str(err), request_id)
                 except DomainError as err:
                     return self._error_response(400, err.code, str(err), request_id)
 
@@ -2404,6 +3242,18 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id, err.details)
             except DomainError as err:
                 return self._error_response(422, err.code, str(err), request_id)
+
+            # Protocol payloads may not assert an identity the credential does not own.
+            identity_err = self._check_actor_identity(
+                cred,
+                tenant_id=tenant_id,
+                agent_id=action.agent_id,
+                principal_id=action.principal_id,
+                request_id=request_id,
+                context="ACP checkout",
+            )
+            if identity_err is not None:
+                return identity_err
 
             try:
                 res = self.orchestrator.execute_purchase(
@@ -2464,6 +3314,18 @@ class AgentPayApiApp:
             except DomainError as err:
                 return self._error_response(422, err.code, str(err), request_id)
 
+            # Protocol payloads may not assert an identity the credential does not own.
+            identity_err = self._check_actor_identity(
+                cred,
+                tenant_id=tenant_id,
+                agent_id=action.agent_id,
+                principal_id=action.principal_id,
+                request_id=request_id,
+                context="AP2 payment",
+            )
+            if identity_err is not None:
+                return identity_err
+
             try:
                 v_id = metadata.get("variant_id", "")
                 self._ensure_resource_inventory(tenant_id, v_id, action)
@@ -2522,6 +3384,18 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id, err.details)
             except DomainError as err:
                 return self._error_response(422, err.code, str(err), request_id)
+
+            # Protocol payloads may not assert an identity the credential does not own.
+            identity_err = self._check_actor_identity(
+                cred,
+                tenant_id=tenant_id,
+                agent_id=action.agent_id,
+                principal_id=action.principal_id,
+                request_id=request_id,
+                context="UAP invocation",
+            )
+            if identity_err is not None:
+                return identity_err
 
             try:
                 v_id = metadata.get("variant_id", "")
@@ -2583,6 +3457,18 @@ class AgentPayApiApp:
                 return self._error_response(400, err.code, str(err), request_id, err.details)
             except DomainError as err:
                 return self._error_response(422, err.code, str(err), request_id)
+
+            # Protocol payloads may not assert an identity the credential does not own.
+            identity_err = self._check_actor_identity(
+                cred,
+                tenant_id=tenant_id,
+                agent_id=action.agent_id,
+                principal_id=action.principal_id,
+                request_id=request_id,
+                context="x402 payment",
+            )
+            if identity_err is not None:
+                return identity_err
 
             try:
                 v_id = metadata.get("variant_id", "")
@@ -2751,13 +3637,22 @@ class ApiTestClient:
         clone._active_role = None
         return clone
 
-    def as_buyer(self, tenant_id: str | None = None) -> ApiTestClient:
-        """Return a client context configured with standard buyer credentials (§14)."""
+    def as_buyer(
+        self,
+        tenant_id: str | None = None,
+        principal_id: str = "usr_test_buyer",
+    ) -> ApiTestClient:
+        """Return a client context configured with standard buyer credentials (§14).
+
+        ``principal_id`` lets a test authenticate as the specific human principal a
+        fixture has delegated to an agent, instead of asserting that identity in a
+        request body, which the API now correctly rejects (§14, §15).
+        """
         clone = self._clone()
         clone.default_tenant = tenant_id or self.default_tenant
         clone._auth_mode = "buyer"
         clone.default_role = UserRole.BUYER
-        clone._active_principal = "usr_test_buyer"
+        clone._active_principal = principal_id
         clone._active_role = UserRole.BUYER
         return clone
 
@@ -2774,13 +3669,19 @@ class ApiTestClient:
         """Create and store a Bearer token credential in the app's credential repository."""
         if role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
             effective_principal = principal_id or "usr_test_admin"
-            effective_scopes = scopes or ("admin", "operator", "commerce:read", "commerce:write")
+            effective_scopes = (
+                scopes
+                if scopes is not None
+                else ("admin", "operator", "commerce:read", "commerce:write")
+            )
         elif role is None:
             effective_principal = principal_id or "agent_01"
-            effective_scopes = scopes or ("agent", "commerce:read", "commerce:write")
+            effective_scopes = (
+                scopes if scopes is not None else ("agent", "commerce:read", "commerce:write")
+            )
         else:
             effective_principal = principal_id or "usr_test_buyer"
-            effective_scopes = scopes or ("commerce:read", "commerce:write")
+            effective_scopes = scopes if scopes is not None else ("commerce:read", "commerce:write")
 
         token = raw_token or f"test_bearer_{tenant_id}_{uuid.uuid4().hex[:8]}"
         secret_hash = Credential.hash_secret(token)
@@ -2815,13 +3716,19 @@ class ApiTestClient:
         """Create and store an API key credential in the app's credential repository."""
         if role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
             effective_principal = principal_id or "usr_test_admin"
-            effective_scopes = scopes or ("admin", "operator", "commerce:read", "commerce:write")
+            effective_scopes = (
+                scopes
+                if scopes is not None
+                else ("admin", "operator", "commerce:read", "commerce:write")
+            )
         elif role is None:
             effective_principal = principal_id or "agent_01"
-            effective_scopes = scopes or ("agent", "commerce:read", "commerce:write")
+            effective_scopes = (
+                scopes if scopes is not None else ("agent", "commerce:read", "commerce:write")
+            )
         else:
             effective_principal = principal_id or "usr_test_buyer"
-            effective_scopes = scopes or ("commerce:read", "commerce:write")
+            effective_scopes = scopes if scopes is not None else ("commerce:read", "commerce:write")
 
         key = raw_key or f"apk_{tenant_id}_{uuid.uuid4().hex[:12]}"
         secret_hash = Credential.hash_secret(key)
@@ -2861,16 +3768,25 @@ class ApiTestClient:
 
         if effective_role in (UserRole.ADMIN, UserRole.AGENT_OPERATOR):
             pid = principal_id or "usr_test_admin"
-            eff_scopes = scopes or ("admin", "operator", "commerce:read", "commerce:write")
+            eff_scopes = (
+                scopes
+                if scopes is not None
+                else ("admin", "operator", "commerce:read", "commerce:write")
+            )
         elif effective_role is None:
             pid = principal_id or "agent_01"
-            eff_scopes = scopes or ("agent", "commerce:read", "commerce:write")
+            eff_scopes = (
+                scopes if scopes is not None else ("agent", "commerce:read", "commerce:write")
+            )
         else:
             pid = principal_id or "usr_test_buyer"
-            eff_scopes = scopes or ("commerce:read", "commerce:write")
+            eff_scopes = scopes if scopes is not None else ("commerce:read", "commerce:write")
 
         role_key = effective_role.value if effective_role is not None else "none"
-        key = f"{tenant_id}:{pid}:{role_key}"
+        # Scopes are part of the cache identity: two tokens for the same principal
+        # with different grants must not be silently interchanged (§14, §17).
+        scope_key = ",".join(sorted(eff_scopes))
+        key = f"{tenant_id}:{pid}:{role_key}:{scope_key}"
         if key not in self._tokens_by_tenant:
             self._tokens_by_tenant[key] = self.create_token(
                 tenant_id=tenant_id,
@@ -2896,8 +3812,9 @@ class ApiTestClient:
     ) -> ApiResponse:
         hdrs = {k.lower(): v for k, v in (headers or {}).items()}
 
+        clean_path = path.partition("?")[0].rstrip("/") or "/"
         require_obs_auth = getattr(self.app, "require_observability_auth", False)
-        is_public_path = path in (
+        is_public_path = clean_path in (
             "/api/v1/health",
             "/openapi.json",
             "/api/v1/webhooks/payments",
@@ -2905,7 +3822,7 @@ class ApiTestClient:
             "/api/v1/webhooks/stripe",
             "/.well-known/agent-commerce",
             "/.well-known/agent-capability.json",
-        ) or (not require_obs_auth and path in ("/api/v1/metrics", "/api/v1/security/sbom"))
+        ) or (not require_obs_auth and clean_path in ("/api/v1/metrics", "/api/v1/security/sbom"))
 
         # Explicit authentication management (§14)
         if auth and not is_public_path:
@@ -3067,10 +3984,10 @@ class ApiTestClient:
         effective_secret = (
             secret
             if secret is not None
-            else getattr(
-                self.app,
-                "razorpay_webhook_secret",
-                getattr(self.app, "webhook_secret", "whsec_test_secret_32bytes_minimum_length"),
+            else (
+                getattr(self.app, "razorpay_webhook_secret", None)
+                or getattr(self.app, "webhook_secret", None)
+                or "whsec_test_secret_32bytes_minimum_length"
             )
         )
         body_bytes: bytes
@@ -3126,10 +4043,10 @@ class ApiTestClient:
         effective_secret = (
             secret
             if secret is not None
-            else getattr(
-                self.app,
-                "stripe_webhook_secret",
-                getattr(self.app, "webhook_secret", "whsec_test_secret_32bytes_minimum_length"),
+            else (
+                getattr(self.app, "stripe_webhook_secret", None)
+                or getattr(self.app, "webhook_secret", None)
+                or "whsec_test_secret_32bytes_minimum_length"
             )
         )
         body_bytes: bytes

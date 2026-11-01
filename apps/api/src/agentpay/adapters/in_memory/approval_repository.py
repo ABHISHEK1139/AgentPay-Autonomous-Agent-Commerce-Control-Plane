@@ -17,6 +17,7 @@ from agentpay.domain.approval import (
 )
 from agentpay.domain.errors import (
     ApprovalBindingMismatchError,
+    ApprovalConcurrencyError,
     CrossTenantAccessError,
     InvalidCommerceError,
 )
@@ -34,13 +35,28 @@ class InMemoryApprovalRepository(ApprovalRepository):
         with self._lock:
             return self._approvals.get(tenant_id, {}).get(approval_id)
 
-    def save(self, tenant_id: str, approval: Approval) -> None:
+    def save(
+        self,
+        tenant_id: str,
+        approval: Approval,
+        *,
+        expected_status: ApprovalStatus | None = None,
+    ) -> None:
         if approval.tenant_id != tenant_id:
             raise CrossTenantAccessError(
                 f"Approval tenant '{approval.tenant_id}' does not match context '{tenant_id}'"
             )
         with self._lock:
             tenant_store = self._approvals.setdefault(tenant_id, {})
+            existing = tenant_store.get(approval.approval_id)
+            if expected_status is not None and (
+                existing is None or existing.status != expected_status
+            ):
+                raise ApprovalConcurrencyError(
+                    f"Approval '{approval.approval_id}' was modified concurrently "
+                    f"(expected status '{expected_status.value}', "
+                    f"found '{existing.status.value if existing else 'MISSING'}')"
+                )
             tenant_store[approval.approval_id] = approval
 
     def list_for_action(self, tenant_id: str, action_id: str) -> list[Approval]:

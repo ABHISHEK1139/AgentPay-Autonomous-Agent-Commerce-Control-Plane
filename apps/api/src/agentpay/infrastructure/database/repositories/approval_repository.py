@@ -17,6 +17,7 @@ from agentpay.domain.approval import (
 )
 from agentpay.domain.errors import (
     ApprovalBindingMismatchError,
+    ApprovalConcurrencyError,
     CrossTenantAccessError,
     InvalidCommerceError,
 )
@@ -26,7 +27,7 @@ from agentpay.infrastructure.database.repositories.base import BaseSqlAlchemyRep
 
 
 class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository):
-    """SQLAlchemy-backed repository for Approval entities with exact 8-field binding."""
+    """SQLAlchemy-backed repository for Approval entities with exact binding fields."""
 
     def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
         super().__init__(session_or_factory)
@@ -43,13 +44,50 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                 return None
             return self._to_domain(model)
 
-    def save(self, tenant_id: str, approval: Approval) -> None:
+    def save(
+        self,
+        tenant_id: str,
+        approval: Approval,
+        *,
+        expected_status: ApprovalStatus | None = None,
+    ) -> None:
         if approval.tenant_id != tenant_id:
             raise CrossTenantAccessError(
                 f"Approval tenant '{approval.tenant_id}' does not match context '{tenant_id}'"
             )
 
         with self._lock, self._session() as session:
+            if expected_status is not None:
+                # Conditional write: only transition if the stored row is still in the
+                # status the caller read. This is atomic across processes, unlike an
+                # in-process lock or an ORM read-modify-write.
+                stmt = (
+                    update(ApprovalModel)
+                    .where(
+                        ApprovalModel.approval_id == approval.approval_id,
+                        ApprovalModel.tenant_id == tenant_id,
+                        ApprovalModel.status == expected_status.value,
+                    )
+                    .values(
+                        status=approval.status.value,
+                        approver_id=approval.approver_id,
+                        decided_at=approval.decided_at,
+                        reason=approval.reason,
+                    )
+                )
+                res = session.execute(stmt)
+                session.commit()
+                rowcount = res.rowcount if isinstance(res, CursorResult) else 0
+                if rowcount == 0:
+                    session.expire_all()
+                    current = session.get(ApprovalModel, approval.approval_id)
+                    found = current.status if current is not None else "MISSING"
+                    raise ApprovalConcurrencyError(
+                        f"Approval '{approval.approval_id}' was modified concurrently "
+                        f"(expected status '{expected_status.value}', found '{found}')"
+                    )
+                return
+
             model = session.get(ApprovalModel, approval.approval_id)
             if model is None:
                 model = ApprovalModel(
@@ -66,6 +104,7 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                     approver_id=approval.approver_id,
                     decided_at=approval.decided_at,
                     reason=approval.reason,
+                    agent_id=approval.binding.agent_id,
                     principal_id=approval.binding.principal_id,
                 )
                 session.add(model)
@@ -78,6 +117,8 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                 model.approver_id = approval.approver_id
                 model.decided_at = approval.decided_at
                 model.reason = approval.reason
+                model.agent_id = approval.binding.agent_id
+                model.principal_id = approval.binding.principal_id
             session.commit()
 
     def list_for_action(self, tenant_id: str, action_id: str) -> list[Approval]:
@@ -169,7 +210,8 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
             currency=model.currency,
             action_version=model.action_version,
             tenant_id=model.tenant_id,
-            principal_id=model.principal_id or "user_01",
+            agent_id=model.agent_id,
+            principal_id=model.principal_id,
         )
         return Approval(
             approval_id=model.approval_id,

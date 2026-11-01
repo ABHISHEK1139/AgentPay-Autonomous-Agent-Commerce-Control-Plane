@@ -10,12 +10,14 @@ import threading
 
 from agentpay.adapters.in_memory.identity_repository import format_tenant_cache_key
 from agentpay.application.ports.commerce_port import (
+    CartRepository,
     EvidenceRepository,
     InventoryRepository,
     MerchantRepository,
     ProductRepository,
     VariantRepository,
 )
+from agentpay.domain.cart import Cart
 from agentpay.domain.commerce import (
     Inventory,
     Merchant,
@@ -189,3 +191,30 @@ class InMemoryEvidenceRepository(EvidenceRepository):
         with self._lock:
             tenant_store = self._evidence.get(tenant_id, {})
             return [e for e in tenant_store.values() if e.resource_id == resource_id]
+
+
+class InMemoryCartRepository(CartRepository):
+    """Thread-safe in-memory store for shopping carts (ADR-0006)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # tenant_id -> cart_id -> Cart
+        self._carts: dict[str, dict[str, Cart]] = {}
+
+    def get(self, tenant_id: str, cart_id: str) -> Cart | None:
+        with self._lock:
+            return self._carts.get(tenant_id, {}).get(cart_id)
+
+    def save(self, tenant_id: str, cart: Cart) -> None:
+        if cart.tenant_id != tenant_id:
+            raise CrossTenantAccessError(
+                f"Cart tenant '{cart.tenant_id}' does not match repository context '{tenant_id}'"
+            )
+        with self._lock:
+            tenant_store = self._carts.setdefault(tenant_id, {})
+            tenant_store[cart.cart_id] = cart
+
+    def list_for_principal(self, tenant_id: str, principal_id: str) -> list[Cart]:
+        with self._lock:
+            tenant_store = self._carts.get(tenant_id, {})
+            return [c for c in tenant_store.values() if c.principal_id == principal_id]

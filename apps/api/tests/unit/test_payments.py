@@ -78,6 +78,75 @@ def test_order_lifecycle() -> None:
 
     cancelled = order.cancel(reason="Buyer requested")
     assert cancelled.status == OrderStatus.CANCELLED
+    assert cancelled.cancellation_reason == "Buyer requested"
+
+
+def test_order_cancellation_reason_is_persisted_and_idempotent() -> None:
+    """Cancellation must retain its auditable reason and never overwrite it on retry."""
+    order = Order(
+        order_id="ord_02",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="buyer_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=1,
+        total_amount=Money(10000, "INR"),
+    )
+    cancelled = order.cancel(reason="  Payment declined  ")
+    assert cancelled.cancellation_reason == "Payment declined"
+
+    # A retried compensation returns the existing record unchanged.
+    retried = cancelled.cancel(reason="Different reason")
+    assert retried is cancelled
+    assert retried.cancellation_reason == "Payment declined"
+
+
+def test_order_cancellation_rejects_empty_reason() -> None:
+    order = Order(
+        order_id="ord_03",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="buyer_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=1,
+        total_amount=Money(10000, "INR"),
+    )
+    with pytest.raises(InvalidPaymentError, match="cancellation reason must be a non-empty string"):
+        order.cancel(reason="   ")
+
+
+def test_refunded_order_cannot_be_cancelled() -> None:
+    order = Order(
+        order_id="ord_04",
+        tenant_id="tenant_01",
+        merchant_id="merch_01",
+        buyer_id="buyer_01",
+        agent_id="agent_01",
+        variant_id="var_01",
+        quantity=1,
+        total_amount=Money(10000, "INR"),
+        status=OrderStatus.REFUNDED,
+    )
+    with pytest.raises(InvalidPaymentError, match="Cannot cancel a refunded order"):
+        order.cancel(reason="Buyer requested")
+
+
+def test_order_rejects_blank_cancellation_reason() -> None:
+    with pytest.raises(InvalidPaymentError, match="cancellation_reason must be a non-empty string"):
+        Order(
+            order_id="ord_05",
+            tenant_id="tenant_01",
+            merchant_id="merch_01",
+            buyer_id="buyer_01",
+            agent_id="agent_01",
+            variant_id="var_01",
+            quantity=1,
+            total_amount=Money(10000, "INR"),
+            status=OrderStatus.CANCELLED,
+            cancellation_reason="  ",
+        )
 
 
 def test_mock_payment_provider_success() -> None:

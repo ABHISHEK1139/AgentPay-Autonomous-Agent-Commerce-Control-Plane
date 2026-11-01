@@ -21,13 +21,13 @@ def test_api_health_and_openapi() -> None:
 
     status_code, body = client.get("/openapi.json")
     assert status_code == 200
-    assert body["openapi"] == "3.1.0"
+    assert body["openapi"] == "3.2.0"
 
 
 def test_missing_tenant_header_returns_standard_error_envelope() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
 
     # Calling tenant-scoped endpoint without X-Tenant-ID
     status_code, body = client.get("/agent/catalog")
@@ -41,13 +41,18 @@ def test_missing_tenant_header_returns_standard_error_envelope() -> None:
 def test_agent_catalog_and_product_lookup() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     status_code, body = client.get("/agent/catalog", headers=headers)
     assert status_code == 200
     assert len(body["products"]) == 1
     assert body["products"][0]["product_id"] == "prod_01"
+    variant = body["products"][0]["variants"][0]
+    assert variant["variant_id"] == "var_01"
+    assert variant["price_minor"] == 129900
+    assert variant["currency"] == "INR"
+    assert variant["available"] == 10
 
     status_code, body = client.get("/agent/products/prod_01", headers=headers)
     assert status_code == 200
@@ -57,16 +62,48 @@ def test_agent_catalog_and_product_lookup() -> None:
     assert status_code == 404
     assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
 
-    status_code, body = client.get("/agent/products/prod_01/inventory", headers=headers)
+    status_code, body = client.get("/agent/products/var_01/inventory", headers=headers)
     assert status_code == 200
     assert body["effective_available"] == 10
-    assert body["variant_ids"] == ["var_01"]
+
+
+def test_external_agent_commerce_capability_discovery() -> None:
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app)
+    headers = {"x-tenant-id": "tenant_01"}
+
+    status_code, body = client.get("/.well-known/agent-commerce")
+
+    assert status_code == 200
+    assert body["commerce"]["catalog"] == "/agent/catalog"
+    assert body["commerce"]["checkout"] == "/api/v1/actions"
+    assert body["authentication"]["tenant_header"] == "X-Tenant-ID"
+    assert body["protocols"] == ["ACP", "AP2", "UAP", "x402"]
+
+    alias_status, alias_body = client.get("/.well-known/agent-capability.json", headers=headers)
+    assert alias_status == 200
+    assert alias_body == body
+
+
+def test_agent_catalog_query_filters_products() -> None:
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
+
+    status_code, body = client.get(
+        "/agent/catalog?q=laptop",
+        headers={"x-tenant-id": "tenant_01"},
+    )
+
+    assert status_code == 200
+    assert [product["product_id"] for product in body["products"]] == ["prod_01"]
 
 
 def test_action_execution_autonomous_allow() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     payload = {
@@ -91,7 +128,7 @@ def test_action_execution_autonomous_allow() -> None:
 def test_emergency_kill_switch_lifecycle() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     admin_client = client.as_admin()
     headers = {"x-tenant-id": "tenant_01"}
 
@@ -137,7 +174,7 @@ def test_emergency_kill_switch_lifecycle() -> None:
 def test_approval_flow_via_http() -> None:
     orch, *_, variant_repo, inv_repo, _, _, _approval_repo = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_admin()
     headers = {"x-tenant-id": "tenant_01"}
 
     from agentpay.domain.commerce import Inventory, ProductVariant
@@ -184,14 +221,14 @@ def test_approval_flow_via_http() -> None:
     # 2. Grant approval via HTTP
     status_code, body = client.post(
         f"/api/v1/approvals/{approval_id}/approve",
-        json_body={"approver_id": "manager_alice"},
+        json_body={"approver_id": "usr_test_admin"},
         headers=headers,
     )
     assert status_code == 200
     assert body["status"] == "APPROVED"
-    assert body["approver_id"] == "manager_alice"
+    assert body["approver_id"] == "usr_test_admin"
 
-    # 3. GET /api/v1/approvals/{approval_id} exposes all 8 binding fields (§20, §66)
+    # 3. GET /api/v1/approvals/{approval_id} exposes all 9 binding fields (§20, §66)
     status_code, detail = client.get(
         f"/api/v1/approvals/{approval_id}",
         headers=headers,
@@ -200,11 +237,12 @@ def test_approval_flow_via_http() -> None:
     assert detail["approval_id"] == approval_id
     assert detail["tenant_id"] == "tenant_01"
     assert detail["principal_id"] == "user_01"
+    assert detail["agent_id"] == "agent_01"
     assert detail["action_id"] == "api_act_review"
     assert detail["status"] == "APPROVED"
     assert detail["amount_minor"] == 800000
     assert detail["currency"] == "INR"
-    assert detail["approver_id"] == "manager_alice"
+    assert detail["approver_id"] == "usr_test_admin"
 
     # 4. Cross-principal execution attempt is rejected (§20)
     status_code, err_resp = client.post(
@@ -378,7 +416,7 @@ def test_b_api_01_non_dict_json_body_returns_422() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
     admin_client = ApiTestClient(app).as_admin()
-    buyer_client = ApiTestClient(app).as_buyer()
+    buyer_client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # 1. List body to emergency pause
@@ -421,7 +459,7 @@ def test_b_api_02_execute_approved_purchase_via_api() -> None:
     """B-API-02: Approved purchases can be executed via POST /api/v1/approvals/{id}/execute or approval_id in action submission (§20)."""
     orch, *_, variant_repo, inv_repo, _, _, _ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_admin()
     headers = {"x-tenant-id": "tenant_01"}
 
     from agentpay.domain.commerce import Inventory, ProductVariant
@@ -467,7 +505,7 @@ def test_b_api_02_execute_approved_purchase_via_api() -> None:
     # 2. Grant approval
     status, body = client.post(
         f"/api/v1/approvals/{approval_id}/approve",
-        json_body={"approver_id": "manager_alice"},
+        json_body={"approver_id": "usr_test_admin"},
         headers=headers,
     )
     assert status == 200
@@ -522,7 +560,7 @@ def test_b_api_02_execute_approved_purchase_via_api() -> None:
 
     client.post(
         f"/api/v1/approvals/{approval_id_2}/approve",
-        json_body={"approver_id": "manager_alice"},
+        json_body={"approver_id": "usr_test_admin"},
         headers=headers,
     )
 
@@ -532,3 +570,89 @@ def test_b_api_02_execute_approved_purchase_via_api() -> None:
     assert body["status"] == "COMPLETED"
     assert body["decision"] == "ALLOW"
     assert body["order_id"] is not None
+
+
+def test_api_bug_fixes_and_robustness() -> None:
+    """Verify bug fixes for route normalization, input validation, and domain error handling."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(orchestrator=orch)
+    client = ApiTestClient(app)
+    headers = {"x-tenant-id": "tenant_01"}
+
+    # Bug 3: URL normalization with query strings and trailing slashes on unauthenticated routes
+    status, body = client.get("/api/v1/health?check=1")
+    assert status == 200
+    assert body["status"] == "healthy"
+
+    status, body = client.get("/api/v1/health/")
+    assert status == 200
+    assert body["status"] == "healthy"
+
+    status, body = client.get("/.well-known/agent-commerce/")
+    assert status == 200
+    assert "commerce" in body
+
+    # Bug 4: Empty product ID path returns 404 without crashing with IndexError
+    buyer_client = ApiTestClient(app).as_buyer(principal_id="user_01")
+    status, body = buyer_client.get("/agent/products/", headers=headers)
+    assert status == 404
+    assert "error" in body
+
+    # Bug 5: Float and boolean amounts / quantities are strictly rejected
+    base_payload = {
+        "action_id": "act_type_chk_01",
+        "principal_id": "user_01",
+        "agent_id": "agent_01",
+        "resource_id": "prod_01",
+        "variant_id": "var_01",
+        "amount_minor": 1299.50,  # float amount
+        "currency": "INR",
+        "intent_purpose": "type check test",
+    }
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_AMOUNT"
+
+    base_payload["amount_minor"] = True  # bool amount
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_AMOUNT"
+
+    base_payload["amount_minor"] = -500  # negative amount
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_AMOUNT"
+
+    base_payload["amount_minor"] = 129900
+    base_payload["quantity"] = 2.5  # float quantity
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_QUANTITY"
+
+    base_payload["quantity"] = True  # bool quantity
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_QUANTITY"
+
+    base_payload["quantity"] = 0  # non-positive quantity
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 422
+    assert body["error"]["code"] == "INVALID_QUANTITY"
+
+    # Bug 6: Invalid currency handled cleanly as 400 instead of 500 INTERNAL_ERROR
+    base_payload["quantity"] = 1
+    base_payload["currency"] = "INVALID_CURR"
+    status, body = buyer_client.post("/api/v1/actions", json_body=base_payload, headers=headers)
+    assert status == 400
+    assert body["error"]["code"] == "INVALID_CURRENCY"
+
+    # Bug 1 & 2: Rate limiting covers execute and approval inspection
+    tight_app = AgentPayApiApp(
+        orchestrator=orch,
+        mutating_agent_capacity=1,
+        mutating_agent_refill_rate=0.01,
+        read_agent_capacity=1,
+        read_agent_refill_rate=0.01,
+    )
+    assert tight_app._is_mutating_route("/api/v1/approvals/appr_123/execute", "POST") is True
+    assert tight_app._is_read_route("/api/v1/approvals/appr_123", "GET") is True

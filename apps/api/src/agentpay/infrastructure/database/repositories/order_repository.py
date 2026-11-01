@@ -77,6 +77,7 @@ class SqlAlchemyOrderRepository(BaseSqlAlchemyRepository, OrderRepository):
                 existing.total_amount_currency = target_order.total_amount.currency
                 existing.status = target_order.status.value
                 existing.payment_attempt_id = target_order.payment_attempt_id
+                existing.cancellation_reason = target_order.cancellation_reason
             session.commit()
 
     def list_for_buyer(self, tenant_id: str, buyer_id: str) -> list[Order]:

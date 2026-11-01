@@ -98,12 +98,12 @@ export const App: React.FC = () => {
   };
 
   const handleApprove = async (id: string, reason: string) => {
-    const updated = await apiService.resolveApproval(id, "APPROVED", "current_user", reason);
+    const updated = await apiService.resolveApproval(id, "APPROVED", reason);
     setApprovals((prev) => prev.map((a) => (a.id === id ? updated : a)));
   };
 
   const handleReject = async (id: string, reason: string) => {
-    const updated = await apiService.resolveApproval(id, "REJECTED", "current_user", reason);
+    const updated = await apiService.resolveApproval(id, "REJECTED", reason);
     setApprovals((prev) => prev.map((a) => (a.id === id ? updated : a)));
   };
 

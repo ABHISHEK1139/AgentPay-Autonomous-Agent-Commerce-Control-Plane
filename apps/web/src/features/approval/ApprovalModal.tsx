@@ -21,27 +21,45 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
 }) => {
   const [reason, setReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
   if (!item) return null;
 
+  const handleClose = () => {
+    setError("");
+    onClose();
+  };
+
   const handleApprove = async () => {
     setIsSubmitting(true);
-    await onApprove(item.id, reason || "Approved by Human Operator");
-    setIsSubmitting(false);
-    onClose();
+    setError("");
+    try {
+      await onApprove(item.id, reason || "Approved by Human Operator");
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleReject = async () => {
     setIsSubmitting(true);
-    await onReject(item.id, reason || "Rejected by Human Operator");
-    setIsSubmitting(false);
-    onClose();
+    setError("");
+    try {
+      await onReject(item.id, reason || "Rejected by Human Operator");
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
     <Modal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClose}
       title="Human Authorization Review Screen (§66)"
       maxWidth="4xl"
     >
@@ -60,13 +78,19 @@ export const ApprovalModal: React.FC<ApprovalModalProps> = ({
             onChange={(e) => setReason(e.target.value)}
           />
 
+          {error && (
+            <p role="alert" className="text-xs text-red-600 font-medium mt-3">
+              {error}
+            </p>
+          )}
+
           <div className="flex items-center justify-between gap-3 mt-4 pt-3 border-t border-slate-200">
             <div className="text-[11px] text-slate-500 font-mono">
               Binding locked to Action {item.actionId} v{item.actionVersion}. Re-use strictly prevented.
             </div>
 
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={onClose} disabled={isSubmitting}>
+              <Button variant="outline" size="sm" onClick={handleClose} disabled={isSubmitting}>
                 Dismiss
               </Button>
               <Button

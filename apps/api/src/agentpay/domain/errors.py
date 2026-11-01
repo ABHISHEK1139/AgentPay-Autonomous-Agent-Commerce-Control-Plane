@@ -199,6 +199,16 @@ class ToolCallerNotAllowedError(ToolRegistryError):
     code = "TOOL_CALLER_NOT_ALLOWED"
 
 
+class ToolExecutionUnavailableError(ToolRegistryError):
+    """Raised when a registered tool has no executable implementation on this surface (§2.4, §26).
+
+    Mutating commerce flows belong to the canonical action endpoints. The tool
+    endpoint fails closed instead of fabricating a successful execution (§135).
+    """
+
+    code = "TOOL_EXECUTION_UNAVAILABLE"
+
+
 # Commerce Errors
 class InvalidCommerceError(DomainError):
     code = "INVALID_COMMERCE"
@@ -227,6 +237,18 @@ class ApprovalBindingMismatchError(InvalidApprovalError):
 
 class InvalidApprovalTransitionError(InvalidApprovalError):
     code = "INVALID_APPROVAL_TRANSITION"
+
+
+class ApprovalAuthorizationError(InvalidApprovalError):
+    """Raised when a caller is not permitted to decide an approval (§20, §66)."""
+
+    code = "APPROVAL_AUTHORIZATION_DENIED"
+
+
+class ApprovalConcurrencyError(InvalidApprovalError):
+    """Raised when an approval changed between read and write (§20, §177)."""
+
+    code = "APPROVAL_CONCURRENCY_CONFLICT"
 
 
 class InvalidDecisionError(DomainError):

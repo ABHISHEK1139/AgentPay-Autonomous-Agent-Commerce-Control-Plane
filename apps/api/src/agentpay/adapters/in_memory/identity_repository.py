@@ -244,9 +244,31 @@ class InMemoryCredentialRepository(CredentialRepository):
                 f"Credential tenant_id '{credential.tenant_id}' does not match partition '{tenant_id}'"
             )
         with self._lock:
-            if tenant_id not in self._credentials:
-                self._credentials[tenant_id] = {}
-            self._credentials[tenant_id][credential.credential_id] = credential
+            partition = self._credentials.setdefault(tenant_id, {})
+            existing = partition.get(credential.credential_id)
+
+            # Rotating a secret must retire the old hash. Otherwise the previous
+            # secret stays valid through a stale index entry (§14, §58).
+            if existing is not None and existing.secret_hash != credential.secret_hash:
+                stale = self._by_hash.get(existing.secret_hash)
+                if stale is not None and (
+                    stale.tenant_id,
+                    stale.credential_id,
+                ) == (existing.tenant_id, existing.credential_id):
+                    del self._by_hash[existing.secret_hash]
+
+            holder = self._by_hash.get(credential.secret_hash)
+            if holder is not None and (holder.tenant_id, holder.credential_id) != (
+                credential.tenant_id,
+                credential.credential_id,
+            ):
+                # Mirrors the relational unique constraint on secret_hash: one
+                # secret may never authenticate as two different principals.
+                raise InvalidIdentityError(
+                    "secret_hash is already registered to another credential"
+                )
+
+            partition[credential.credential_id] = credential
             self._by_hash[credential.secret_hash] = credential
 
     def revoke(self, tenant_id: str, credential_id: str) -> None:

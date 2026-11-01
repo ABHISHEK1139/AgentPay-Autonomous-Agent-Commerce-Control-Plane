@@ -30,6 +30,7 @@ from agentpay.domain.identity import (
     Agent,
     AgentPermissions,
     AgentStatus,
+    UserRole,
 )
 from agentpay.domain.tool_registry import (
     ToolDefinition,
@@ -280,6 +281,13 @@ class AgentAuthorizationService:
             )
         return True
 
+    #: Human roles permitted to change an agent's permissions (§15, §16, §17).
+    #: Buyers, auditors, finance, and merchant administrators may read agent state
+    #: but may never widen an agent's capabilities or spending ceilings.
+    _PERMISSION_ADMIN_ROLES: Final[frozenset[UserRole]] = frozenset(
+        {UserRole.ADMIN, UserRole.AGENT_OPERATOR}
+    )
+
     def update_agent_permissions(
         self,
         tenant_id: str,
@@ -287,14 +295,27 @@ class AgentAuthorizationService:
         permissions: AgentPermissions,
         caller_principal_id: str,
         caller_is_agent: bool,
+        *,
+        caller_role: UserRole | None,
     ) -> None:
         """Update agent permissions with strict privilege escalation defense (§0.4, §15, §17).
 
-        Only human operators can update agent permissions. Agents attempting self-escalation
-        or cross-agent escalation are rejected with PrivilegeEscalationAttemptError.
+        Only human operators holding an administrative role can update agent
+        permissions. Agents attempting self-escalation or cross-agent escalation, and
+        humans without an administrative role, are rejected with
+        PrivilegeEscalationAttemptError. The caller's authenticated role is the only
+        source of truth: a request body may not assert authority.
         """
-        if caller_is_agent:
+        if caller_is_agent or caller_role is None:
             raise PrivilegeEscalationAttemptError("Agent cannot alter permissions")
+
+        if caller_role not in self._PERMISSION_ADMIN_ROLES:
+            raise PrivilegeEscalationAttemptError(
+                f"Role '{caller_role.value}' cannot alter agent permissions"
+            )
+
+        if not caller_principal_id.strip():
+            raise InvalidIdentityError("caller_principal_id must be a non-empty string")
 
         if permissions.tenant_id != tenant_id:
             raise CrossTenantAccessError("Permissions tenant does not match context tenant")

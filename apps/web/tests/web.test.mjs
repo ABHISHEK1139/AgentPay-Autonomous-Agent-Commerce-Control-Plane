@@ -277,3 +277,169 @@ test("Control Center Live API authenticated integration and fallbacks per §14, 
   }
 });
 
+test("Approval resolution grants then executes on live API and never fabricates success", async () => {
+  const { ControlCenterApiService } = await import("../src/services/api.ts");
+  const originalFetch = globalThis.fetch;
+
+  const configure = (svc) => {
+    svc.setDemoMode(false);
+    svc.setBaseUrl("http://localhost:8000");
+    svc.setAuthToken("tok_admin_live_123");
+    return svc;
+  };
+
+  // Case 1: backend grants and executes → exactly one grant and one execute call
+  {
+    const service = configure(new ControlCenterApiService());
+    const calls = [];
+    globalThis.fetch = async (url, options = {}) => {
+      calls.push({ url: String(url), options });
+      if (String(url).endsWith("/approve")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            approval_id: "app_mon_991",
+            status: "APPROVED",
+            approver_id: "sec_admin_01",
+          }),
+        };
+      }
+      if (String(url).endsWith("/execute")) {
+        return { ok: true, status: 200, json: async () => ({ status: "COMPLETED", order_id: "ord_live_991" }) };
+      }
+      return { ok: false, status: 404, statusText: "Not Found", json: async () => ({}) };
+    };
+    try {
+      const approved = await service.resolveApproval(
+        "app_mon_991",
+        "APPROVED",
+        "verified necessity"
+      );
+      assert.equal(approved.status, "APPROVED");
+      assert.equal(calls.length, 2, "Must grant then execute exactly once each");
+      assert.ok(calls[0].url.endsWith("/api/v1/approvals/app_mon_991/approve"));
+      assert.ok(calls[1].url.endsWith("/api/v1/approvals/app_mon_991/execute"));
+      assert.equal(calls[0].options.method, "POST");
+      assert.equal(calls[1].options.method, "POST");
+      const grantBody = JSON.parse(calls[0].options.body);
+      assert.equal(
+        grantBody.approver_id,
+        undefined,
+        "The browser must never assert who approved; the server derives it from the credential"
+      );
+      assert.equal(grantBody.reason, "verified necessity");
+      const execBody = JSON.parse(calls[1].options.body);
+      assert.equal(execBody.action_id, "act_mon_4k_991");
+      assert.equal(execBody.amount_minor, 800000);
+      assert.equal(execBody.currency, "INR");
+      assert.ok(
+        approved.policy.triggeredRule.includes("executed"),
+        "Execution outcome must be recorded in the approval note"
+      );
+      assert.ok(
+        approved.policy.triggeredRule.includes("sec_admin_01"),
+        "The note must name the server-confirmed approver"
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  // Case 2: backend rejects the grant → fail closed, no execution attempt, no local fabrication
+  {
+    const service = configure(new ControlCenterApiService());
+    const calls = [];
+    globalThis.fetch = async (url, options = {}) => {
+      calls.push({ url: String(url), options });
+      return {
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        json: async () => ({
+          error: { code: "AGENT_CANNOT_APPROVE", message: "Agent cannot approve" },
+        }),
+      };
+    };
+    try {
+      await assert.rejects(
+        () => service.resolveApproval("app_mon_991", "APPROVED"),
+        /AGENT_CANNOT_APPROVE/
+      );
+      assert.equal(calls.length, 1, "Execute must not be attempted after a failed grant");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  // Case 3: grant succeeds but execution is refused by the backend → surfaced, not hidden
+  {
+    const service = configure(new ControlCenterApiService());
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith("/approve")) {
+        return { ok: true, status: 200, json: async () => ({ status: "APPROVED" }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: "FAILED", rejection_reason: "Evidence conflict detected" }),
+      };
+    };
+    try {
+      const failed = await service.resolveApproval("app_mon_991", "APPROVED");
+      assert.equal(failed.status, "APPROVED");
+      assert.ok(failed.policy.triggeredRule.includes("execution FAILED"));
+      assert.ok(failed.policy.triggeredRule.includes("Evidence conflict detected"));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  // Case 4: execute HTTP failure after grant → explicit rejection with the error code
+  {
+    const service = configure(new ControlCenterApiService());
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith("/approve")) {
+        return { ok: true, status: 200, json: async () => ({ status: "APPROVED" }) };
+      }
+      return {
+        ok: false,
+        status: 422,
+        statusText: "Unprocessable Entity",
+        json: async () => ({
+          error: { code: "APPROVAL_BINDING_MISMATCH", message: "amount mismatch" },
+        }),
+      };
+    };
+    try {
+      await assert.rejects(
+        () => service.resolveApproval("app_mon_991", "APPROVED"),
+        /execution failed[\s\S]*APPROVAL_BINDING_MISMATCH/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  // Case 5: demo mode keeps the deterministic local simulation and never contacts the network
+  {
+    const service = new ControlCenterApiService();
+    let demoCalls = 0;
+    globalThis.fetch = async () => {
+      demoCalls += 1;
+      throw new Error("network must not be called in demo mode");
+    };
+    try {
+      const demoUpdated = await service.resolveApproval(
+        "app_mon_991",
+        "REJECTED",
+        "not needed"
+      );
+      assert.equal(demoUpdated.status, "REJECTED");
+      assert.equal(demoCalls, 0, "Demo mode must not contact the backend");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+

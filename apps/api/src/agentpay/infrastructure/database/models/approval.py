@@ -37,9 +37,13 @@ class ApprovalModel(Base):
     principal_id: Mapped[str] = mapped_column(
         String(64), nullable=False, default="", server_default="", index=True
     )
+    agent_id: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="", server_default="", index=True
+    )
 
     __table_args__ = (
         Index("ix_approvals_tenant_action", "tenant_id", "action_id"),
         Index("ix_approvals_tenant_status", "tenant_id", "status"),
         Index("ix_approvals_tenant_principal", "tenant_id", "principal_id"),
+        Index("ix_approvals_tenant_agent", "tenant_id", "agent_id"),
     )

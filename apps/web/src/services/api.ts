@@ -156,7 +156,7 @@ export class ControlCenterApiService {
         if (res.ok) {
           const data = await res.json();
           if (Array.isArray(data.approvals) && data.approvals.length > 0) {
-            return data.approvals.map((backendApp: any) => {
+            const mapped: ApprovalItem[] = data.approvals.map((backendApp: any) => {
               const existing = this._approvals.find(
                 (m) => m.id === backendApp.approval_id || m.actionId === backendApp.action_id
               );
@@ -181,8 +181,12 @@ export class ControlCenterApiService {
                 what: { domain: "commerce", actionType: "purchase" },
                 why: { intentPurpose: "Autonomous procurement requisition" },
                 howMuch: { amountMinor: backendApp.amount_minor || 500000, currency: backendApp.currency || "INR" },
-                merchant: { id: "merch_acme", name: "Acme Supplies Ltd" },
-                product: { productId: "prod_01", variantId: "var_01", title: "Enterprise Hardware" },
+                merchant: { id: backendApp.merchant_id ?? "merch_acme", name: "Acme Supplies Ltd" },
+                product: {
+                  productId: backendApp.resource_id ?? "prod_01",
+                  variantId: backendApp.variant_id ?? backendApp.resource_id ?? "var_01",
+                  title: "Enterprise Hardware",
+                },
                 evidence: {
                   priceSource: "catalog",
                   hashSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -194,6 +198,8 @@ export class ControlCenterApiService {
                 conflicts: [],
               };
             });
+            this._approvals = mapped;
+            return mapped;
           }
         }
       } catch {
@@ -203,38 +209,98 @@ export class ControlCenterApiService {
     return [...this._approvals];
   }
 
+  private async readApiError(res: Response): Promise<string> {
+    try {
+      const body = await res.json();
+      const code = body?.error?.code;
+      const message = body?.error?.message;
+      if (code || message) {
+        return `${code ?? "ERROR"} - ${message ?? "request failed"}`;
+      }
+    } catch {
+      // Non-JSON error body; fall through to status text
+    }
+    return res.statusText || "request failed";
+  }
+
   public async resolveApproval(
     approvalId: string,
     decision: "APPROVED" | "REJECTED",
-    approverId: string,
     reason?: string
   ): Promise<ApprovalItem> {
+    const itemIndex = this._approvals.findIndex((a) => a.id === approvalId);
+    if (itemIndex === -1) {
+      throw new Error(
+        `Approval '${approvalId}' is not in the current approval queue; refresh before deciding`
+      );
+    }
+
+    // Live mode: the backend is the authority. A grant/reject that the server
+    // did not confirm must surface as an error, never as local success (§2.4, §20).
+    let executionNote = "";
+    let recordedApprover = "authenticated operator";
     if (!this._demoMode) {
-      try {
-        const subAction = decision === "APPROVED" ? "approve" : "reject";
-        await fetch(
-          `${this._baseUrl}/api/v1/approvals/${encodeURIComponent(approvalId)}/${subAction}`,
+      const subAction = decision === "APPROVED" ? "approve" : "reject";
+      // The server derives the approver from the authenticated credential. Sending
+      // an approver_id from the browser would be a forged approval attempt (§20).
+      const res = await fetch(
+        `${this._baseUrl}/api/v1/approvals/${encodeURIComponent(approvalId)}/${subAction}`,
+        {
+          method: "POST",
+          headers: this.buildHeaders(),
+          body: JSON.stringify({ reason: reason || "Control Center Decision" }),
+        }
+      );
+      if (!res.ok) {
+        throw new Error(
+          `Approval ${subAction} failed (HTTP ${res.status}): ${await this.readApiError(res)}`
+        );
+      }
+
+      const decisionBody = await res.json().catch(() => ({}));
+      if (typeof decisionBody?.approver_id === "string" && decisionBody.approver_id) {
+        recordedApprover = decisionBody.approver_id;
+      }
+
+      if (decision === "APPROVED") {
+        const item = this._approvals[itemIndex];
+        const execRes = await fetch(
+          `${this._baseUrl}/api/v1/approvals/${encodeURIComponent(approvalId)}/execute`,
           {
             method: "POST",
             headers: this.buildHeaders(),
-            body: JSON.stringify({ approver_id: approverId, reason: reason || "Control Center Decision" }),
+            body: JSON.stringify({
+              action_id: item.actionId,
+              amount_minor: item.howMuch.amountMinor,
+              currency: item.howMuch.currency,
+              resource_id: item.product.productId,
+              variant_id: item.product.variantId,
+            }),
           }
         );
-      } catch {
-        // Fallback
+        if (!execRes.ok) {
+          throw new Error(
+            `Approval granted, but execution failed (HTTP ${execRes.status}): ${await this.readApiError(execRes)}`
+          );
+        }
+        const execResult = await execRes.json().catch(() => ({}));
+        if (execResult.status === "COMPLETED") {
+          executionNote = ` [executed: order ${execResult.order_id ?? "pending"}]`;
+        } else {
+          executionNote = ` [execution ${execResult.status ?? "UNKNOWN"}: ${execResult.rejection_reason ?? "no reason provided"}]`;
+        }
       }
+    } else {
+      recordedApprover = "demo operator";
     }
 
-    const itemIndex = this._approvals.findIndex((a) => a.id === approvalId);
-    if (itemIndex === -1) {
-      throw new Error(`Approval '${approvalId}' not found`);
-    }
+    const base = this._approvals[itemIndex];
     const updated: ApprovalItem = {
-      ...this._approvals[itemIndex],
+      ...base,
       status: decision,
       policy: {
-        ...this._approvals[itemIndex].policy,
-        triggeredRule: `${this._approvals[itemIndex].policy.triggeredRule} [${decision} by ${approverId}: ${reason || "Verified"}]`,
+        ...base.policy,
+        triggeredRule: `${base.policy.triggeredRule} [${decision} by ${recordedApprover}: ${reason || "Verified"}]${executionNote}`,
       },
     };
     this._approvals[itemIndex] = updated;
@@ -259,18 +325,17 @@ export class ControlCenterApiService {
 
   public async executeAction(payload: Record<string, any>): Promise<Record<string, any>> {
     if (!this._demoMode) {
-      try {
-        const res = await fetch(`${this._baseUrl}/api/v1/actions`, {
-          method: "POST",
-          headers: this.buildHeaders(),
-          body: JSON.stringify(payload),
-        });
-        if (res.ok) {
-          return await res.json();
-        }
-      } catch {
-        // Fallback
+      const res = await fetch(`${this._baseUrl}/api/v1/actions`, {
+        method: "POST",
+        headers: this.buildHeaders(),
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        throw new Error(
+          `Action execution failed (HTTP ${res.status}): ${await this.readApiError(res)}`
+        );
       }
+      return await res.json();
     }
     return { status: "COMPLETED", decision: "ALLOW", order_id: `ord_${Date.now()}` };
   }

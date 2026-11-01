@@ -343,6 +343,8 @@ def test_adversarial_approval_binding_reuse_and_mutation_attack() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     from agentpay.domain.approval import Approval
 
@@ -417,6 +419,8 @@ def test_adversarial_approval_state_machine_transition_tampering() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     from agentpay.domain.approval import Approval
 

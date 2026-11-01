@@ -40,7 +40,7 @@ from agentpay.application.services.identity_service import AgentAuthorizationSer
 from agentpay.application.use_cases.purchase_flow import PurchaseOrchestrator
 from agentpay.domain.approval import ApprovalStatus
 from agentpay.domain.commerce import Inventory, Merchant, MerchantStatus, Product, ProductVariant
-from agentpay.domain.identity import Agent, AgentPermissions, AgentStatus, Tenant
+from agentpay.domain.identity import Agent, AgentPermissions, AgentStatus, Tenant, UserRole
 from agentpay.domain.money import Money
 from agentpay.domain.policy import SpendingLimits, SpendingPolicyEngine
 
@@ -181,6 +181,10 @@ class SimpleApiClient(ApiTestClient):
 
     def __init__(self, app: AgentPayApiApp, default_tenant: str = "tenant_alpha") -> None:
         super().__init__(app=app, default_tenant=default_tenant, auth_mode="buyer")
+        # The hardened fixture binds ag_procure_01 to usr_admin, so the caller must
+        # authenticate as that principal rather than asserting it in the payload (§14).
+        self._active_principal = "usr_admin"
+        self._active_role = UserRole.BUYER
 
 
 def test_e2e_autonomous_acp_purchase_and_audit_chain() -> None:
@@ -270,7 +274,11 @@ def test_e2e_human_approval_workflow_via_ap2() -> None:
     approval_service = app.orchestrator._approval_service
     assert approval_service is not None
     approved_obj = approval_service.grant_approval(
-        approval_id=approval_id, approver_id="finance_lead_01", tenant_id="tenant_alpha"
+        approval_id=approval_id,
+        approver_id="finance_lead_01",
+        tenant_id="tenant_alpha",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="finance_lead_01",
     )
     assert approved_obj.status == ApprovalStatus.APPROVED
 

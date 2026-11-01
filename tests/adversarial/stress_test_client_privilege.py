@@ -334,15 +334,16 @@ def probe_immutability_and_anti_escalation() -> dict[str, Any]:
 
     # 6. Token cache separation: verify base client did NOT reuse admin token
     # Partition keys: "tenant_01:usr_test_admin:ADMIN" vs "tenant_01:usr_test_buyer:BUYER"
-    admin_token_key = f"tenant_01:usr_test_admin:{UserRole.ADMIN.value}"
-    buyer_token_key = f"tenant_01:usr_test_buyer:{UserRole.BUYER.value}"
-    if admin_token_key not in base_client._tokens_by_tenant:
-        violations.append(f"Missing admin key {admin_token_key} in shared token cache")
-    if buyer_token_key not in base_client._tokens_by_tenant:
-        violations.append(f"Missing buyer key {buyer_token_key} in shared token cache")
-
-    admin_tok = base_client._tokens_by_tenant.get(admin_token_key)
-    buyer_tok = base_client._tokens_by_tenant.get(buyer_token_key)
+    admin_prefix = f"tenant_01:usr_test_admin:{UserRole.ADMIN.value}:"
+    buyer_prefix = f"tenant_01:usr_test_buyer:{UserRole.BUYER.value}:"
+    admin_keys = [k for k in base_client._tokens_by_tenant if k.startswith(admin_prefix)]
+    buyer_keys = [k for k in base_client._tokens_by_tenant if k.startswith(buyer_prefix)]
+    if not admin_keys:
+        violations.append(f"Missing admin key with prefix {admin_prefix} in shared token cache")
+    if not buyer_keys:
+        violations.append(f"Missing buyer key with prefix {buyer_prefix} in shared token cache")
+    admin_tok = base_client._tokens_by_tenant.get(admin_keys[0]) if admin_keys else None
+    buyer_tok = base_client._tokens_by_tenant.get(buyer_keys[0]) if buyer_keys else None
     if not admin_tok or not buyer_tok or admin_tok == buyer_tok:
         violations.append(
             "Token collision: admin and buyer share the exact same token value or are empty!"

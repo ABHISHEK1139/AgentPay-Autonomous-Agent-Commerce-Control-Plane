@@ -206,12 +206,16 @@ def test_adversarial_immutability_and_anti_escalation() -> None:
     assert s_resume_ok == 200
     assert app._emergency_paused is False
 
-    # Token cache partitioning: separate keys
-    admin_key = f"tenant_01:usr_test_admin:{UserRole.ADMIN.value}"
-    buyer_key = f"tenant_01:usr_test_buyer:{UserRole.BUYER.value}"
-    assert admin_key in base_client._tokens_by_tenant
-    assert buyer_key in base_client._tokens_by_tenant
-    assert base_client._tokens_by_tenant[admin_key] != base_client._tokens_by_tenant[buyer_key]
+    # Token cache partitioning: separate keys (scopes are part of the cache identity)
+    admin_prefix = f"tenant_01:usr_test_admin:{UserRole.ADMIN.value}:"
+    buyer_prefix = f"tenant_01:usr_test_buyer:{UserRole.BUYER.value}:"
+    admin_keys = [k for k in base_client._tokens_by_tenant if k.startswith(admin_prefix)]
+    buyer_keys = [k for k in base_client._tokens_by_tenant if k.startswith(buyer_prefix)]
+    assert len(admin_keys) == 1
+    assert len(buyer_keys) == 1
+    assert (
+        base_client._tokens_by_tenant[admin_keys[0]] != base_client._tokens_by_tenant[buyer_keys[0]]
+    )
 
     # Multi-branch cloning immutability
     c_buyer = admin_client.as_buyer()

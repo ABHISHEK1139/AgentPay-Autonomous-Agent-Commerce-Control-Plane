@@ -56,6 +56,7 @@ Dependency direction is strictly inward:
 | `domain/identity.py` | `Tenant`, `User`, `Agent`, `AgentPermissions`, `AgentStatus`. | Agents cannot alter permissions. Non-active agents fail closed (§14, §15). |
 | `domain/policy.py` | `SpendingLimits`, `SpendingPolicyEngine`, `PolicyEvaluationResult`, `PolicyDecision`. | Pure deterministic function. No clock, no network, most restrictive rule wins (§18). |
 | `domain/commerce.py` | `Merchant`, `Product`, `ProductVariant`, `Inventory`, `MerchantStatus`. | Stock reservation state machine. Suspended merchants fail closed (§30, §37). |
+| `domain/cart.py` | `Cart`, `CartItem`, `CartStatus`. | Single-merchant multi-item cart (ADR-0006). Frozen aggregate; merge/remove/lifecycle transitions validated; never an authority — prices, stock, policy and approvals re-verified at checkout. |
 | `domain/evidence.py` | `EvidenceConflictDetector`, `EvidenceRecord`, `ConflictType`. | Pre-flight price and stock conflict detection. Fails closed before payment (§32, §33). |
 | `domain/decision.py` | `Decision`, `DecisionRecommendation`, `RiskLevel`. | Advisory AI (JEV / LLM). Strictly subordinate to deterministic policy engine (§2.2, §134). |
 | `domain/approval.py` | `Approval`, `ApprovalBinding`, `ApprovalStatus`, `ApprovalTier`, `ApprovalPolicy`. | Exact 8-field binding to action, amount, merchant, resource, currency, version, tenant, principal. Single-use consumption (§20). |

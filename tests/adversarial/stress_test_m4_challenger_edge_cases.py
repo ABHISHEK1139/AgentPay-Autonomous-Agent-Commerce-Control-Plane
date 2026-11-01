@@ -50,6 +50,7 @@ from agentpay.domain.errors import (
 )
 from agentpay.domain.identity import (
     Tenant,
+    UserRole,
 )
 from agentpay.domain.money import Money
 from agentpay.infrastructure.database.base import Base
@@ -103,6 +104,7 @@ def test_immutability_and_slot_protection() -> dict[str, Any]:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
         principal_id="user_alice",
     )
 
@@ -144,6 +146,7 @@ def test_whitespace_and_case_sensitivity_tampering() -> dict[str, Any]:
                 currency="INR",
                 action_version=1,
                 tenant_id="tenant_01",
+                agent_id="agent_01",
                 principal_id=ws,
             )
             if b.matches(
@@ -154,6 +157,7 @@ def test_whitespace_and_case_sensitivity_tampering() -> dict[str, Any]:
                 currency="INR",
                 action_version=1,
                 tenant_id="tenant_01",
+                agent_id="agent_01",
                 principal_id="user_alice",
             ):
                 violations.append(f"Whitespace padded principal '{ws}' matched clean 'user_alice'")
@@ -167,6 +171,7 @@ def test_whitespace_and_case_sensitivity_tampering() -> dict[str, Any]:
                     currency="INR",
                     action_version=1,
                     tenant_id="tenant_01",
+                    agent_id="agent_01",
                     principal_id=ws,
                 )
                 violations.append(f"Blank principal '{ws}' did not raise InvalidApprovalError")
@@ -182,6 +187,7 @@ def test_whitespace_and_case_sensitivity_tampering() -> dict[str, Any]:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
         principal_id="user_alice",
     )
     if binding_clean.matches(
@@ -192,6 +198,7 @@ def test_whitespace_and_case_sensitivity_tampering() -> dict[str, Any]:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
         principal_id="USER_ALICE",
     ):
         violations.append("Case-mismatched principal 'USER_ALICE' matched 'user_alice'")
@@ -217,7 +224,11 @@ def test_cross_tenant_identical_namespaces() -> dict[str, Any]:
     )
     approval_alpha = orch._approval_service.create_approval(action_alpha, tenant_id="tenant_alpha")
     orch._approval_service.grant_approval(
-        approval_alpha.approval_id, "mgr_alpha", tenant_id="tenant_alpha"
+        approval_alpha.approval_id,
+        "mgr_alpha",
+        tenant_id="tenant_alpha",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr_alpha",
     )
 
     # Tenant Beta: identical principal_id 'user_alice' and action_id 'act_shared_id'
@@ -262,7 +273,7 @@ def test_double_spend_http_replay() -> dict[str, Any]:
     violations: list[str] = []
     orch, _, _, _, _, _, _, _, _, _, _ = setup_orchestrator(tenant_id="tenant_01")
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
 
     action = _make_action(
         action_id="act_http_replay",
@@ -272,8 +283,16 @@ def test_double_spend_http_replay() -> dict[str, Any]:
         resource_id="prod_01",
         amount_minor=129900,
     )
-    appr = orch._approval_service.create_approval(action, tenant_id="tenant_01")
-    orch._approval_service.grant_approval(appr.approval_id, "mgr", tenant_id="tenant_01")
+    appr = orch._approval_service.create_approval(
+        action, tenant_id="tenant_01", merchant_id="merch_01"
+    )
+    orch._approval_service.grant_approval(
+        appr.approval_id,
+        "mgr",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
 
     # Execution 1: Must succeed (HTTP 200)
     status1, body1 = client.post(
@@ -333,6 +352,7 @@ def test_currency_and_type_invariants() -> dict[str, Any]:
             currency="INR",  # Mismatch!
             action_version=1,
             tenant_id="tenant_01",
+            agent_id="agent_01",
             principal_id="user_alice",
         )
         violations.append("Currency mismatch did not raise InvalidApprovalError")
@@ -349,6 +369,7 @@ def test_currency_and_type_invariants() -> dict[str, Any]:
             currency="INR",
             action_version=True,  # type: ignore[arg-type]
             tenant_id="tenant_01",
+            agent_id="agent_01",
             principal_id="user_alice",
         )
         violations.append("Boolean action_version did not raise InvalidApprovalError")
@@ -365,6 +386,7 @@ def test_currency_and_type_invariants() -> dict[str, Any]:
             currency="INR",
             action_version=1,
             tenant_id="tenant_01",
+            agent_id="agent_01",
             principal_id="user_alice",
         )
         violations.append("Integer amount did not raise InvalidApprovalError")
@@ -408,8 +430,16 @@ def test_30_thread_concurrent_sqla_purchase_race() -> dict[str, Any]:
         agent_id="agent_01",
         principal_id="user_01",
     )
-    appr = orch._approval_service.create_approval(action, tenant_id="tenant_sqla_30")
-    orch._approval_service.grant_approval(appr.approval_id, "mgr", tenant_id="tenant_sqla_30")
+    appr = orch._approval_service.create_approval(
+        action, tenant_id="tenant_sqla_30", merchant_id="merch_01"
+    )
+    orch._approval_service.grant_approval(
+        appr.approval_id,
+        "mgr",
+        tenant_id="tenant_sqla_30",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
 
     results: list[ActionStatus | str] = []
     lock = threading.Lock()

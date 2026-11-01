@@ -24,6 +24,7 @@ from hypothesis import strategies as st
 from agentpay.adapters.in_memory.identity_repository import (
     InMemoryAgentPermissionsRepository,
     InMemoryAgentRepository,
+    InMemoryCredentialRepository,
     InMemoryTenantRepository,
     format_cache_key,
     format_tenant_cache_key,
@@ -54,6 +55,9 @@ from agentpay.domain.identity import (
     Agent,
     AgentPermissions,
     AgentStatus,
+    Credential,
+    CredentialStatus,
+    CredentialType,
     Tenant,
     TenantStatus,
     User,
@@ -506,6 +510,7 @@ def test_agent_cannot_modify_its_own_permissions() -> None:
             permissions=new_perms,
             caller_principal_id="agent_01",
             caller_is_agent=True,
+            caller_role=None,
         )
 
 
@@ -520,6 +525,7 @@ def test_agent_cannot_modify_another_agent_permissions() -> None:
             permissions=new_perms,
             caller_principal_id="agent_01",
             caller_is_agent=True,
+            caller_role=None,
         )
 
 
@@ -572,8 +578,80 @@ def test_human_admin_can_update_agent_permissions() -> None:
         permissions=new_perms,
         caller_principal_id="admin_user_01",
         caller_is_agent=False,
+        caller_role=UserRole.ADMIN,
     )
     assert repo.get("tenant_01", agent.agent_id) == new_perms
+
+
+def test_agent_operator_can_update_agent_permissions() -> None:
+    """An AGENT_OPERATOR is a permitted administrative role for permission changes."""
+    service = AgentAuthorizationService()
+    repo = InMemoryAgentPermissionsRepository()
+    service._permissions_repo = repo
+
+    new_perms = build_permissions(
+        agent_id="agent_01",
+        limits=SpendingLimits(per_transaction_minor=500_000),
+        version=3,
+    )
+    service.update_agent_permissions(
+        tenant_id="tenant_01",
+        agent_id="agent_01",
+        permissions=new_perms,
+        caller_principal_id="operator_01",
+        caller_is_agent=False,
+        caller_role=UserRole.AGENT_OPERATOR,
+    )
+    assert repo.get("tenant_01", "agent_01") == new_perms
+
+
+@pytest.mark.parametrize(
+    "role",
+    [UserRole.BUYER, UserRole.AUDITOR, UserRole.FINANCE, UserRole.MERCHANT_ADMIN],
+)
+def test_non_administrative_human_roles_cannot_update_agent_permissions(role: UserRole) -> None:
+    """Only ADMIN and AGENT_OPERATOR may alter agent permissions (§15, §16, §17)."""
+    service = AgentAuthorizationService()
+    repo = InMemoryAgentPermissionsRepository()
+    service._permissions_repo = repo
+    original = build_permissions(agent_id="agent_01")
+    repo.save("tenant_01", original)
+
+    new_perms = build_permissions(
+        agent_id="agent_01",
+        limits=SpendingLimits(per_transaction_minor=10_000_000),
+        version=2,
+    )
+
+    with pytest.raises(PrivilegeEscalationAttemptError, match="cannot alter agent permissions"):
+        service.update_agent_permissions(
+            tenant_id="tenant_01",
+            agent_id="agent_01",
+            permissions=new_perms,
+            caller_principal_id="human_01",
+            caller_is_agent=False,
+            caller_role=role,
+        )
+
+    # The stored permissions must be unchanged after a rejected escalation attempt.
+    assert repo.get("tenant_01", "agent_01") == original
+
+
+def test_agent_caller_without_role_cannot_update_permissions() -> None:
+    """A caller flagged as an agent but with no role is rejected before any write."""
+    service = AgentAuthorizationService()
+    repo = InMemoryAgentPermissionsRepository()
+    service._permissions_repo = repo
+
+    with pytest.raises(PrivilegeEscalationAttemptError, match="Agent cannot alter permissions"):
+        service.update_agent_permissions(
+            tenant_id="tenant_01",
+            agent_id="agent_01",
+            permissions=build_permissions(agent_id="agent_01"),
+            caller_principal_id="agent_01",
+            caller_is_agent=False,
+            caller_role=None,
+        )
 
 
 def test_permissions_assert_no_escalation_detects_widened_capabilities() -> None:
@@ -1220,6 +1298,7 @@ def test_adversarial_suite_all_29_scenarios() -> None:
             build_permissions(tenant_id="t1", agent_id=agent.agent_id),
             caller_principal_id="p1",
             caller_is_agent=True,
+            caller_role=None,
         )
 
     # 3.4 Approval threshold escalation
@@ -1695,3 +1774,70 @@ def test_remediation_format_tenant_cache_key_rejects_crlf_and_null_bytes() -> No
             format_tenant_cache_key("tenant_01", bad_input, "01")
         with pytest.raises(ValueError, match="Control characters"):
             format_tenant_cache_key("tenant_01", "agent", bad_input)
+
+
+# =============================================================================
+# Credential Hardening (§14, §58, §59)
+# =============================================================================
+
+
+def build_credential(
+    credential_id: str = "cred_01",
+    secret: str = "super-secret-machine-token",
+    **overrides: object,
+) -> Credential:
+    defaults: dict[str, object] = {
+        "credential_id": credential_id,
+        "tenant_id": "tenant_01",
+        "principal_id": "user_01",
+        "credential_type": CredentialType.BEARER_TOKEN,
+        "secret_hash": Credential.hash_secret(secret),
+        "expires_at": datetime(2099, 1, 1, tzinfo=UTC),
+        "status": CredentialStatus.ACTIVE,
+    }
+    defaults.update(overrides)
+    return Credential(**defaults)  # type: ignore[arg-type]
+
+
+def test_credential_verify_secret_requires_exact_match() -> None:
+    cred = build_credential(secret="correct-horse-battery-staple")
+    assert cred.verify_secret("correct-horse-battery-staple") is True
+    assert cred.verify_secret("correct-horse-battery-stapl") is False
+    assert cred.verify_secret("correct-horse-battery-staple ") is False
+    assert cred.verify_secret("") is False
+
+
+def test_hash_secret_rejects_blank_secrets() -> None:
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(InvalidIdentityError, match="non-empty"):
+            Credential.hash_secret(blank)
+
+
+def test_credential_rotation_retires_the_old_secret_hash() -> None:
+    repo = InMemoryCredentialRepository()
+    repo.save("tenant_01", build_credential(secret="old-secret"))
+
+    rotated = build_credential(secret="new-secret")
+    repo.save("tenant_01", rotated)
+
+    # The previous secret must no longer authenticate (§14, §58).
+    assert repo.get_by_secret_hash(Credential.hash_secret("old-secret")) is None
+    found = repo.get_by_secret_hash(Credential.hash_secret("new-secret"))
+    assert found is not None
+    assert found.credential_id == "cred_01"
+
+
+def test_credential_repository_rejects_duplicate_secret_hash() -> None:
+    repo = InMemoryCredentialRepository()
+    repo.save("tenant_01", build_credential("cred_a", secret="shared-secret"))
+
+    # Re-saving the same credential is an update, not a collision.
+    repo.save("tenant_01", build_credential("cred_a", secret="shared-secret"))
+
+    with pytest.raises(InvalidIdentityError, match="already registered"):
+        repo.save("tenant_01", build_credential("cred_b", secret="shared-secret"))
+
+    # The first credential remains reachable and the second was not indexed.
+    found = repo.get_by_secret_hash(Credential.hash_secret("shared-secret"))
+    assert found is not None
+    assert found.credential_id == "cred_a"

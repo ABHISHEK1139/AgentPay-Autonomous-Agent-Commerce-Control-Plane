@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from agentpay.domain.approval import Approval
+from agentpay.domain.approval import Approval, ApprovalStatus
 from agentpay.domain.decision import Decision, DecisionContext
 
 
@@ -20,8 +20,19 @@ class ApprovalRepository(Protocol):
         """Retrieve an approval record by ID within a tenant partition."""
         ...
 
-    def save(self, tenant_id: str, approval: Approval) -> None:
-        """Persist or update an approval record within a tenant partition."""
+    def save(
+        self,
+        tenant_id: str,
+        approval: Approval,
+        *,
+        expected_status: ApprovalStatus | None = None,
+    ) -> None:
+        """Persist or update an approval record within a tenant partition.
+
+        When ``expected_status`` is provided, the write is conditional on the stored
+        record still having that status; otherwise ``ApprovalConcurrencyError`` is raised.
+        This prevents lost updates during concurrent grant/reject/consume decisions.
+        """
         ...
 
     def list_for_action(self, tenant_id: str, action_id: str) -> list[Approval]:

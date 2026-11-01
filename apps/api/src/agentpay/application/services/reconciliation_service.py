@@ -74,6 +74,7 @@ class PaymentReconciler:
         # one (e.g. the mock provider resolves simulated timeouts to CAPTURED);
         # otherwise fall back to querying the provider for the current status.
         provider_reconcile = getattr(self._provider, "reconcile_timeout", None)
+        refreshed: PaymentAttempt
         if callable(provider_reconcile):
             refreshed = provider_reconcile(tenant_id, attempt_id)
         else:

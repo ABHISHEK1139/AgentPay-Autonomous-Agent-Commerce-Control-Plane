@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from agentpay.domain.cart import Cart
 from agentpay.domain.commerce import (
     Inventory,
     Merchant,
@@ -103,4 +104,21 @@ class EvidenceRepository(Protocol):
 
     def list_for_resource(self, tenant_id: str, resource_id: str) -> list[Evidence]:
         """List all evidence recorded for a resource within a tenant partition."""
+        ...
+
+
+@runtime_checkable
+class CartRepository(Protocol):
+    """Port for shopping cart persistence and lookup (§38, ADR-0006)."""
+
+    def get(self, tenant_id: str, cart_id: str) -> Cart | None:
+        """Retrieve a cart by ID within a tenant partition."""
+        ...
+
+    def save(self, tenant_id: str, cart: Cart) -> None:
+        """Persist or update a cart within a tenant partition."""
+        ...
+
+    def list_for_principal(self, tenant_id: str, principal_id: str) -> list[Cart]:
+        """List carts owned by a principal within a tenant partition."""
         ...

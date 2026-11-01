@@ -38,7 +38,7 @@ from agentpay.domain.commerce import (
     Inventory,
     ProductVariant,
 )
-from agentpay.domain.identity import Tenant
+from agentpay.domain.identity import Tenant, UserRole
 from agentpay.domain.money import Money
 from agentpay.domain.payments import (
     PaymentAttempt,
@@ -170,7 +170,11 @@ def probe_saga_payment_creation_failure_approved() -> dict[str, Any]:
 
     approval_svc = ApprovalService(approval_repo=approval_repo)
     approval_svc.grant_approval(
-        approval_id=appr_id, approver_id="approver_s2", tenant_id="tenant_01"
+        approval_id=appr_id,
+        approver_id="approver_s2",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="approver_s2",
     )
 
     def broken_create_payment(*args: Any, **kwargs: Any) -> PaymentAttempt:
@@ -427,7 +431,11 @@ def probe_saga_order_persistence_failure_approved() -> dict[str, Any]:
 
     approval_svc = ApprovalService(approval_repo=approval_repo)
     approval_svc.grant_approval(
-        approval_id=appr_id, approver_id="approver_s5", tenant_id="tenant_01"
+        approval_id=appr_id,
+        approver_id="approver_s5",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="approver_s5",
     )
 
     def failing_save(*args: Any, **kwargs: Any) -> None:
@@ -502,6 +510,8 @@ def probe_sqlalchemy_approval_concurrent_atomic_consume() -> dict[str, Any]:
         currency="USD",
         action_version=1,
         tenant_id="tenant_sqla_appr",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     approval = Approval(
         approval_id="appr_sqla_shared_01",
@@ -598,11 +608,13 @@ def probe_orchestrator_approved_purchase_concurrency_with_sqla() -> dict[str, An
     binding = ApprovalBinding(
         action_id="act_shared_sqla",
         amount=Money(800000, "INR"),
-        merchant_id="prod_01",
+        merchant_id="merch_01",
         resource_id="prod_01",
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     approval = Approval(
         approval_id="appr_shared_sqla",
@@ -757,6 +769,8 @@ def probe_background_worker_stale_approval_expiration() -> dict[str, Any]:
             currency="INR",
             action_version=1,
             tenant_id="tenant_worker_1",
+            agent_id="agent_01",
+            principal_id="user_01",
         ),
         status=ApprovalStatus.PENDING,
         requested_at=stale_time,
@@ -769,9 +783,9 @@ def probe_background_worker_stale_approval_expiration() -> dict[str, Any]:
     passed = (
         expired_count == 1
         and retrieved is not None
-        and retrieved.status == ApprovalStatus.REJECTED
-        and retrieved.approver_id == "system_worker"
-        and "past TTL" in (retrieved.reason or "")
+        and retrieved.status == ApprovalStatus.EXPIRED
+        and retrieved.approver_id is None
+        and "expired" in (retrieved.reason or "").lower()
     )
 
     return {

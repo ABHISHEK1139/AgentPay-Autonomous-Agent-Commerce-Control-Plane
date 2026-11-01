@@ -40,6 +40,7 @@ from agentpay.domain.commerce import (
 from agentpay.domain.errors import (
     IdempotencyConflictError,
 )
+from agentpay.domain.identity import UserRole
 from agentpay.domain.money import Money
 
 
@@ -175,7 +176,11 @@ def probe_vector_10_approval_consumption_race_condition() -> dict[str, Any]:
 
         approval_svc = ApprovalService(approval_repo=approval_repo)
         approval_svc.grant_approval(
-            approval_id=appr_id, approver_id="approver_audit", tenant_id="tenant_01"
+            approval_id=appr_id,
+            approver_id="approver_audit",
+            tenant_id="tenant_01",
+            approver_role=UserRole.ADMIN,
+            caller_principal_id="approver_audit",
         )
 
         num_threads = 50
@@ -265,7 +270,11 @@ def probe_vector_10_with_simulated_db_latency() -> dict[str, Any]:
 
     approval_svc = ApprovalService(approval_repo=approval_repo)
     approval_svc.grant_approval(
-        approval_id=appr_id, approver_id="approver_audit", tenant_id="tenant_01"
+        approval_id=appr_id,
+        approver_id="approver_audit",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="approver_audit",
     )
 
     # Intercept approval_repo.atomic_consume to simulate 5ms DB IO latency

@@ -484,7 +484,7 @@ def test_x402_adapter_validation_errors() -> None:
 def test_api_acp_checkout_endpoint_success_and_errors() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # 1. Successful under-limit checkout
@@ -567,7 +567,7 @@ def test_api_acp_checkout_endpoint_success_and_errors() -> None:
 def test_api_ap2_mandates_endpoint_under_and_over_limit() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # 1. Under-limit mandate (autonomous execution)
@@ -621,7 +621,7 @@ def test_api_ap2_mandates_endpoint_under_and_over_limit() -> None:
 def test_api_uap_rpc_endpoint() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     payload = {
@@ -672,7 +672,7 @@ def test_api_uap_rpc_endpoint() -> None:
 def test_api_x402_pay_endpoint() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     payload = {
@@ -705,7 +705,7 @@ def test_api_x402_pay_endpoint() -> None:
 def test_emergency_kill_switch_blocks_all_protocol_endpoints() -> None:
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # Activate emergency kill switch (§21, §67)
@@ -717,7 +717,11 @@ def test_emergency_kill_switch_blocks_all_protocol_endpoints() -> None:
             {
                 "acp_version": "1.0",
                 "request_id": "r1",
-                "buyer": {"principal_id": "u", "agent_id": "a", "tenant_id": "tenant_01"},
+                "buyer": {
+                    "principal_id": "user_01",
+                    "agent_id": "agent_01",
+                    "tenant_id": "tenant_01",
+                },
                 "cart": {
                     "items": [{"product_id": "p", "unit_price_minor": 100, "currency": "INR"}]
                 },
@@ -728,7 +732,11 @@ def test_emergency_kill_switch_blocks_all_protocol_endpoints() -> None:
             {
                 "ap2_version": "1.0",
                 "payment_request_id": "r2",
-                "payer": {"principal_id": "u", "agent_id": "a", "tenant_id": "tenant_01"},
+                "payer": {
+                    "principal_id": "user_01",
+                    "agent_id": "agent_01",
+                    "tenant_id": "tenant_01",
+                },
                 "payee": {"merchant_id": "m", "order_ref": "o"},
                 "amount": {"minor_units": 100, "currency": "INR"},
             },
@@ -738,7 +746,7 @@ def test_emergency_kill_switch_blocks_all_protocol_endpoints() -> None:
             {
                 "uap_version": "1.0",
                 "message_id": "r3",
-                "header": {"sender": "s", "tenant": "tenant_01", "principal": "p"},
+                "header": {"sender": "s", "tenant": "tenant_01", "principal": "user_01"},
                 "payload": {
                     "capability": "commerce.purchase",
                     "parameters": {"product_id": "p", "price_minor": 100},
@@ -752,8 +760,8 @@ def test_emergency_kill_switch_blocks_all_protocol_endpoints() -> None:
                 "challenge_id": "r4",
                 "resource_uri": "https://data.com",
                 "amount_minor": 100,
-                "agent_id": "a",
-                "principal_id": "p",
+                "agent_id": "agent_01",
+                "principal_id": "user_01",
                 "tenant_id": "tenant_01",
             },
         ),
@@ -844,7 +852,7 @@ def test_malformed_protocol_input_raises_malformed_payload_error() -> None:
     # 4. HTTP API returns 422 on malformed body, never HTTP 500
     orch, _, _, _, _, _, _, _, _, _, _ = setup_orchestrator("tenant_01")
     app = AgentPayApiApp(orchestrator=orch)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
 
     endpoints = [
         "/api/v1/protocols/acp/checkout",

@@ -9,6 +9,7 @@ Following Clean Architecture (§8, §10):
 from __future__ import annotations
 
 import hashlib
+import hmac
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -571,14 +572,38 @@ class Credential:
         return at > self.expires_at
 
     def verify_secret(self, plaintext: str) -> bool:
-        """Verify whether a plaintext secret matches this credential's stored hash."""
-        computed = hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
-        return computed == self.secret_hash
+        """Verify whether a plaintext secret matches this credential's stored hash.
+
+        The comparison is constant-time so a caller cannot learn the stored hash
+        byte-by-byte from response timing (§14, §59). Empty input never verifies.
+        """
+        plaintext_obj: object = plaintext
+        if not isinstance(plaintext_obj, str) or not plaintext_obj:
+            return False
+        computed = hashlib.sha256(plaintext_obj.encode("utf-8")).hexdigest()
+        return hmac.compare_digest(computed, self.secret_hash)
+
+    def has_scope(self, scope: str) -> bool:
+        """Return whether this credential grants a scope (§14, §17).
+
+        Scopes are explicit and additive. The ``*`` wildcard is reserved for
+        deliberately provisioned operator credentials and never granted implicitly.
+        """
+        return "*" in self.scopes or scope in self.scopes
 
     @staticmethod
     def hash_secret(plaintext: str) -> str:
-        """Compute the deterministic SHA-256 hash of a plaintext secret."""
-        return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+        """Compute the deterministic SHA-256 hash of a plaintext secret.
+
+        Machine credentials are high-entropy random values, so a fast indexed hash
+        is appropriate; a slow password KDF would add latency without protecting the
+        deterministic lookup. Blank secrets are refused so a credential can never be
+        created with the well-known hash of the empty string (§14, §58, §59).
+        """
+        plaintext_obj: object = plaintext
+        if not isinstance(plaintext_obj, str) or not plaintext_obj.strip():
+            raise InvalidIdentityError("plaintext secret must be a non-empty string")
+        return hashlib.sha256(plaintext_obj.encode("utf-8")).hexdigest()
 
     def has_role(self, required_role: UserRole) -> bool:
         return self.role == required_role

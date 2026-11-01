@@ -65,12 +65,14 @@ from agentpay.domain.errors import (
     IdempotencyConflictError,
     PrivilegeEscalationAttemptError,
 )
+from agentpay.domain.evidence import EvidenceType
 from agentpay.domain.identity import (
     Agent,
     AgentPermissions,
     AgentStatus,
     Tenant,
     TenantStatus,
+    UserRole,
 )
 from agentpay.domain.money import Money
 from agentpay.domain.payments import OrderStatus, PaymentAttempt, PaymentStatus
@@ -279,6 +281,67 @@ def test_scenario_1_autonomous_purchase_allow() -> None:
     assert audit_ledger.verify_chain("tenant_01") is True
 
 
+def test_execute_purchase_persists_catalog_evidence_provenance() -> None:
+    """Successful purchases persist immutable catalog evidence readable per product or variant (§32, §38)."""
+    (orchestrator, _, _, _, _, _, _, _, _, _, _) = setup_orchestrator()
+
+    action = ActionRequest(
+        action_id="act_evidence_01",
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        agent_id="agent_01",
+        domain="commerce",
+        action="purchase",
+        resource=ResourceRef(type="computers", id="prod_01"),
+        requested_at=datetime.now(UTC),
+        intent=Intent(purpose="evidence provenance"),
+        amount=Money(129900, "INR"),
+        authorization_mode=AuthorizationMode.AUTONOMOUS,
+    )
+
+    result = orchestrator.execute_purchase(
+        action=action,
+        tenant_id="tenant_01",
+        variant_id="var_01",
+        quantity=1,
+    )
+    assert result.status == ActionStatus.COMPLETED
+
+    evidence_repo = orchestrator._evidence_repo
+    assert evidence_repo is not None
+    variant_records = evidence_repo.list_for_resource("tenant_01", "var_01")
+    recorded = {(e.field_name, e.evidence_type) for e in variant_records}
+    assert ("price", EvidenceType.PRICE) in recorded
+    assert ("available", EvidenceType.INVENTORY) in recorded
+    product_records = evidence_repo.list_for_resource("tenant_01", "prod_01")
+    product_fields = {e.field_name for e in product_records}
+    assert {"category", "name", "merchant_id"} <= product_fields
+    assert all(e.source.type.value == "MERCHANT_CATALOG" for e in variant_records + product_records)
+
+    payload = orchestrator.list_catalog_evidence("tenant_01", "prod_01")
+    assert payload["product_id"] == "prod_01"
+    assert payload["variant_id"] is None
+    assert len(payload["evidence"]) == len(variant_records) + len(product_records)
+    observed = [(e["observed_at"], e["evidence_id"]) for e in payload["evidence"]]
+    assert observed == sorted(observed)
+
+    variant_payload = orchestrator.list_catalog_evidence("tenant_01", "var_01")
+    assert variant_payload["product_id"] == "prod_01"
+    assert variant_payload["variant_id"] == "var_01"
+    assert len(variant_payload["evidence"]) == len(payload["evidence"])
+
+    unknown_payload = orchestrator.list_catalog_evidence("tenant_01", "var_missing")
+    assert unknown_payload == {
+        "resource_id": "var_missing",
+        "product_id": None,
+        "variant_id": None,
+        "evidence": [],
+    }
+
+    cross_tenant_payload = orchestrator.list_catalog_evidence("tenant_other", "prod_01")
+    assert cross_tenant_payload["evidence"] == []
+
+
 def test_scenario_2_approval_gated_flow() -> None:
     """Scenario 2: ₹8,000 requested, limit ₹2,000 -> REVIEW -> Approval created -> Approved -> Executes (§112)."""
     (
@@ -349,6 +412,8 @@ def test_scenario_2_approval_gated_flow() -> None:
         approval_id=result.approval.approval_id,
         approver_id="manager_dave",
         tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="manager_dave",
     )
     assert approved_record.status == ApprovalStatus.APPROVED
 
@@ -644,6 +709,7 @@ def test_scenario_7_privilege_escalation_denial() -> None:
             permissions=proposed_perms,
             caller_principal_id="agent_01",
             caller_is_agent=True,
+            caller_role=None,
         )
 
     # Attempting to widen limits directly raises PrivilegeEscalationAttemptError
@@ -846,6 +912,8 @@ def test_b_auth_02_revoked_or_suspended_agent_approved_purchase_denied() -> None
         approval_id=approval_id,
         approver_id="manager_dave",
         tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="manager_dave",
     )
 
     # Step 3: Agent is revoked before execution!
@@ -935,6 +1003,8 @@ def test_b_drift_01_catalog_price_drift_approved_purchase_denied() -> None:
         approval_id=approval_id,
         approver_id="manager_dave",
         tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="manager_dave",
     )
 
     # Merchant drifts catalog price by 1 minor unit / paise (₹8000.01)
@@ -1032,6 +1102,8 @@ def test_b_idem_01_execute_approved_purchase_idempotent_retry() -> None:
         approval_id=approval_id,
         approver_id="manager_dave",
         tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="manager_dave",
     )
 
     # First execution succeeds

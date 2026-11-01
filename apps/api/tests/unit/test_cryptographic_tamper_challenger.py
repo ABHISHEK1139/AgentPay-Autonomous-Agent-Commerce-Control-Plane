@@ -41,6 +41,7 @@ from agentpay.domain.evidence import (
     ConflictType,
     EvidenceConflictDetector,
 )
+from agentpay.domain.identity import UserRole
 from agentpay.domain.money import Money
 from agentpay.domain.policy import PolicyDecision
 
@@ -550,7 +551,13 @@ def test_vector_09_empirical_proof_multistep_suspension_fails_open() -> None:
 
     # Step 2: Human grants approval
     approval_svc = ApprovalService(approval_repo=approval_repo)
-    approval_svc.grant_approval(approval_id, "human_approver", "tenant_01")
+    approval_svc.grant_approval(
+        approval_id,
+        "human_approver",
+        "tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="human_approver",
+    )
 
     # Step 3: TAMPER / TRANSITION: Merchant is SUSPENDED before execution
     merchant = merchant_repo.get("tenant_01", "merch_01")
@@ -621,7 +628,13 @@ def test_vector_09_multistep_suspension_contract_must_fail_closed() -> None:
     r1 = orch.execute_purchase(action, "tenant_01", "var_appr_contract")
     assert r1.approval is not None
     approval_svc = ApprovalService(approval_repo=approval_repo)
-    approval_svc.grant_approval(r1.approval.approval_id, "human_approver", "tenant_01")
+    approval_svc.grant_approval(
+        r1.approval.approval_id,
+        "human_approver",
+        "tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="human_approver",
+    )
 
     # Suspend merchant
     merchant = merchant_repo.get("tenant_01", "merch_01")

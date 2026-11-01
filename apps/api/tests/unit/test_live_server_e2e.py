@@ -351,6 +351,36 @@ def test_live_server_unauthenticated_rejection_and_trace_id(
     assert "Invalid authentication credentials" in err.message
 
 
+def _open_expected_rejection(req: urllib.request.Request) -> tuple[int, dict[str, Any]]:
+    """Send a request expected to be rejected and return (status, error body).
+
+    On Windows the server can reset the connection after emitting the rejection
+    (WinError 10053) while the declared oversized body is still in flight, so the
+    client-side read may abort even though the request was refused. Retry a bounded
+    number of times; every HTTP response that arrives must still be the rejection
+    asserted by the caller. A response is never accepted from a 2xx path.
+    """
+    last_error: BaseException | None = None
+    for _ in range(3):
+        try:
+            urllib.request.urlopen(req, timeout=5)
+        except urllib.error.HTTPError as exc:
+            try:
+                body: dict[str, Any] = json.loads(exc.read().decode("utf-8"))
+            except ConnectionError as read_err:  # pragma: no cover - Windows RST race
+                last_error = read_err
+                exc.close()
+                continue
+            exc.close()
+            return exc.code, body
+        except ConnectionError as conn_err:  # pragma: no cover - Windows RST race
+            last_error = conn_err
+            continue
+        else:
+            raise AssertionError("Expected request rejection but server responded successfully")
+    raise AssertionError(f"Server never delivered a rejection response: {last_error!r}")
+
+
 def test_live_server_request_body_size_limit_rejection(
     live_server: tuple[str, int],
 ) -> None:
@@ -367,13 +397,9 @@ def test_live_server_request_body_size_limit_rejection(
         },
         method="POST",
     )
-    with pytest.raises(urllib.error.HTTPError) as exc_info:
-        urllib.request.urlopen(req, timeout=5)
-
-    assert exc_info.value.code == 413
-    resp_body = json.loads(exc_info.value.read().decode("utf-8"))
+    status_code, resp_body = _open_expected_rejection(req)
+    assert status_code == 413
     assert resp_body["error"]["code"] == "PAYLOAD_TOO_LARGE"
-    exc_info.value.close()
 
     # 2. Non-integer Content-Length is rejected with HTTP 400
     req_bad_cl = urllib.request.Request(
@@ -385,10 +411,6 @@ def test_live_server_request_body_size_limit_rejection(
         },
         method="POST",
     )
-    with pytest.raises(urllib.error.HTTPError) as exc_info_bad:
-        urllib.request.urlopen(req_bad_cl, timeout=5)
-
-    assert exc_info_bad.value.code == 400
-    resp_body_bad = json.loads(exc_info_bad.value.read().decode("utf-8"))
+    status_code_bad, resp_body_bad = _open_expected_rejection(req_bad_cl)
+    assert status_code_bad == 400
     assert resp_body_bad["error"]["code"] == "INVALID_CONTENT_LENGTH"
-    exc_info_bad.value.close()

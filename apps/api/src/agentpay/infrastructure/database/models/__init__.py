@@ -6,6 +6,7 @@ from agentpay.infrastructure.database.base import Base, TenantScopedMixin, Times
 from agentpay.infrastructure.database.models.agent import AgentModel
 from agentpay.infrastructure.database.models.approval import ApprovalModel
 from agentpay.infrastructure.database.models.audit import AuditEventModel
+from agentpay.infrastructure.database.models.cart import CartItemModel, CartModel
 from agentpay.infrastructure.database.models.commerce import (
     EvidenceModel,
     InventoryModel,
@@ -39,6 +40,8 @@ __all__ = [
     "ApprovalModel",
     "AuditEventModel",
     "Base",
+    "CartItemModel",
+    "CartModel",
     "CredentialModel",
     "EmergencyPauseRecordModel",
     "EvidenceModel",

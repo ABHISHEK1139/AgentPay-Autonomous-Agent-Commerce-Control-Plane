@@ -28,6 +28,7 @@ class OrderModel(Base):
     total_amount_currency: Mapped[str] = mapped_column(String(3), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="PENDING_PAYMENT", nullable=False)
     payment_attempt_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    cancellation_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -57,6 +58,7 @@ class OrderModel(Base):
             status=OrderStatus(self.status),
             payment_attempt_id=self.payment_attempt_id,
             created_at=created_at,
+            cancellation_reason=self.cancellation_reason,
         )
 
     @classmethod
@@ -74,5 +76,6 @@ class OrderModel(Base):
             total_amount_currency=order.total_amount.currency,
             status=order.status.value,
             payment_attempt_id=order.payment_attempt_id,
+            cancellation_reason=order.cancellation_reason,
             created_at=order.created_at,
         )

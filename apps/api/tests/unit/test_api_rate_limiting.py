@@ -45,7 +45,7 @@ def test_under_limit_actions_succeed_with_rate_limit_headers() -> None:
     """Requests within the token bucket capacity succeed with 200 and include rate limit headers."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=5)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     status, body = client.post(
@@ -73,7 +73,7 @@ def test_high_volume_bursting_triggers_http_429() -> None:
         mutating_agent_capacity=3,
         mutating_agent_refill_rate=1.0,
     )
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # 3 requests succeed
@@ -110,6 +110,37 @@ def test_high_volume_bursting_triggers_http_429() -> None:
     assert retry_after >= 1
 
 
+def test_body_agent_id_cannot_rotate_the_rate_limit_bucket() -> None:
+    """A caller cannot evade its own limit by varying the body agent_id (§62)."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(
+        orchestrator=orch,
+        mutating_agent_capacity=2,
+        mutating_tenant_capacity=100,
+    )
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
+    headers = {"x-tenant-id": "tenant_01"}
+
+    # Exhaust the authenticated principal's bucket.
+    for i in range(2):
+        status, _ = client.post(
+            "/api/v1/actions",
+            json_body=_action_payload(f"act_bucket_{i}"),
+            headers=headers,
+        )
+        assert status == 200
+
+    # Rotating the body agent_id must not create a fresh bucket.
+    status, body = client.post(
+        "/api/v1/actions",
+        json_body=_action_payload("act_bucket_rotated", agent_id="agent_02"),
+        headers=headers,
+    )
+    assert status == 429
+    assert body["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    assert body["error"]["details"]["scope"] == "agent"
+
+
 def test_dual_tier_tenant_exhaustion_triggers_tenant_scope_429() -> None:
     """When the aggregate tenant capacity is exhausted across multiple agents, 429 has scope='tenant'."""
     orch, *_ = setup_orchestrator()
@@ -120,7 +151,7 @@ def test_dual_tier_tenant_exhaustion_triggers_tenant_scope_429() -> None:
         mutating_tenant_capacity=2,
         mutating_tenant_refill_rate=0.5,
     )
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # Agent 1 uses 1 token
@@ -152,15 +183,94 @@ def test_dual_tier_tenant_exhaustion_triggers_tenant_scope_429() -> None:
     assert body["error"]["details"]["remaining"] == 0
 
 
+def _mirror_seeded_tenant(
+    source: tuple[Any, ...],
+    tenant_id: str,
+    target_repos: tuple[Any, Any, Any, Any, Any, Any, Any],
+) -> None:
+    """Copy a fully seeded tenant partition from one orchestrator into another.
+
+    Rate-limit isolation must be proven on the real purchase path, which requires
+    a second tenant with its own agent, permissions, catalog, and inventory (§49,
+    §50, §62).
+    """
+    (
+        _orchestrator,
+        source_tenants,
+        source_agents,
+        source_permissions,
+        source_merchants,
+        source_products,
+        source_variants,
+        source_inventory,
+        *_rest,
+    ) = source
+    (
+        tenant_repo,
+        agent_repo,
+        perms_repo,
+        merchant_repo,
+        product_repo,
+        variant_repo,
+        inventory_repo,
+    ) = target_repos
+
+    tenant = source_tenants.get(tenant_id)
+    agent = source_agents.get(tenant_id, "agent_01")
+    permissions = source_permissions.get(tenant_id, "agent_01")
+    merchant = source_merchants.get(tenant_id, "merch_01")
+    product = source_products.get(tenant_id, "prod_01")
+    variant = source_variants.get(tenant_id, "var_01")
+    inventory = source_inventory.get(tenant_id, "var_01")
+    assert tenant is not None
+    assert agent is not None
+    assert permissions is not None
+    assert merchant is not None
+    assert product is not None
+    assert variant is not None
+    assert inventory is not None
+
+    tenant_repo.save(tenant)
+    agent_repo.save(tenant_id, agent)
+    perms_repo.save(tenant_id, permissions)
+    merchant_repo.save(tenant_id, merchant)
+    product_repo.save(tenant_id, product)
+    variant_repo.save(tenant_id, variant)
+    inventory_repo.save(tenant_id, inventory)
+
+
 def test_independent_tenant_isolation() -> None:
     """Exhausting tenant_01 rate limit does not affect tenant_02."""
-    orch, *_ = setup_orchestrator()
+    (
+        orch,
+        tenant_repo,
+        agent_repo,
+        perms_repo,
+        merchant_repo,
+        product_repo,
+        variant_repo,
+        inventory_repo,
+        *_rest,
+    ) = setup_orchestrator()
+    _mirror_seeded_tenant(
+        setup_orchestrator(tenant_id="tenant_02"),
+        "tenant_02",
+        (
+            tenant_repo,
+            agent_repo,
+            perms_repo,
+            merchant_repo,
+            product_repo,
+            variant_repo,
+            inventory_repo,
+        ),
+    )
     app = AgentPayApiApp(
         orchestrator=orch,
         mutating_agent_capacity=2,
         mutating_tenant_capacity=2,
     )
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
 
     # Exhaust tenant_01
     for i in range(2):
@@ -179,7 +289,7 @@ def test_independent_tenant_isolation() -> None:
     assert status_blocked == 429
 
     # tenant_02 is completely unaffected
-    token_t2 = client.create_token(tenant_id="tenant_02", principal_id="usr_t2")
+    token_t2 = client.create_token(tenant_id="tenant_02", principal_id="user_01")
     status_t2, _body_t2 = client.post(
         "/api/v1/actions",
         json_body=_action_payload("act_t2_1"),
@@ -190,19 +300,59 @@ def test_independent_tenant_isolation() -> None:
 
 def test_independent_agent_isolation_within_same_tenant() -> None:
     """Agent A exhausting its limit does not immediately block Agent B within the same tenant."""
-    orch, *_ = setup_orchestrator()
+    from datetime import UTC, datetime, timedelta
+
+    from agentpay.domain.identity import Agent, AgentPermissions, AgentStatus
+    from agentpay.domain.policy import SpendingLimits
+
+    orch, _tenant_repo, agent_repo, perms_repo, *_rest = setup_orchestrator()
+    now = datetime.now(UTC)
+    for agent_id in ("agent_a", "agent_b"):
+        agent_repo.save(
+            "tenant_01",
+            Agent(
+                agent_id=agent_id,
+                tenant_id="tenant_01",
+                principal_id="user_01",
+                issuer="https://auth.agentpay.local",
+                capabilities=("catalog.search", "payment.request", "checkout.prepare"),
+                scopes=("commerce:read", "commerce:write"),
+                created_at=now,
+                expires_at=now + timedelta(days=30),
+                status=AgentStatus.ACTIVE,
+            ),
+        )
+        perms_repo.save(
+            "tenant_01",
+            AgentPermissions(
+                agent_id=agent_id,
+                tenant_id="tenant_01",
+                capabilities=("catalog.search", "payment.request", "checkout.prepare"),
+                limits=SpendingLimits(
+                    per_transaction_minor=2000000,
+                    daily_minor=5000000,
+                    requires_approval_above_minor=200000,
+                ),
+                allowed_categories=("electronics", "computers"),
+                requires_approval_above_minor=200000,
+            ),
+        )
+
     # Agent limit = 2, Tenant limit = 10
     app = AgentPayApiApp(
         orchestrator=orch,
         mutating_agent_capacity=2,
         mutating_tenant_capacity=10,
     )
-    client = ApiTestClient(app).as_buyer()
+    # Buckets key off the authenticated principal, so each agent must authenticate
+    # as itself rather than sharing one buyer identity (§62).
+    client_a = ApiTestClient(app).as_agent("agent_a")
+    client_b = ApiTestClient(app).as_agent("agent_b")
     headers = {"x-tenant-id": "tenant_01"}
 
     # Agent A exhausts its 2 tokens
     for i in range(2):
-        status, _ = client.post(
+        status, _ = client_a.post(
             "/api/v1/actions",
             json_body=_action_payload(f"act_a_{i}", agent_id="agent_a"),
             headers=headers,
@@ -210,7 +360,7 @@ def test_independent_agent_isolation_within_same_tenant() -> None:
         assert status == 200
 
     # Agent A is blocked
-    status_a_blocked, _ = client.post(
+    status_a_blocked, _ = client_a.post(
         "/api/v1/actions",
         json_body=_action_payload("act_a_over", agent_id="agent_a"),
         headers=headers,
@@ -218,7 +368,7 @@ def test_independent_agent_isolation_within_same_tenant() -> None:
     assert status_a_blocked == 429
 
     # Agent B has independent tokens and succeeds
-    status_b, _ = client.post(
+    status_b, _ = client_b.post(
         "/api/v1/actions",
         json_body=_action_payload("act_b_1", agent_id="agent_b"),
         headers=headers,
@@ -230,7 +380,7 @@ def test_protocol_adapters_rate_limiting() -> None:
     """Protocol endpoints (ACP, AP2, UAP, x402) are subject to mutating rate limits."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=2)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     acp_payload = {
@@ -278,7 +428,7 @@ def test_tool_execution_rate_limiting() -> None:
     """Tool invocation endpoints are throttled under mutating route limits."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=2)
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     tool_payload = {"agent_id": "agent_01", "parameters": {"query": "laptop"}}
@@ -309,7 +459,7 @@ def test_read_only_catalog_endpoints_bypass_mutating_limits() -> None:
         mutating_agent_capacity=1,
         read_agent_capacity=50,
     )
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # Exhaust mutating action limit
@@ -346,7 +496,7 @@ def test_health_and_openapi_endpoints_bypass_rate_limiting() -> None:
         mutating_agent_capacity=0,  # zero capacity
         read_agent_capacity=0,
     )
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
 
     status_h, body_h = client.get("/api/v1/health", auth=False)
     assert status_h == 200
@@ -369,7 +519,7 @@ def test_rate_limit_refill_recovery() -> None:
         mutating_agent_capacity=2,
         mutating_agent_refill_rate=1.0,  # 1 token per second
     )
-    client = ApiTestClient(app).as_buyer()
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
 
     # Use 2 tokens
@@ -402,8 +552,8 @@ def test_handle_request_with_headers_tuple_return() -> None:
     """handle_request_with_headers returns a 3-tuple (status_code, body, headers)."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=1)
-    client = ApiTestClient(app).as_buyer()
-    token = client.get_or_create_token("tenant_01")
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
+    token = client.get_or_create_token("tenant_01", principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01", "authorization": f"Bearer {token}"}
 
     # 1st request succeeds
@@ -426,8 +576,8 @@ def test_asgi_429_response_headers() -> None:
     """Raw ASGI dispatch emits [b'retry-after', ...] in http.response.start headers on 429."""
     orch, *_ = setup_orchestrator()
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=1)
-    client = ApiTestClient(app).as_buyer()
-    token = client.get_or_create_token("tenant_01")
+    client = ApiTestClient(app).as_buyer(principal_id="user_01")
+    token = client.get_or_create_token("tenant_01", principal_id="user_01")
 
     async def call_asgi(payload: dict[str, Any]) -> tuple[int, list[list[bytes]], dict[str, Any]]:
         sent_messages: list[dict[str, Any]] = []

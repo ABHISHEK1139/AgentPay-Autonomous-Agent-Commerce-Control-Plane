@@ -1,0 +1,50 @@
+# Gitleaks configuration for AgentPay.
+#
+# Default rules are extended; this file only excludes scanned trees that cannot contain
+# production secrets (dependency and build artifacts) and the explicitly synthetic
+# placeholder values used by the hermetic test suites and documentation examples.
+# Anything not matching these exact patterns is still reported.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Dependency trees, build output, and named synthetic test placeholders"
+paths = [
+    '''(^|/)\.venv/''',
+    '''(^|/)node_modules/''',
+    '''(^|/)dist/''',
+    '''(^|/)\.mypy_cache/''',
+    '''(^|/)__pycache__/''',
+]
+regexes = [
+    # Explicit test placeholders (never real credentials)
+    '''test_bearer_(admin|agent)_token''',
+    '''sk_test_placeholder''',
+    '''sk-or-v1-valid-test-key-32chars''',
+    '''sk-orca-valid-test-key-32chars''',
+    '''pi_123_secret_xyz''',
+    # Synthetic webhook signing secrets used by crypto/webhook probes
+    '''whsec_canary_razorpay_whsec_32bytes''',
+    '''whsec_live_test_secret_32bytes_len''',
+    '''whsec_m7_prod_signing_secret''',
+    '''whsec_rzp_crypto_secret_32bytes_len''',
+    '''whsec_test_razorpay_secret_32bytes''',
+    '''whsec_test_rzp_signature_key_99''',
+    '''whsec_wrong_attacker_secret_key_12345678''',
+    # Synthetic Razorpay/Stripe canary secrets
+    '''sec_canary_rzp_secret_32bytes_safe''',
+    '''sec_e2e_valid_secret_32bytes''',
+    '''sec_valid_secret_32bytes''',
+    '''wrong_attacker_secret_32bytes_len''',
+    '''wrong_secret_12345678901234567890''',
+    # Idempotency keys and test identifiers that trip the generic-api-key entropy rule
+    '''(acp|ap2)_idem_[0-9]+''',
+    '''idem_(att_refund_01|short_key_25_chars)''',
+    '''idemp_key_unique_[0-9]+''',
+    '''key_burst_identical_[0-9]+''',
+    '''short_key_20_chars''',
+    '''acp_empty_body_422''',
+    '''api_ap2_(bool_amount_rejected|float_rejected)''',
+    '''api_x402_(bool_rejected|float_rejected|negative_rejected)''',
+]

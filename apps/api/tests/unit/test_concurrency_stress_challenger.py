@@ -35,6 +35,7 @@ from agentpay.domain.commerce import (
 from agentpay.domain.errors import (
     IdempotencyConflictError,
 )
+from agentpay.domain.identity import UserRole
 from agentpay.domain.money import Money
 from agentpay.domain.policy import PolicyDecision
 
@@ -231,7 +232,11 @@ def test_vector_10_concurrent_multithreaded_approval_consumption_single_winner()
     # Step 2: Human approver grants approval
     approval_svc = ApprovalService(approval_repo=approval_repo)
     approval_svc.grant_approval(
-        approval_id=appr_id, approver_id="approver_bob", tenant_id="tenant_01"
+        approval_id=appr_id,
+        approver_id="approver_bob",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="approver_bob",
     )
 
     # Step 3: Launch 20 concurrent threads racing to execute the same approved action
@@ -319,7 +324,11 @@ def test_vector_10_approval_consumption_toctou_race_with_db_latency() -> None:
 
     approval_svc = ApprovalService(approval_repo=approval_repo)
     approval_svc.grant_approval(
-        approval_id=appr_id, approver_id="approver_bob", tenant_id="tenant_01"
+        approval_id=appr_id,
+        approver_id="approver_bob",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="approver_bob",
     )
 
     orig_consume = approval_repo.atomic_consume

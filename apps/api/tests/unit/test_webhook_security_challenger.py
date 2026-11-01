@@ -112,6 +112,7 @@ def test_challenger_probe_1_forged_signatures() -> None:
     # Tampered payload after signature computation
     app, client, _ = _seed_test_env()
     secret = app.webhook_secret
+    assert secret is not None
     ts = int(time.time())
     legit_payload = {
         "event_id": "evt_tamper_body",

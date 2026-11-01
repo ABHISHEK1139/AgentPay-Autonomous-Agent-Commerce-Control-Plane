@@ -1,12 +1,13 @@
 """Comprehensive unit tests for relational persistence and multi-tenant isolation (§49, §50, §51).
 
 Verifies:
-1. Hermetic SQLite in-memory round-trip persistence across all 7 repositories.
+1. Hermetic SQLite in-memory round-trip persistence across all core repositories.
 2. Exact domain model equality on round-trip retrieval.
 3. Money integer minor units and ISO currency fidelity.
 4. Strict multi-tenant isolation and cross-tenant denial.
 5. Unique constraint enforcement (e.g. idempotency key per tenant).
 6. Tamper-evident audit chain persistence and verification.
+7. Cart aggregate persistence with ordered line items (ADR-0006).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from agentpay.domain.audit import (
     AuditEventType,
     AuditHasher,
 )
+from agentpay.domain.cart import Cart, CartItem, CartStatus
 from agentpay.domain.commerce import Product, ProductVariant
 from agentpay.domain.errors import (
     AgentRevokedError,
@@ -62,6 +64,9 @@ from agentpay.infrastructure.database.repositories.approval_repository import (
 )
 from agentpay.infrastructure.database.repositories.audit_ledger import (
     SqlAlchemyAuditRepository,
+)
+from agentpay.infrastructure.database.repositories.cart_repository import (
+    SqlAlchemyCartRepository,
 )
 from agentpay.infrastructure.database.repositories.commerce_repository import (
     SqlAlchemyProductRepository,
@@ -372,6 +377,14 @@ def test_order_repository_roundtrip(session_factory: sessionmaker[Session]) -> N
     assert len(buyer_orders) == 1
     assert buyer_orders[0].order_id == "ord_987654"
 
+    # Cancellation reason survives the relational round trip (§41, §45)
+    cancelled = updated_order.cancel(reason="Payment declined")
+    order_repo.save(cancelled)
+    reloaded = order_repo.get("tenant_orders", "ord_987654")
+    assert reloaded is not None
+    assert reloaded.status == OrderStatus.CANCELLED
+    assert reloaded.cancellation_reason == "Payment declined"
+
     # Multi-tenant isolation
     assert order_repo.get("tenant_other", "ord_987654") is None
 
@@ -558,6 +571,7 @@ def test_approval_repository_roundtrip_and_atomic_consume(
         currency="USD",
         action_version=1,
         tenant_id="tenant_appr",
+        agent_id="agent_procure_99",
         principal_id="user_procure_99",
     )
     approval = Approval(
@@ -576,6 +590,7 @@ def test_approval_repository_roundtrip_and_atomic_consume(
     assert retrieved.tenant_id == "tenant_appr"
     assert retrieved.status == ApprovalStatus.PENDING
     assert retrieved.binding.principal_id == "user_procure_99"
+    assert retrieved.binding.agent_id == "agent_procure_99"
     assert retrieved.binding.amount.minor_units == 75000
     assert retrieved.binding.amount.currency == "USD"
     assert retrieved.binding.merchant_id == "merch_dell"
@@ -624,3 +639,85 @@ def test_approval_repository_roundtrip_and_atomic_consume(
     # 8. Consuming nonexistent approval raises InvalidCommerceError
     with pytest.raises(InvalidCommerceError):
         approval_repo.atomic_consume("tenant_appr", "nonexistent_appr")
+
+
+# ============================================================================
+# 9. Cart Persistence, Ordered Line Items & Multi-Tenant Isolation (ADR-0006)
+# ============================================================================
+def test_cart_repository_roundtrip_and_mutations(
+    session_factory: sessionmaker[Session],
+) -> None:
+    tenant_repo = SqlAlchemyTenantRepository(session_factory)
+    tenant_repo.save(Tenant(tenant_id="tenant_cart", name="Cart Tenant"))
+    tenant_repo.save(Tenant(tenant_id="tenant_other", name="Other Tenant"))
+
+    cart_repo = SqlAlchemyCartRepository(session_factory)
+
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    t1 = t0 + timedelta(minutes=1)
+    t2 = t0 + timedelta(minutes=2)
+    t3 = t0 + timedelta(minutes=3)
+
+    cart = Cart(
+        cart_id="cart_01",
+        tenant_id="tenant_cart",
+        principal_id="user_buyer_01",
+        agent_id="agent_shopper",
+        merchant_id="merch_01",
+        items=(CartItem(variant_id="var_a", quantity=1), CartItem(variant_id="var_b", quantity=2)),
+        created_at=t0,
+        updated_at=t0,
+    )
+
+    # 1. Save and retrieve with exact domain equality
+    cart_repo.save("tenant_cart", cart)
+    retrieved = cart_repo.get("tenant_cart", "cart_01")
+    assert retrieved is not None
+    assert retrieved == cart
+    assert retrieved.status is CartStatus.ACTIVE
+    assert retrieved.items == (CartItem("var_a", 1), CartItem("var_b", 2))
+    assert retrieved.total_quantity == 3
+    assert retrieved.created_at.tzinfo == UTC
+    assert retrieved.updated_at.tzinfo == UTC
+
+    # 2. Merge an existing variant quantity, add a new one, remove one
+    mutated = cart.add_item("var_a", 2, now=t1)
+    mutated = mutated.add_item("var_c", 1, merchant_id="merch_01", now=t2)
+    mutated = mutated.remove_item("var_b", now=t3)
+    cart_repo.save("tenant_cart", mutated)
+
+    updated = cart_repo.get("tenant_cart", "cart_01")
+    assert updated is not None
+    assert updated == mutated
+    assert updated.items == (CartItem("var_a", 3), CartItem("var_c", 1))
+    # Line-item replacement must not leave stale rows behind
+    assert updated.get_item("var_b") is None
+
+    # 3. Terminal checkout state persists
+    checked_out = mutated.mark_checked_out(now=t3)
+    cart_repo.save("tenant_cart", checked_out)
+    persisted_checked_out = cart_repo.get("tenant_cart", "cart_01")
+    assert persisted_checked_out is not None
+    assert persisted_checked_out.status is CartStatus.CHECKED_OUT
+    with pytest.raises(InvalidCommerceError):
+        persisted_checked_out.add_item("var_x", 1)
+
+    # 4. list_for_principal returns carts for the principal in created_at order
+    second_cart = Cart(
+        cart_id="cart_02",
+        tenant_id="tenant_cart",
+        principal_id="user_buyer_01",
+        agent_id="agent_shopper",
+        created_at=t1,
+        updated_at=t1,
+    )
+    cart_repo.save("tenant_cart", second_cart)
+    carts = cart_repo.list_for_principal("tenant_cart", "user_buyer_01")
+    assert [c.cart_id for c in carts] == ["cart_01", "cart_02"]
+    assert cart_repo.list_for_principal("tenant_cart", "user_other") == []
+
+    # 5. Strict multi-tenant isolation
+    assert cart_repo.get("tenant_other", "cart_01") is None
+    assert cart_repo.list_for_principal("tenant_other", "user_buyer_01") == []
+    with pytest.raises(CrossTenantAccessError):
+        cart_repo.save("tenant_other", cart)

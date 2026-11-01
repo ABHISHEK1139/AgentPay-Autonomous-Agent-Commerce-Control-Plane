@@ -59,6 +59,7 @@ from agentpay.domain.identity import (
     AgentPermissions,
     AgentStatus,
     Tenant,
+    UserRole,
 )
 from agentpay.domain.money import Money
 from agentpay.domain.policy import PolicyDecision, SpendingLimits
@@ -180,9 +181,15 @@ def probe_cross_principal_replay_rejection() -> dict[str, Any]:
         resource_id="prod_01",
         amount_minor=129900,
     )
-    approval = orch._approval_service.create_approval(alice_action, tenant_id="tenant_01")
+    approval = orch._approval_service.create_approval(
+        alice_action, tenant_id="tenant_01", merchant_id="merch_01"
+    )
     orch._approval_service.grant_approval(
-        approval.approval_id, approver_id="manager_01", tenant_id="tenant_01"
+        approval.approval_id,
+        approver_id="manager_01",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="manager_01",
     )
 
     # 2. Bob attempts to execute Alice's approval directly via orchestrator
@@ -204,7 +211,12 @@ def probe_cross_principal_replay_rejection() -> dict[str, Any]:
         )
         violations.append("Cross-principal execution did not raise ApprovalBindingMismatchError")
     except ApprovalBindingMismatchError as err:
-        if "user_alice" not in str(err) or "user_bob" not in str(err):
+        # Accept either principal or agent mismatch, as both are bound (§20).
+        error_text = str(err)
+        if not (
+            ("user_alice" in error_text and "user_bob" in error_text)
+            or ("agent_alice" in error_text and "agent_bob" in error_text)
+        ):
             violations.append(f"Unexpected error message on principal mismatch: {err}")
     except Exception as exc:
         violations.append(f"Unexpected exception type: {type(exc).__name__}: {exc}")
@@ -230,8 +242,18 @@ def probe_cross_principal_replay_rejection() -> dict[str, Any]:
         },
         headers={"x-tenant-id": "tenant_01"},
     )
-    if status != 422:
-        violations.append(f"Expected HTTP 422 for cross-principal execute, got {status}: {body}")
+    if status not in (403, 422):
+        violations.append(
+            f"Expected HTTP 403 or 422 for cross-principal execute, got {status}: {body}"
+        )
+    elif body.get("error", {}).get("code") not in (
+        "APPROVAL_AUTHORIZATION_DENIED",
+        "APPROVAL_BINDING_MISMATCH",
+    ):
+        violations.append(
+            "Expected error code APPROVAL_AUTHORIZATION_DENIED or APPROVAL_BINDING_MISMATCH, "
+            f"got {body.get('error', {}).get('code')}"
+        )
 
     # 5. Legitimate Alice execution succeeds
     try:
@@ -267,7 +289,11 @@ def probe_cross_tenant_replay_rejection() -> dict[str, Any]:
     action = _make_action(action_id="act_t1", tenant_id="tenant_01")
     approval = orch._approval_service.create_approval(action, tenant_id="tenant_01")
     orch._approval_service.grant_approval(
-        approval.approval_id, approver_id="mgr_01", tenant_id="tenant_01"
+        approval.approval_id,
+        approver_id="mgr_01",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr_01",
     )
 
     # 1. Direct cross-tenant orchestrator execution
@@ -311,7 +337,7 @@ def probe_cross_tenant_replay_rejection() -> dict[str, Any]:
 
 
 def probe_8_parameter_tampering_defense() -> dict[str, Any]:
-    """Probe 3: Tampering with any of the 8 bound parameters strictly fails closed (§20)."""
+    """Probe 3: Tampering with any of the 9 bound parameters strictly fails closed (§20)."""
     violations: list[str] = []
     base_binding = ApprovalBinding(
         action_id="act_base",
@@ -321,6 +347,7 @@ def probe_8_parameter_tampering_defense() -> dict[str, Any]:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_alice",
         principal_id="user_alice",
     )
 
@@ -356,6 +383,11 @@ def probe_8_parameter_tampering_defense() -> dict[str, Any]:
             "Action version mismatch",
         ),
         (
+            "agent_id",
+            {"agent_id": "agent_mallory"},
+            "Agent mismatch",
+        ),
+        (
             "principal_id",
             {"principal_id": "user_mallory"},
             "Principal mismatch",
@@ -376,6 +408,7 @@ def probe_8_parameter_tampering_defense() -> dict[str, Any]:
             "currency": base_binding.currency,
             "action_version": base_binding.action_version,
             "tenant_id": base_binding.tenant_id,
+            "agent_id": base_binding.agent_id,
             "principal_id": base_binding.principal_id,
         }
         kwargs.update(overrides)
@@ -412,7 +445,13 @@ def probe_concurrent_atomic_single_use_consumption() -> dict[str, Any]:
     in_mem_service = ApprovalService(in_mem_repo)
     act = _make_action(action_id="act_race_mem")
     appr_mem = in_mem_service.create_approval(act, tenant_id="tenant_01")
-    in_mem_service.grant_approval(appr_mem.approval_id, "mgr", "tenant_01")
+    in_mem_service.grant_approval(
+        appr_mem.approval_id,
+        "mgr",
+        "tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
 
     success_mem = 0
     conflict_mem = 0
@@ -454,7 +493,13 @@ def probe_concurrent_atomic_single_use_consumption() -> dict[str, Any]:
 
     act_sqla = _make_action(action_id="act_race_sqla", tenant_id="tenant_sqla")
     appr_sqla = sqla_service.create_approval(act_sqla, tenant_id="tenant_sqla")
-    sqla_service.grant_approval(appr_sqla.approval_id, "mgr", "tenant_sqla")
+    sqla_service.grant_approval(
+        appr_sqla.approval_id,
+        "mgr",
+        "tenant_sqla",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
 
     success_sqla = 0
     conflict_sqla = 0
@@ -511,7 +556,12 @@ def probe_lifecycle_state_guards() -> dict[str, Any]:
         _make_action(action_id="act_rej"), tenant_id="tenant_01"
     )
     service.reject_approval(
-        appr_rejected.approval_id, "mgr", "Too expensive", tenant_id="tenant_01"
+        appr_rejected.approval_id,
+        "mgr",
+        "Too expensive",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
     )
     try:
         orch.execute_approved_purchase(
@@ -570,8 +620,16 @@ def probe_lifecycle_state_guards() -> dict[str, Any]:
         pass  # Expected
 
     # 5. CONSUMED cannot execute twice
-    appr_valid = service.create_approval(_make_action(action_id="act_ok"), tenant_id="tenant_01")
-    service.grant_approval(appr_valid.approval_id, "mgr", "tenant_01")
+    appr_valid = service.create_approval(
+        _make_action(action_id="act_ok"), tenant_id="tenant_01", merchant_id="merch_01"
+    )
+    service.grant_approval(
+        appr_valid.approval_id,
+        "mgr",
+        "tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
     # First execution succeeds
     res1 = orch.execute_approved_purchase(
         appr_valid.approval_id, _make_action(action_id="act_ok"), "tenant_01", "var_01", 1
@@ -657,9 +715,15 @@ def probe_catalog_drift_revalidation_at_execution() -> dict[str, Any]:
         authorization_mode=AuthorizationMode.SUPERVISED,
         version=1,
     )
-    approval = orch._approval_service.create_approval(action, tenant_id="tenant_01")
+    approval = orch._approval_service.create_approval(
+        action, tenant_id="tenant_01", merchant_id="merch_drift"
+    )
     orch._approval_service.grant_approval(
-        approval.approval_id, approver_id="mgr", tenant_id="tenant_01"
+        approval.approval_id,
+        approver_id="mgr",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
     )
 
     # Scenario A: Price drifts in catalog from 50000 to 60000 between approval and execution
@@ -706,8 +770,16 @@ def probe_catalog_drift_revalidation_at_execution() -> dict[str, Any]:
     action_stock = _make_action(
         action_id="act_stock_drift", resource_id="prod_drift", amount_minor=50000
     )
-    appr_stock = orch._approval_service.create_approval(action_stock, tenant_id="tenant_01")
-    orch._approval_service.grant_approval(appr_stock.approval_id, "mgr", "tenant_01")
+    appr_stock = orch._approval_service.create_approval(
+        action_stock, tenant_id="tenant_01", merchant_id="merch_drift"
+    )
+    orch._approval_service.grant_approval(
+        appr_stock.approval_id,
+        "mgr",
+        "tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
 
     # Scenario B: Inventory drops to 0 before execution
     inventory_repo.save(
@@ -754,8 +826,16 @@ def probe_catalog_drift_revalidation_at_execution() -> dict[str, Any]:
     action_merch = _make_action(
         action_id="act_merch_drift", resource_id="prod_drift", amount_minor=50000
     )
-    appr_merch = orch._approval_service.create_approval(action_merch, tenant_id="tenant_01")
-    orch._approval_service.grant_approval(appr_merch.approval_id, "mgr", "tenant_01")
+    appr_merch = orch._approval_service.create_approval(
+        action_merch, tenant_id="tenant_01", merchant_id="merch_drift"
+    )
+    orch._approval_service.grant_approval(
+        appr_merch.approval_id,
+        "mgr",
+        "tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr",
+    )
 
     res_merch = orch.execute_approved_purchase(
         approval_id=appr_merch.approval_id,

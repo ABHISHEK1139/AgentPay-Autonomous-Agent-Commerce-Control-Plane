@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from test_purchase_flow import setup_orchestrator
 
+from agentpay.adapters.in_memory.identity_repository import InMemoryCredentialRepository
 from agentpay.api.app import AgentPayApiApp, ApiTestClient, UnconfiguredClientAuthError
 from agentpay.domain.commerce import (
     Inventory,
@@ -160,6 +161,47 @@ def test_unknown_api_key_returns_401(api_client: ApiTestClient) -> None:
     status, body = api_client.get(
         "/agent/catalog",
         headers={"X-API-Key": "apk_unknown_hash_mismatch", "x-tenant-id": "tenant_01"},
+    )
+    assert status == 401
+    assert body["error"]["code"] == "UNAUTHENTICATED"
+
+
+class _ColludingCredentialRepository(InMemoryCredentialRepository):
+    """Repository that returns an admin credential for any presented secret.
+
+    Simulates a compromised or buggy hash index. The API must still reject the
+    request because the presented secret does not verify against the record.
+    """
+
+    def get_by_secret_hash(self, secret_hash: str) -> Credential:
+        return Credential(
+            credential_id="cred_colluding",
+            tenant_id="tenant_01",
+            principal_id="usr_admin_01",
+            credential_type=CredentialType.BEARER_TOKEN,
+            secret_hash=Credential.hash_secret("the-real-admin-secret"),
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+            role=UserRole.ADMIN,
+            scopes=("*",),
+        )
+
+
+def test_post_lookup_secret_verification_blocks_colliding_repository_result() -> None:
+    """Authentication never trusts an index lookup alone (§14, §59)."""
+    orch, *_ = setup_orchestrator()
+    app = AgentPayApiApp(
+        orchestrator=orch,
+        credential_repo=_ColludingCredentialRepository(),
+    )
+    client = ApiTestClient(app)
+
+    status, body = client.get(
+        "/agent/catalog",
+        headers={
+            "Authorization": "Bearer attacker-chosen-secret",
+            "x-tenant-id": "tenant_01",
+        },
+        auth=False,
     )
     assert status == 401
     assert body["error"]["code"] == "UNAUTHENTICATED"
@@ -913,3 +955,176 @@ def test_b_obs_01_observability_and_sbom_access_control(api_client: ApiTestClien
     s_hard_admin_s, b_hard_admin_s = hardened_client.as_admin().get("/api/v1/security/sbom")
     assert s_hard_admin_s == 200
     assert b_hard_admin_s["format"] == "CycloneDX-1.5"
+
+
+# ===========================================================================
+# Actor identity binding and credential scope enforcement (§14, §15, §16, §17)
+# ===========================================================================
+
+
+def _action_payload(
+    action_id: str,
+    agent_id: str = "agent_01",
+    principal_id: str = "user_01",
+) -> dict[str, object]:
+    return {
+        "action_id": action_id,
+        "principal_id": principal_id,
+        "agent_id": agent_id,
+        "domain": "commerce",
+        "action": "purchase",
+        "resource_type": "product",
+        "resource_id": "prod_01",
+        "variant_id": "var_01",
+        "amount_minor": 129900,
+        "currency": "INR",
+        "intent_purpose": "identity regression test",
+        "quantity": 1,
+    }
+
+
+def test_agent_cannot_assert_another_agent_identity(api_client: ApiTestClient) -> None:
+    """An agent credential may only act as itself (§15, AP-009)."""
+    agent = api_client.as_agent("agent_01")
+    status, body = agent.post(
+        "/api/v1/actions",
+        json_body=_action_payload("act_impersonate_agent", agent_id="agent_02"),
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "AGENT_IMPERSONATION_DENIED"
+    assert body["error"]["details"]["authenticated_agent"] == "agent_01"
+    assert body["error"]["details"]["asserted_agent"] == "agent_02"
+
+
+def test_buyer_cannot_assert_another_principal(api_client: ApiTestClient) -> None:
+    """A buyer credential may only act for its own principal (§16, §20)."""
+    buyer = api_client.as_buyer(principal_id="user_01")
+    status, body = buyer.post(
+        "/api/v1/actions",
+        json_body=_action_payload(
+            "act_impersonate_principal",
+            agent_id="agent_01",
+            principal_id="user_02",
+        ),
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "PRINCIPAL_IMPERSONATION_DENIED"
+    assert body["error"]["details"]["authenticated_principal"] == "user_01"
+
+
+def test_buyer_cannot_use_an_agent_bound_to_another_principal() -> None:
+    """A buyer may only delegate to an agent bound to their own principal."""
+    orch, _, agent_repo, *_ = setup_orchestrator()
+    now = datetime.now(UTC)
+    agent_repo.save(
+        "tenant_01",
+        Agent(
+            agent_id="agent_other",
+            tenant_id="tenant_01",
+            principal_id="user_02",
+            issuer="https://auth.agentpay.local",
+            capabilities=("catalog.search", "payment.request", "checkout.prepare"),
+            scopes=("commerce:read", "commerce:write"),
+            created_at=now,
+            expires_at=now + timedelta(days=30),
+            status=AgentStatus.ACTIVE,
+        ),
+    )
+    app = AgentPayApiApp(orchestrator=orch)
+    buyer = ApiTestClient(app).as_buyer(principal_id="user_01")
+
+    status, body = buyer.post(
+        "/api/v1/actions",
+        json_body=_action_payload("act_foreign_agent", agent_id="agent_other"),
+        headers={"x-tenant-id": "tenant_01"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "AGENT_IMPERSONATION_DENIED"
+    assert body["error"]["details"]["agent_principal"] == "user_02"
+
+
+@pytest.mark.parametrize("role", [UserRole.AUDITOR, UserRole.MERCHANT_ADMIN])
+def test_non_commerce_roles_cannot_submit_actions(
+    api_client: ApiTestClient, role: UserRole
+) -> None:
+    """Auditors and merchant administrators may read but never initiate commerce."""
+    token = api_client.create_token(
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        role=role,
+    )
+    status, body = api_client.post(
+        "/api/v1/actions",
+        json_body=_action_payload("act_role_denied"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "x-tenant-id": "tenant_01",
+        },
+    )
+    assert status == 403
+    assert body["error"]["code"] == "ROLE_NOT_PERMITTED"
+
+
+def test_read_only_scope_cannot_submit_actions(api_client: ApiTestClient) -> None:
+    """`commerce:read` reaches reads but never mutations (§14, §17)."""
+    token = api_client.create_token(
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        role=UserRole.BUYER,
+        scopes=("commerce:read",),
+    )
+    headers = {"Authorization": f"Bearer {token}", "x-tenant-id": "tenant_01"}
+
+    status, _ = api_client.get("/agent/catalog", headers=headers)
+    assert status == 200
+
+    status, body = api_client.post(
+        "/api/v1/actions",
+        json_body=_action_payload("act_scope_denied"),
+        headers=headers,
+    )
+    assert status == 403
+    assert body["error"]["code"] == "INSUFFICIENT_SCOPE"
+    assert body["error"]["details"]["required_scope"] == "commerce:write"
+    assert body["error"]["details"]["granted_scopes"] == ["commerce:read"]
+
+
+def test_empty_scopes_deny_even_reads(api_client: ApiTestClient) -> None:
+    """An explicitly empty scope set fails closed on every commerce route."""
+    token = api_client.create_token(
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        role=UserRole.BUYER,
+        scopes=(),
+    )
+    status, body = api_client.get(
+        "/agent/catalog",
+        headers={"Authorization": f"Bearer {token}", "x-tenant-id": "tenant_01"},
+    )
+    assert status == 403
+    assert body["error"]["code"] == "INSUFFICIENT_SCOPE"
+    assert body["error"]["details"]["required_scope"] == "commerce:read"
+
+
+def test_wildcard_scope_grants_read_and_write(api_client: ApiTestClient) -> None:
+    """The explicit `*` wildcard covers every commerce scope."""
+    token = api_client.create_token(
+        tenant_id="tenant_01",
+        principal_id="user_01",
+        role=UserRole.BUYER,
+        scopes=("*",),
+    )
+    headers = {"Authorization": f"Bearer {token}", "x-tenant-id": "tenant_01"}
+
+    status, _ = api_client.get("/agent/catalog", headers=headers)
+    assert status == 200
+
+    status, body = api_client.post(
+        "/api/v1/actions",
+        json_body=_action_payload("act_wildcard"),
+        headers=headers,
+    )
+    assert status == 200
+    assert body["status"] == "COMPLETED"

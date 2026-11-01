@@ -17,8 +17,10 @@ import pytest
 
 from agentpay.adapters.in_memory.audit_ledger import InMemoryAuditLedger
 from agentpay.adapters.in_memory.commerce_repository import (
+    InMemoryEvidenceRepository,
     InMemoryInventoryRepository,
     InMemoryProductRepository,
+    InMemoryVariantRepository,
 )
 from agentpay.adapters.in_memory.identity_repository import (
     InMemoryAgentRepository,
@@ -27,19 +29,27 @@ from agentpay.adapters.in_memory.identity_repository import (
 from agentpay.api.app import AgentPayApiApp, ApiTestClient
 from agentpay.application.services.identity_service import AgentAuthorizationService
 from agentpay.application.use_cases.purchase_flow import PurchaseOrchestrator
-from agentpay.domain.commerce import Inventory, Product
+from agentpay.domain.commerce import Inventory, Product, ProductVariant
 from agentpay.domain.errors import (
     AgentRevokedError,
     InvalidCommerceError,
     InvalidIdentityError,
     LoopBudgetExceededError,
     ToolCallerNotAllowedError,
+    ToolExecutionUnavailableError,
     ToolPermissionDeniedError,
     UnauthorizedToolAccessError,
     UnknownToolError,
 )
+from agentpay.domain.evidence import (
+    Evidence,
+    EvidenceSource,
+    EvidenceSourceType,
+    EvidenceType,
+)
 from agentpay.domain.identity import Agent, AgentStatus
 from agentpay.domain.identity_token import PrincipalType
+from agentpay.domain.money import Money
 from agentpay.domain.safety import AgentLoopBudget, AgentLoopTracker
 from agentpay.domain.tool_registry import (
     ToolAuditBehavior,
@@ -596,6 +606,224 @@ def test_purchase_orchestrator_execute_tool_success_and_failure() -> None:
     tracker.record_tool_call()
     with pytest.raises(LoopBudgetExceededError, match="Tool call limit 2 exceeded"):
         budget_orchestrator.execute_tool(tenant_id, "agent_01", "system_health")
+
+
+def test_execute_tool_read_implementations_and_fail_closed_mutations() -> None:
+    """Read tools execute against real data; registered-but-unimplemented tools fail closed (§2.4, §26, §135)."""
+    tenant_id = "tenant_01"
+    agent_repo = InMemoryAgentRepository()
+    product_repo = InMemoryProductRepository()
+    variant_repo = InMemoryVariantRepository()
+    inventory_repo = InMemoryInventoryRepository()
+    evidence_repo = InMemoryEvidenceRepository()
+
+    agent = make_test_agent(
+        capabilities=("catalog.compare", "evidence.read", "cart.read", "cart.create")
+    )
+    agent_repo.save(tenant_id, agent)
+
+    product_repo.save(
+        tenant_id,
+        Product(
+            product_id="prod_01",
+            tenant_id=tenant_id,
+            merchant_id="merch_01",
+            name="Mechanical Keyboard",
+            category="electronics",
+            description="A fine keyboard",
+        ),
+    )
+    product_repo.save(
+        tenant_id,
+        Product(
+            product_id="prod_02",
+            tenant_id=tenant_id,
+            merchant_id="merch_01",
+            name="Budget Keyboard",
+            category="electronics",
+            description="A cheaper keyboard",
+        ),
+    )
+    variant_repo.save(
+        tenant_id,
+        ProductVariant(
+            variant_id="var_01",
+            product_id="prod_01",
+            sku="SKU-1",
+            name="Deluxe",
+            price=Money(149900, "INR"),
+        ),
+    )
+    variant_repo.save(
+        tenant_id,
+        ProductVariant(
+            variant_id="var_02",
+            product_id="prod_02",
+            sku="SKU-2",
+            name="Basic",
+            price=Money(99900, "INR"),
+        ),
+    )
+    inventory_repo.save(
+        tenant_id, Inventory(variant_id="var_01", tenant_id=tenant_id, available=5, reserved=1)
+    )
+    evidence_repo.save(
+        tenant_id,
+        Evidence(
+            evidence_id="evd_fixture",
+            tenant_id=tenant_id,
+            resource_id="var_01",
+            field_name="price",
+            value="1499.00 INR",
+            evidence_type=EvidenceType.PRICE,
+            source=EvidenceSource(type=EvidenceSourceType.MERCHANT_CATALOG, id="var_01"),
+            observed_at=datetime.now(UTC),
+        ),
+    )
+
+    orchestrator = PurchaseOrchestrator(
+        agent_repo=agent_repo,
+        product_repo=product_repo,
+        variant_repo=variant_repo,
+        inventory_repo=inventory_repo,
+        evidence_repo=evidence_repo,
+    )
+
+    # get_evidence returns stored provenance for the product and its variants
+    res_ev = orchestrator.execute_tool(
+        tenant_id, "agent_01", "get_evidence", {"product_id": "prod_01"}
+    )
+    assert res_ev["status"] == "success"
+    assert res_ev["result"]["product_id"] == "prod_01"
+    assert [e["evidence_id"] for e in res_ev["result"]["evidence"]] == ["evd_fixture"]
+    assert res_ev["result"]["evidence"][0]["evidence_type"] == "PRICE"
+
+    # compare_products ranks by lowest variant price with live availability
+    res_cmp = orchestrator.execute_tool(
+        tenant_id,
+        "agent_01",
+        "compare_products",
+        {"product_ids": ["prod_01", "prod_02", "prod_missing"]},
+    )
+    products = res_cmp["result"]["products"]
+    assert [p["product_id"] for p in products] == ["prod_02", "prod_01", "prod_missing"]
+    assert products[0]["lowest_price_minor"] == 99900
+    assert products[0]["variants"][0]["available"] == 0
+    assert products[1]["variants"][0]["available"] == 4
+    assert products[2]["found"] is False
+
+    with pytest.raises(InvalidCommerceError, match="at least 2 product_ids"):
+        orchestrator.execute_tool(
+            tenant_id, "agent_01", "compare_products", {"product_ids": ["prod_01"]}
+        )
+
+    # calculate_total uses exact integer minor units
+    res_total = orchestrator.execute_tool(
+        tenant_id, "agent_01", "calculate_total", {"variant_id": "var_01", "quantity": 3}
+    )
+    assert res_total["result"]["total_minor"] == 449700
+    assert res_total["result"]["total_display"] == "4497.00 INR"
+    with pytest.raises(InvalidCommerceError, match="positive integer quantity"):
+        orchestrator.execute_tool(
+            tenant_id, "agent_01", "calculate_total", {"variant_id": "var_01", "quantity": 0}
+        )
+    with pytest.raises(InvalidCommerceError, match="not found in tenant"):
+        orchestrator.execute_tool(
+            tenant_id, "agent_01", "calculate_total", {"variant_id": "var_missing"}
+        )
+
+    # Registered-but-unimplemented (mutating) tools fail closed, never fake success
+    with pytest.raises(ToolExecutionUnavailableError, match="no executable implementation"):
+        orchestrator.execute_tool(tenant_id, "agent_01", "create_cart")
+
+
+def test_api_product_evidence_endpoint_and_fail_closed_tool() -> None:
+    """GET /agent/products/{id}/evidence serves provenance and unimplemented tools return 501 (§32, §38)."""
+    tenant_id = "tenant_01"
+    agent_repo = InMemoryAgentRepository()
+    product_repo = InMemoryProductRepository()
+    variant_repo = InMemoryVariantRepository()
+    evidence_repo = InMemoryEvidenceRepository()
+    credential_repo = InMemoryCredentialRepository()
+
+    agent = make_test_agent(capabilities=("catalog.search", "cart.create"))
+    agent_repo.save(tenant_id, agent)
+    product_repo.save(
+        tenant_id,
+        Product(
+            product_id="prod_01",
+            tenant_id=tenant_id,
+            merchant_id="merch_01",
+            name="Ultra Monitor",
+            category="electronics",
+            description="A fine monitor",
+        ),
+    )
+    variant_repo.save(
+        tenant_id,
+        ProductVariant(
+            variant_id="var_01",
+            product_id="prod_01",
+            sku="UM-1",
+            name="Ultra Monitor 27",
+            price=Money(149900, "INR"),
+        ),
+    )
+    evidence_repo.save(
+        tenant_id,
+        Evidence(
+            evidence_id="evd_api",
+            tenant_id=tenant_id,
+            resource_id="var_01",
+            field_name="price",
+            value="1499.00 INR",
+            evidence_type=EvidenceType.PRICE,
+            source=EvidenceSource(type=EvidenceSourceType.MERCHANT_CATALOG, id="var_01"),
+            observed_at=datetime.now(UTC),
+        ),
+    )
+
+    orchestrator = PurchaseOrchestrator(
+        agent_repo=agent_repo,
+        product_repo=product_repo,
+        variant_repo=variant_repo,
+        evidence_repo=evidence_repo,
+    )
+    app = AgentPayApiApp(orchestrator=orchestrator, credential_repo=credential_repo)
+    client = ApiTestClient(app, default_tenant=tenant_id)
+    valid_token = client.create_token(tenant_id=tenant_id, principal_id="agent_01")
+    auth_headers = {
+        "Authorization": f"Bearer {valid_token}",
+        "X-Tenant-ID": tenant_id,
+    }
+
+    # Evidence available for the product (gathered across its variants)
+    status, body = app.handle_request("GET", "/agent/products/prod_01/evidence", auth_headers)
+    assert status == 200
+    assert body["product_id"] == "prod_01"
+    assert [e["evidence_id"] for e in body["evidence"]] == ["evd_api"]
+
+    # Evidence also resolvable by variant id
+    status, body = app.handle_request("GET", "/agent/products/var_01/evidence", auth_headers)
+    assert status == 200
+    assert body["product_id"] == "prod_01"
+    assert body["variant_id"] == "var_01"
+    assert [e["evidence_id"] for e in body["evidence"]] == ["evd_api"]
+
+    # Unknown resource fails closed with 404
+    status, body = app.handle_request("GET", "/agent/products/prod_unknown/evidence", auth_headers)
+    assert status == 404
+    assert body["error"]["code"] == "PRODUCT_NOT_FOUND"
+
+    # Registered but unimplemented mutating tool fails closed with 501
+    status, body = app.handle_request(
+        "POST",
+        "/api/v1/tools/create_cart/invoke",
+        auth_headers,
+        {"agent_id": "agent_01", "parameters": {}},
+    )
+    assert status == 501
+    assert body["error"]["code"] == "TOOL_EXECUTION_UNAVAILABLE"
 
 
 def test_api_tool_execution_endpoint_success_and_errors() -> None:

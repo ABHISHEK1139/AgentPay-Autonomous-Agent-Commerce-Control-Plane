@@ -9,8 +9,8 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+"></a>
   <a href="https://mypy-lang.org/"><img src="https://img.shields.io/badge/mypy-strict-brightgreen.svg" alt="Mypy Strict"></a>
   <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/badge/code_style-ruff-black.svg" alt="Ruff"></a>
-  <a href="https://docs.pytest.org/"><img src="https://img.shields.io/badge/tests-835_passed%20%7C%203_skipped-brightgreen.svg" alt="Pytest 835 passed, 3 skipped"></a>
-  <a href="tests/web.test.mjs"><img src="https://img.shields.io/badge/web_tests-5_passed-brightgreen.svg" alt="Web Tests"></a>
+  <a href="https://docs.pytest.org/"><img src="https://img.shields.io/badge/tests-904_passed%20%7C%203_skipped-brightgreen.svg" alt="Pytest 904 passed, 3 skipped"></a>
+  <a href="tests/web.test.mjs"><img src="https://img.shields.io/badge/web_tests-6_passed-brightgreen.svg" alt="Web Tests"></a>
   <a href="docs/architecture/architecture.md"><img src="https://img.shields.io/badge/architecture-domain_pure-blue.svg" alt="Domain Purity"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue.svg" alt="License Apache 2.0"></a>
 </p>
@@ -90,7 +90,7 @@ AgentPay is engineered according to core guarantees that can never be bypassed:
 4. **Integer Minor Units & Currencies (§122)**: Zero floating-point math. All financial arithmetic uses integer minor units (e.g. `149900` for ₹1,499.00 or $1,499.00) validated against ISO 4217 currency exponent tables.
 5. **Tamper-Evident SHA-256 Audit Ledger (§45)**: Every evaluation, decision, policy check, and payment attempt is recorded in a cryptographically chained SHA-256 audit ledger with automatic PII/PCI redaction.
 6. **Multi-Tenant Isolation (§49–§51)**: Every repository method and service explicitly requires a `tenant_id`. Cross-tenant access is rejected fail-closed.
-7. **Single-Item Hardened Commerce Slice**: The primary verified workflow is an atomic single-variant purchase with pre-flight price/stock conflict checks, single-use 8-field bound human approval, and idempotent payment/saga capture.
+7. **Hardened Cart & Purchase Commerce Slice (ADR-0006)**: Multi-item, single-merchant carts with agent-facing cart endpoints and an approval-aware `/agent/checkout` that reserves inventory, verifies price/inventory per line, executes one payment for N confirmed orders, and compensates safely on partial failure. Atomic single-variant purchases remain available with pre-flight price/stock conflict checks, single-use 8-field bound human approval, and idempotent payment/saga capture.
 
 ---
 
@@ -214,25 +214,25 @@ AgentPay includes pure domain adapters translating external agent commerce stand
 Every commit to AgentPay is verified against strict local and CI quality gates:
 
 ```powershell
-# 1. Code style & formatting (203 files clean)
+# 1. Code style & formatting (211 files clean)
 uv run ruff format --check .
 
 # 2. Strict linting rules (clean)
 uv run ruff check .
 
-# 3. Strict static type checking (186 files clean, 0 errors)
+# 3. Strict static type checking (194 files clean, 0 errors)
 uv run mypy
 
-# 4. Pytest test suite (835 passed, 0 failed, 3 skipped opt-in tests)
+# 4. Pytest test suite (904 passed, 0 failed, 3 skipped opt-in tests)
 uv run pytest
 
-# 5. Web Control Center test suite (5 passed, ARIA §121 & live client)
+# 5. Web Control Center test suite (6 passed, ARIA §121 & live client)
 node --test tests/web.test.mjs
 ```
 
-The latest local verification on 2026-10-16 produced **835 passed and 3
-skipped** Python tests, **5 passed** web tests, clean Ruff checks, and clean
-strict mypy checks across **186 source files**. The skipped tests are opt-in
+The latest local verification on 2026-10-18 produced **904 passed and 3
+skipped** Python tests, **6 passed** web tests, clean Ruff checks, and clean
+strict mypy checks across **194 source files**. The skipped tests are opt-in
 OpenRouter, OrcaRouter, and Razorpay sandbox calls without credentials.
 PostgreSQL/Redis deployment tests and live provider calls require external
 infrastructure and are not represented as passing local evidence.
@@ -269,6 +269,10 @@ uv run python scripts/generate_sbom.py --verify                          # Cyclo
 |---|---|---|
 | `POST` | `/api/v1/actions` | Submit an `ActionRequest` for autonomous evaluation and execution. |
 | `GET` | `/api/v1/actions/{id}` | Retrieve execution result, decision summary, and order status. |
+| `POST` | `/agent/carts` | Create a shopping cart for the authenticated agent (ADR-0006). |
+| `GET` | `/agent/carts/{id}` | Inspect cart contents with resolved prices and current total. |
+| `POST` | `/agent/carts/{id}/items` | Add or merge a variant line item (single-merchant cart). |
+| `POST` | `/agent/checkout` | Execute multi-item cart checkout with policy, approvals, one payment, and N orders. |
 | `GET` | `/api/v1/approvals` | List pending approvals for tenant. |
 | `GET` | `/api/v1/approvals/{id}` | Inspect full 8-field binding context and lifecycle metadata for an approval. |
 | `POST` | `/api/v1/approvals/{id}/grant` | Grant human approval for a pending action. |
@@ -291,12 +295,12 @@ agentpay/
 │   │   ├── domain/          # Pure Python core models; 0 framework imports (§10 enforced)
 │   │   ├── application/     # Use cases, purchase orchestrator, reconciliation, outbox
 │   │   ├── api/             # HTTP routing, error envelopes, webhooks, emergency controls
-│   │   ├── infrastructure/  # SQLAlchemy 2.0 models, migrations (0001-0004), tenant-scoped repos
+│   │   ├── infrastructure/  # SQLAlchemy 2.0 models, migrations (0001-0005), tenant-scoped repos
 │   │   ├── adapters/        # In-memory repositories, Razorpay sandbox adapter, Stripe simulator, mock JEV
 │   │   ├── adapters/protocols/ # ACP, AP2, UAP, x402 protocol adapters
 │   │   ├── server.py        # Pure standard-library multi-threaded HTTP server
 │   │   └── cli.py           # CLI runner (agentpay serve, worker, health, migrate)
-│   ├── api/tests/unit/      # 835 passing unit, property, chaos, adversarial & socket tests
+│   ├── api/tests/unit/      # 900 passing unit, property, chaos, adversarial & socket tests
 │   ├── worker/              # Distributed outbox worker runtime with lease management
 │   └── web/                 # React/TypeScript Control Center (pipeline visualizer & UI)
 ├── packages/

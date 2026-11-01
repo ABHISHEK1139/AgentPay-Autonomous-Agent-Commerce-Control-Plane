@@ -128,6 +128,13 @@ class AppConfig:
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "apodex/apodex-1.1-mini:free"
 
+    # Provider-neutral OpenAI-compatible model endpoint, including local Ollama (§23)
+    model_api_key: str | None = None
+    model_base_url: str = "http://127.0.0.1:11434/v1"
+    model_name: str = "llama3.2"
+    model_provider_name: str = "openai-compatible"
+    model_allow_private_network: bool = False
+
     # Live payments safety flag (§151)
     live_payments_enabled: bool = False
 
@@ -199,13 +206,24 @@ class AppConfig:
             )
 
         # 5. Advisory AI / OrcaRouter credential validation (§23)
-        if self.decision_engine in (
-            DecisionEngineType.ORCAROUTER,
-            DecisionEngineType.OPENAI_COMPATIBLE,
-        ) and is_placeholder_secret(self.orcarouter_api_key):
+        if self.decision_engine == DecisionEngineType.ORCAROUTER and is_placeholder_secret(
+            self.orcarouter_api_key
+        ):
             raise ConfigValidationError(
                 f"ORCAROUTER_API_KEY is missing or a placeholder string when decision_engine is '{self.decision_engine.value}'."
             )
+
+        # 5b. OpenAI-compatible model endpoint validation (§23). A model name is
+        #     mandatory; the API key may be omitted for local endpoints (e.g. Ollama).
+        if self.decision_engine == DecisionEngineType.OPENAI_COMPATIBLE:
+            if not self.model_base_url.strip():
+                raise ConfigValidationError(
+                    "AGENTPAY_MODEL_BASE_URL is required when decision_engine is 'openai_compatible'."
+                )
+            if not self.model_name.strip():
+                raise ConfigValidationError(
+                    "AGENTPAY_MODEL_NAME is required when decision_engine is 'openai_compatible'."
+                )
 
         # 6. Advisory AI / OpenRouter credential validation (§23)
         if self.decision_engine == DecisionEngineType.OPENROUTER and is_placeholder_secret(
@@ -281,7 +299,11 @@ class AppConfig:
 
         # 4. Persistence & Seeding
         db_url = e.get("DATABASE_URL") or e.get("AGENTPAY_DATABASE_URL")
-        default_seed = environment in (Environment.LOCAL, Environment.DEVELOPMENT)
+        # Demo seeding is a local-only convenience. Development must opt in
+        # explicitly, and doing so still requires the unsafe-demo-seed override
+        # below, so a development deployment can never silently create 2099-expiry
+        # demo credentials (§151, AP-005).
+        default_seed = environment is Environment.LOCAL
         seed_demo = _parse_bool(e.get("AGENTPAY_SEED_DEMO_DATA"), default=default_seed)
         allow_unsafe_seed = _parse_bool(e.get("AGENTPAY_UNSAFE_ALLOW_DEMO_SEED"), default=False)
         tenant_id = e.get("AGENTPAY_TENANT_ID", "tenant_01").strip() or "tenant_01"
@@ -311,6 +333,14 @@ class AppConfig:
         openrouter_key = e.get("OPENROUTER_API_KEY") or llm_key
         openrouter_base = (e.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1").strip()
         openrouter_model = (e.get("OPENROUTER_MODEL") or "apodex/apodex-1.1-mini:free").strip()
+        model_key = e.get("AGENTPAY_MODEL_API_KEY") or llm_key
+        model_base = (e.get("AGENTPAY_MODEL_BASE_URL") or "http://127.0.0.1:11434/v1").strip()
+        model_name = (e.get("AGENTPAY_MODEL_NAME") or "llama3.2").strip()
+        model_provider_name = (e.get("AGENTPAY_MODEL_PROVIDER_NAME") or "openai-compatible").strip()
+        model_allow_private = _parse_bool(
+            e.get("AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK"),
+            default=False,
+        )
 
         # 7. Live safety flag (§151)
         live_flag = _parse_bool(
@@ -341,6 +371,11 @@ class AppConfig:
             openrouter_api_key=openrouter_key,
             openrouter_base_url=openrouter_base,
             openrouter_model=openrouter_model,
+            model_api_key=model_key,
+            model_base_url=model_base,
+            model_name=model_name,
+            model_provider_name=model_provider_name,
+            model_allow_private_network=model_allow_private,
             live_payments_enabled=live_flag,
         )
 
@@ -372,6 +407,7 @@ class AppConfig:
                 "openrouter_configured": bool(
                     self.openrouter_api_key and not is_placeholder_secret(self.openrouter_api_key)
                 ),
+                "model_endpoint_configured": bool(self.model_base_url and self.model_name),
             },
         }
 

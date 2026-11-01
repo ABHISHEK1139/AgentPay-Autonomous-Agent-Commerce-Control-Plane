@@ -30,10 +30,13 @@ from agentpay.domain.decision import (
     RiskLevel,
 )
 from agentpay.domain.errors import (
+    ApprovalAuthorizationError,
     ApprovalBindingMismatchError,
+    ApprovalConcurrencyError,
     CrossTenantAccessError,
     InvalidApprovalTransitionError,
 )
+from agentpay.domain.identity import UserRole
 from agentpay.domain.money import Money
 
 
@@ -68,6 +71,8 @@ def test_approval_binding_exact_matching() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     assert (
         binding.matches(
@@ -78,6 +83,8 @@ def test_approval_binding_exact_matching() -> None:
             currency="INR",
             action_version=1,
             tenant_id="tenant_01",
+            agent_id="agent_01",
+            principal_id="user_01",
         )
         is True
     )
@@ -92,6 +99,8 @@ def test_approval_binding_exact_matching() -> None:
             currency="INR",
             action_version=1,
             tenant_id="tenant_01",
+            agent_id="agent_01",
+            principal_id="user_01",
         )
 
     # Action version mismatch raises (prevent approval reuse on mutated action)
@@ -104,6 +113,8 @@ def test_approval_binding_exact_matching() -> None:
             currency="INR",
             action_version=2,
             tenant_id="tenant_01",
+            agent_id="agent_01",
+            principal_id="user_01",
         )
 
 
@@ -116,6 +127,8 @@ def test_approval_state_machine_transitions() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     appr = Approval(
         approval_id="appr_01",
@@ -158,7 +171,13 @@ def test_approval_service_creation_and_binding_verification() -> None:
         service.verify_binding(approval, tampered_action)
 
     # Grant approval
-    granted = service.grant_approval(approval.approval_id, "finance_lead", "tenant_01")
+    granted = service.grant_approval(
+        approval.approval_id,
+        "finance_lead",
+        "tenant_01",
+        approver_role=UserRole.FINANCE,
+        caller_principal_id="finance_lead",
+    )
     assert granted.status == ApprovalStatus.APPROVED
     assert repo.get("tenant_01", approval.approval_id) == granted
 
@@ -252,6 +271,8 @@ def test_hypothesis_approval_binding_amount_invariance(
         currency="INR",
         action_version=1,
         tenant_id="t1",
+        agent_id="agent_01",
+        principal_id="user_01",
     )
     if approved_minor == execution_minor:
         assert (
@@ -263,6 +284,8 @@ def test_hypothesis_approval_binding_amount_invariance(
                 currency="INR",
                 action_version=1,
                 tenant_id="t1",
+                agent_id="agent_01",
+                principal_id="user_01",
             )
             is True
         )
@@ -276,11 +299,13 @@ def test_hypothesis_approval_binding_amount_invariance(
                 currency="INR",
                 action_version=1,
                 tenant_id="t1",
+                agent_id="agent_01",
+                principal_id="user_01",
             )
 
 
-def test_approval_binding_exact_8_field_matching() -> None:
-    """AP-006: Explicit 8-field binding verifies principal_id and tenant_id alongside commerce fields."""
+def test_approval_binding_exact_9_field_matching() -> None:
+    """AP-006: Explicit 9-field binding verifies agent_id, principal_id, and tenant_id."""
     binding = ApprovalBinding(
         action_id="act_01",
         amount=Money(5000, "INR"),
@@ -289,6 +314,7 @@ def test_approval_binding_exact_8_field_matching() -> None:
         currency="INR",
         action_version=1,
         tenant_id="tenant_01",
+        agent_id="agent_alice",
         principal_id="user_alice",
     )
     assert (
@@ -300,10 +326,28 @@ def test_approval_binding_exact_8_field_matching() -> None:
             currency="INR",
             action_version=1,
             tenant_id="tenant_01",
+            agent_id="agent_alice",
             principal_id="user_alice",
         )
         is True
     )
+
+    # Agent mismatch raises
+    with pytest.raises(
+        ApprovalBindingMismatchError,
+        match="Agent mismatch: approval bound to 'agent_alice', got 'agent_bob'",
+    ):
+        binding.assert_exact_match(
+            action_id="act_01",
+            amount=Money(5000, "INR"),
+            merchant_id="merch_01",
+            resource_id="prod_123",
+            currency="INR",
+            action_version=1,
+            tenant_id="tenant_01",
+            agent_id="agent_bob",
+            principal_id="user_alice",
+        )
 
     # Principal mismatch raises
     with pytest.raises(
@@ -318,6 +362,7 @@ def test_approval_binding_exact_8_field_matching() -> None:
             currency="INR",
             action_version=1,
             tenant_id="tenant_01",
+            agent_id="agent_alice",
             principal_id="user_bob",
         )
 
@@ -334,6 +379,7 @@ def test_approval_binding_exact_8_field_matching() -> None:
             currency="INR",
             action_version=1,
             tenant_id="tenant_02",
+            agent_id="agent_alice",
             principal_id="user_alice",
         )
 
@@ -399,10 +445,146 @@ def test_approval_repository_list_pending() -> None:
     assert {a.approval_id for a in pending} == {app1.approval_id, app2.approval_id}
 
     # Grant app1 -> no longer pending
-    service.grant_approval(app1.approval_id, approver_id="mgr_01", tenant_id="tenant_01")
+    service.grant_approval(
+        app1.approval_id,
+        approver_id="mgr_01",
+        tenant_id="tenant_01",
+        approver_role=UserRole.ADMIN,
+        caller_principal_id="mgr_01",
+    )
     pending_after = repo.list_pending("tenant_01")
     assert len(pending_after) == 1
     assert pending_after[0].approval_id == app2.approval_id
 
     # Another tenant has 0 pending
     assert repo.list_pending("tenant_02") == []
+
+
+def _pending_approval(
+    service: ApprovalService,
+    amount_minor: int = 8000,
+) -> Approval:
+    action = make_action_request(amount_minor=amount_minor)
+    return service.create_approval(action, tenant_id="tenant_01")
+
+
+def test_approval_grant_rejects_non_approver_roles() -> None:
+    """A buyer must never be able to grant a human approval (§2.1, §16, §20)."""
+    repo = InMemoryApprovalRepository()
+    service = ApprovalService(repo)
+    approval = _pending_approval(service)
+
+    with pytest.raises(ApprovalAuthorizationError, match="cannot decide approvals"):
+        service.grant_approval(
+            approval.approval_id,
+            approver_id="usr_buyer",
+            tenant_id="tenant_01",
+            approver_role=UserRole.BUYER,
+            caller_principal_id="usr_buyer",
+        )
+
+    stored = repo.get("tenant_01", approval.approval_id)
+    assert stored is not None and stored.is_pending
+
+
+def test_approval_grant_rejects_agent_credentials() -> None:
+    """An agent credential (role=None) must never decide a human approval (§2.1)."""
+    service = ApprovalService(InMemoryApprovalRepository())
+    approval = _pending_approval(service)
+
+    with pytest.raises(ApprovalAuthorizationError, match="cannot decide approvals"):
+        service.grant_approval(
+            approval.approval_id,
+            approver_id="agent_01",
+            tenant_id="tenant_01",
+            approver_role=None,
+            caller_principal_id="agent_01",
+        )
+
+
+def test_approval_grant_rejects_forged_approver_id() -> None:
+    """The stored approver must be the authenticated caller, not a body-supplied id (§20)."""
+    service = ApprovalService(InMemoryApprovalRepository())
+    approval = _pending_approval(service)
+
+    with pytest.raises(ApprovalAuthorizationError, match="must match the authenticated principal"):
+        service.grant_approval(
+            approval.approval_id,
+            approver_id="manager_alice",
+            tenant_id="tenant_01",
+            approver_role=UserRole.FINANCE,
+            caller_principal_id="usr_buyer",
+        )
+
+
+def test_approval_self_approval_denied() -> None:
+    """The principal that requested the action cannot approve it themselves (§20, §66)."""
+    service = ApprovalService(InMemoryApprovalRepository())
+    approval = _pending_approval(service)
+    assert approval.binding.principal_id == "user_01"
+
+    with pytest.raises(ApprovalAuthorizationError, match="Self-approval is prohibited"):
+        service.grant_approval(
+            approval.approval_id,
+            approver_id="user_01",
+            tenant_id="tenant_01",
+            approver_role=UserRole.ADMIN,
+            caller_principal_id="user_01",
+        )
+
+
+def test_approval_policy_tier_enforced_when_configured() -> None:
+    """Configured approval tiers require the matching approver role (§20)."""
+    policy = ApprovalPolicy(
+        tiers=(ApprovalTier(threshold_minor=5000, approver_role="FINANCE"),),
+        policy_version="pol_v1",
+    )
+    repo = InMemoryApprovalRepository()
+    service = ApprovalService(repo, approval_policy=policy)
+    approval = _pending_approval(service, amount_minor=8000)
+
+    with pytest.raises(ApprovalAuthorizationError, match="requires approver role 'FINANCE'"):
+        service.grant_approval(
+            approval.approval_id,
+            approver_id="operator_01",
+            tenant_id="tenant_01",
+            approver_role=UserRole.AGENT_OPERATOR,
+            caller_principal_id="operator_01",
+        )
+
+    granted = service.grant_approval(
+        approval.approval_id,
+        approver_id="finance_01",
+        tenant_id="tenant_01",
+        approver_role=UserRole.FINANCE,
+        caller_principal_id="finance_01",
+    )
+    assert granted.is_approved
+
+
+def test_approval_repository_optimistic_concurrency() -> None:
+    """A stale read-modify-write must not overwrite a concurrent decision (§20, §177)."""
+    repo = InMemoryApprovalRepository()
+    service = ApprovalService(repo)
+    approval = _pending_approval(service)
+
+    first_read = repo.get("tenant_01", approval.approval_id)
+    second_read = repo.get("tenant_01", approval.approval_id)
+    assert first_read is not None and second_read is not None
+
+    repo.save(
+        "tenant_01",
+        first_read.approve("mgr_01"),
+        expected_status=ApprovalStatus.PENDING,
+    )
+
+    with pytest.raises(ApprovalConcurrencyError):
+        repo.save(
+            "tenant_01",
+            second_read.reject("mgr_02", "stale decision"),
+            expected_status=ApprovalStatus.PENDING,
+        )
+
+    stored = repo.get("tenant_01", approval.approval_id)
+    assert stored is not None and stored.is_approved
+    assert stored.approver_id == "mgr_01"

@@ -25,25 +25,29 @@ The following suite must pass locally and in GitHub Actions CI (`.github/workflo
 # 1. Dependency Synchronization
 uv sync --frozen
 
-# 2. Code Style & Formatting (203 files clean)
+# 2. Code Style & Formatting (211 files clean)
 uv run ruff format --check .
 
 # 3. Static Analysis & Linting (clean, 0 warnings)
 uv run ruff check .
 
-# 4. Strict Type Checking (186 files clean, 0 errors)
+# 4. Strict Type Checking (194 files clean, 0 errors)
 uv run mypy
 
-# 5. Full Pytest Suite (835 passed, 0 failed, 3 opt-in credential tests skipped)
+# 5. Full Pytest Suite (904 passed, 0 failed, 3 opt-in credential tests skipped)
 uv run pytest
 
 # 6. Web UI & Accessibility Suite (§121 ARIA & Keyboard Contracts)
 node --test tests/web.test.mjs
 
-# 7. Database Migration & Schema Integrity
+# 7. Web UI production build and TypeScript check
+npm --prefix apps/web ci
+npm --prefix apps/web run build
+
+# 8. Database Migration & Schema Integrity
 uv run pytest apps/api/tests/unit/test_database_migrations.py
 
-# 8. All 17 Dedicated Adversarial Stress Suites
+# 9. All 17 Dedicated Adversarial Stress Suites
 uv run python tests/adversarial/stress_test_client_privilege.py
 uv run python tests/adversarial/stress_test_concurrency.py
 uv run python tests/adversarial/stress_test_m1_tenant_isolation.py
