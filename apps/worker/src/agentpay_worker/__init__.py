@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from agentpay.workers import BackgroundWorker, OutboxDispatcher
+from agentpay_worker.dispatcher import OutboxDispatcher
+from agentpay_worker.worker import BackgroundWorker
 
 __all__ = [
     "BackgroundWorker",

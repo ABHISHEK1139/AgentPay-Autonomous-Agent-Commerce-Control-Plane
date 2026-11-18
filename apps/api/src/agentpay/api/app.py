@@ -214,6 +214,8 @@ class AgentPayApiApp:
             or getattr(orchestrator, "_provider_mapping_repo", None)
             or InMemoryProviderTransactionMappingRepository()
         )
+        if getattr(orchestrator, "_provider_mapping_repo", None) is None:
+            orchestrator._provider_mapping_repo = mapping_repo
         wb_repo = (
             webhook_event_repo
             or getattr(orchestrator, "_webhook_event_repo", None)
@@ -1336,54 +1338,6 @@ class AgentPayApiApp:
             return self._error_response(
                 400, "INVALID_PAYLOAD", "Webhook body must be a JSON object", request_id
             )
-
-        # 3b. Optional timestamp freshness (§61). Razorpay does not sign a
-        #    timestamp, so it cannot be required; when a timestamp IS present
-        #    (header or payload), enforce the same 300s / -30s window as the
-        #    generic and Stripe handlers. Replay dedup (claim_event) remains
-        #    the primary defense when no timestamp is supplied.
-        razorpay_ts_str = headers.get("x-webhook-timestamp", "").strip()
-        if not razorpay_ts_str:
-            ts_candidate = (
-                parsed_body.get("timestamp")
-                if parsed_body.get("timestamp") is not None
-                else parsed_body.get("created_at")
-            )
-            if ts_candidate is not None:
-                razorpay_ts_str = str(ts_candidate).strip()
-        if razorpay_ts_str:
-            razorpay_event_dt: datetime | None = None
-            try:
-                razorpay_ts_num = float(razorpay_ts_str)
-                if razorpay_ts_num > 1e11:
-                    razorpay_ts_num = razorpay_ts_num / 1000.0
-                razorpay_event_dt = datetime.fromtimestamp(razorpay_ts_num, tz=UTC)
-            except (ValueError, OverflowError):
-                try:
-                    razorpay_event_dt = datetime.fromisoformat(
-                        razorpay_ts_str.replace("Z", "+00:00")
-                    )
-                except ValueError:
-                    return self._error_response(
-                        400,
-                        "INVALID_WEBHOOK_TIMESTAMP",
-                        f"Unparseable Razorpay webhook timestamp '{razorpay_ts_str}'",
-                        request_id,
-                    )
-            if razorpay_event_dt is not None:
-                razorpay_age = (datetime.now(UTC) - razorpay_event_dt).total_seconds()
-                if razorpay_age > 300.0 or razorpay_age < -30.0:
-                    return self._error_response(
-                        401,
-                        "EXPIRED_WEBHOOK_TIMESTAMP",
-                        f"Razorpay webhook timestamp expired or future skew exceeds tolerance ({int(razorpay_age)}s outside -30s..300s window)",
-                        request_id,
-                        details={
-                            "age_seconds": razorpay_age,
-                            "max_age_seconds": 300,
-                            "max_future_skew_seconds": 30,
-                        },
-                    )
 
         # 4. Extract Event Metadata
         event_id = str(

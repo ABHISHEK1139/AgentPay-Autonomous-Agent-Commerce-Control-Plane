@@ -257,9 +257,9 @@ class InMemoryProviderWebhookEventRepository(ProviderWebhookEventRepository):
             key = (prov, acc_id, evt_id)
             existing = self._by_provider_event.get(key)
             if existing is not None:
-                if existing.status in (
-                    WebhookEventStatus.FAILED,
-                    WebhookEventStatus.QUARANTINED,
+                if (
+                    existing.status == WebhookEventStatus.FAILED
+                    and existing.last_error_code == "TEMPORARY_FAILURE"
                 ):
                     retried = existing.mark_processing()
                     self._by_id[retried.id] = retried

@@ -23,9 +23,6 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
-from agentpay.adapters.in_memory.payment_repository import (
-    InMemoryProviderTransactionMappingRepository,
-)
 from agentpay.application.ports.approval_port import (
     ApprovalRepository,
     DecisionEngine,
@@ -190,10 +187,8 @@ class PurchaseOrchestrator:
         self._order_repo = order_repo
         self._idempotency_store = idempotency_store
         self._audit_ledger = audit_ledger
-        self._provider_mapping_repo: ProviderTransactionMappingRepository = (
+        self._provider_mapping_repo: ProviderTransactionMappingRepository | None = (
             provider_mapping_repo
-            if provider_mapping_repo is not None
-            else InMemoryProviderTransactionMappingRepository()
         )
         self._approval_lock = threading.Lock()
         self._loop_trackers: dict[str, AgentLoopTracker] = {}
@@ -1162,27 +1157,28 @@ class PurchaseOrchestrator:
                 self._payment_repo.save(tenant_id, payment_attempt)
 
             # Persist provider transaction mapping (§39, §41, §49)
-            prov_payment_id = payment_attempt.provider_payment_id or payment_attempt.attempt_id
-            mapping = ProviderTransactionMapping(
-                mapping_id=f"map_{uuid.uuid4().hex[:16]}",
-                tenant_id=tenant_id,
-                attempt_id=payment_attempt.attempt_id,
-                provider=payment_attempt.provider,
-                provider_payment_id=prov_payment_id,
-            )
-            self._provider_mapping_repo.save(mapping)
-            if (
-                payment_attempt.provider_payment_id
-                and payment_attempt.provider_payment_id != payment_attempt.attempt_id
-            ):
-                alt_mapping = ProviderTransactionMapping(
+            if self._provider_mapping_repo is not None:
+                prov_payment_id = payment_attempt.provider_payment_id or payment_attempt.attempt_id
+                mapping = ProviderTransactionMapping(
                     mapping_id=f"map_{uuid.uuid4().hex[:16]}",
                     tenant_id=tenant_id,
                     attempt_id=payment_attempt.attempt_id,
                     provider=payment_attempt.provider,
-                    provider_payment_id=payment_attempt.attempt_id,
+                    provider_payment_id=prov_payment_id,
                 )
-                self._provider_mapping_repo.save(alt_mapping)
+                self._provider_mapping_repo.save(mapping)
+                if (
+                    payment_attempt.provider_payment_id
+                    and payment_attempt.provider_payment_id != payment_attempt.attempt_id
+                ):
+                    alt_mapping = ProviderTransactionMapping(
+                        mapping_id=f"map_{uuid.uuid4().hex[:16]}",
+                        tenant_id=tenant_id,
+                        attempt_id=payment_attempt.attempt_id,
+                        provider=payment_attempt.provider,
+                        provider_payment_id=payment_attempt.attempt_id,
+                    )
+                    self._provider_mapping_repo.save(alt_mapping)
 
             self._audit(
                 AuditEventType.PAYMENT_CREATED,
@@ -3016,27 +3012,28 @@ class PurchaseOrchestrator:
             if self._payment_repo is not None:
                 self._payment_repo.save(tenant_id, payment_attempt)
 
-            prov_payment_id = payment_attempt.provider_payment_id or payment_attempt.attempt_id
-            mapping = ProviderTransactionMapping(
-                mapping_id=f"map_{uuid.uuid4().hex[:16]}",
-                tenant_id=tenant_id,
-                attempt_id=payment_attempt.attempt_id,
-                provider=payment_attempt.provider,
-                provider_payment_id=prov_payment_id,
-            )
-            self._provider_mapping_repo.save(mapping)
-            if (
-                payment_attempt.provider_payment_id
-                and payment_attempt.provider_payment_id != payment_attempt.attempt_id
-            ):
-                alt_mapping = ProviderTransactionMapping(
+            if self._provider_mapping_repo is not None:
+                prov_payment_id = payment_attempt.provider_payment_id or payment_attempt.attempt_id
+                mapping = ProviderTransactionMapping(
                     mapping_id=f"map_{uuid.uuid4().hex[:16]}",
                     tenant_id=tenant_id,
                     attempt_id=payment_attempt.attempt_id,
                     provider=payment_attempt.provider,
-                    provider_payment_id=payment_attempt.attempt_id,
+                    provider_payment_id=prov_payment_id,
                 )
-                self._provider_mapping_repo.save(alt_mapping)
+                self._provider_mapping_repo.save(mapping)
+                if (
+                    payment_attempt.provider_payment_id
+                    and payment_attempt.provider_payment_id != payment_attempt.attempt_id
+                ):
+                    alt_mapping = ProviderTransactionMapping(
+                        mapping_id=f"map_{uuid.uuid4().hex[:16]}",
+                        tenant_id=tenant_id,
+                        attempt_id=payment_attempt.attempt_id,
+                        provider=payment_attempt.provider,
+                        provider_payment_id=payment_attempt.attempt_id,
+                    )
+                    self._provider_mapping_repo.save(alt_mapping)
 
             self._audit(
                 AuditEventType.PAYMENT_CREATED,

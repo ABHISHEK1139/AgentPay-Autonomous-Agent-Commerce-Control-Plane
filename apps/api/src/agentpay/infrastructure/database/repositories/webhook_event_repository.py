@@ -129,7 +129,10 @@ class SqlAlchemyProviderWebhookEventRepository(
                 existing = session.scalar(stmt)
                 if existing is not None:
                     event = existing.to_domain()
-                    if event.status in (WebhookEventStatus.FAILED, WebhookEventStatus.QUARANTINED):
+                    if (
+                        event.status == WebhookEventStatus.FAILED
+                        and event.last_error_code == "TEMPORARY_FAILURE"
+                    ):
                         retried = event.mark_processing()
                         result = session.execute(
                             update(ProviderWebhookEventModel)
@@ -160,7 +163,10 @@ class SqlAlchemyProviderWebhookEventRepository(
                 )
                 if existing_any is not None:
                     event = existing_any.to_domain()
-                    if event.status in (WebhookEventStatus.FAILED, WebhookEventStatus.QUARANTINED):
+                    if (
+                        event.status == WebhookEventStatus.FAILED
+                        and event.last_error_code == "TEMPORARY_FAILURE"
+                    ):
                         retried = event.mark_processing()
                         existing_any.status = retried.status.value
                         existing_any.attempt_count = retried.attempt_count
@@ -173,7 +179,10 @@ class SqlAlchemyProviderWebhookEventRepository(
                 existing_pk = session.get(ProviderWebhookEventModel, event.id)
                 if existing_pk is not None:
                     event = existing_pk.to_domain()
-                    if event.status in (WebhookEventStatus.FAILED, WebhookEventStatus.QUARANTINED):
+                    if (
+                        event.status == WebhookEventStatus.FAILED
+                        and event.last_error_code == "TEMPORARY_FAILURE"
+                    ):
                         retried = event.mark_processing()
                         existing_pk.status = retried.status.value
                         existing_pk.attempt_count = retried.attempt_count

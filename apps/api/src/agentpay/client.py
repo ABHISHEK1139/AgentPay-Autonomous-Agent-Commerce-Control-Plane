@@ -1,4 +1,4 @@
-"""Thin Developer SDK Client for AgentPay (§109).
+"""Thin Developer SDK for AgentPay Control Plane (§109).
 
 Exposes typed interfaces for ActionRequest submission, approval status polling,
 product catalog discovery, and emergency kill switch controls. Supports both

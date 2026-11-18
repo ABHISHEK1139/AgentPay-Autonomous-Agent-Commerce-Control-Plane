@@ -93,17 +93,27 @@ class BackgroundWorker:
         now = datetime.now(UTC)
         cutoff = now - timedelta(seconds=self.payment_timeout_seconds)
 
+        # In-memory repo or custom list method
         attempts: list[Any] = []
         if hasattr(self.payment_repo, "list_by_status"):
             attempts = self.payment_repo.list_by_status(PaymentStatus.UNKNOWN)
         elif hasattr(self.payment_repo, "_attempts"):
+            # in-memory store inspection fallback
             with getattr(self.payment_repo, "_lock", threading.Lock()):
-                attempts = [
-                    a
-                    for tenant_attempts in self.payment_repo._attempts.values()
-                    for a in tenant_attempts.values()
-                    if a.status == PaymentStatus.UNKNOWN
-                ]
+                raw_attempts = list(self.payment_repo._attempts.values())
+                if raw_attempts and isinstance(raw_attempts[0], dict):
+                    attempts = [
+                        a
+                        for tenant_attempts in self.payment_repo._attempts.values()
+                        for a in tenant_attempts.values()
+                        if getattr(a, "status", None) == PaymentStatus.UNKNOWN
+                    ]
+                else:
+                    attempts = [
+                        a
+                        for a in self.payment_repo._attempts.values()
+                        if getattr(a, "status", None) == PaymentStatus.UNKNOWN
+                    ]
 
         for attempt in attempts:
             attempt_time = getattr(attempt, "created_at", now)
@@ -131,12 +141,20 @@ class BackgroundWorker:
             approvals = self.approval_repo.list_pending()
         elif hasattr(self.approval_repo, "_approvals"):
             with getattr(self.approval_repo, "_lock", threading.Lock()):
-                approvals = [
-                    app
-                    for tenant_apps in self.approval_repo._approvals.values()
-                    for app in tenant_apps.values()
-                    if app.status == ApprovalStatus.PENDING
-                ]
+                raw_values = list(self.approval_repo._approvals.values())
+                if raw_values and isinstance(raw_values[0], dict):
+                    approvals = [
+                        app
+                        for tenant_apps in self.approval_repo._approvals.values()
+                        for app in tenant_apps.values()
+                        if getattr(app, "status", None) == ApprovalStatus.PENDING
+                    ]
+                else:
+                    approvals = [
+                        app
+                        for app in self.approval_repo._approvals.values()
+                        if getattr(app, "status", None) == ApprovalStatus.PENDING
+                    ]
 
         for app in approvals:
             req_time = getattr(app, "requested_at", now)
@@ -147,7 +165,11 @@ class BackgroundWorker:
                         self.approval_repo.save(app.tenant_id, expired_app)
                     expired_count += 1
                 except Exception as exc:
-                    logger.warning("Failed to expire approval %s: %s", app.approval_id, exc)
+                    logger.warning(
+                        "Failed to expire approval %s: %s",
+                        getattr(app, "approval_id", "unknown"),
+                        exc,
+                    )
 
         return expired_count
 

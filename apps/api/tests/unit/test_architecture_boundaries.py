@@ -5,6 +5,7 @@ from pathlib import Path
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "agentpay"
 DOMAIN_PACKAGE = SOURCE_ROOT / "domain"
+APPLICATION_PACKAGE = SOURCE_ROOT / "application"
 
 FORBIDDEN_IN_DOMAIN = frozenset(
     {
@@ -28,6 +29,14 @@ FORBIDDEN_IN_DOMAIN = frozenset(
         "agentpay.ai",
         "agentpay.security",
         "agentpay.workers",
+    }
+)
+
+FORBIDDEN_IN_APPLICATION = frozenset(
+    {
+        "agentpay.adapters",
+        "agentpay.infrastructure",
+        "agentpay.api",
     }
 )
 
@@ -97,8 +106,50 @@ def relative_imports_escaping_domain(path: Path) -> set[str]:
     return escaping
 
 
+def forbidden_application_imports(path: Path) -> set[str]:
+    found: set[str] = set()
+    for module in imported_modules(path):
+        root = module.split(".")[0]
+        is_forbidden = (
+            module in FORBIDDEN_IN_APPLICATION
+            or root in FORBIDDEN_IN_APPLICATION
+            or any(
+                module == forbidden or module.startswith(forbidden + ".")
+                for forbidden in FORBIDDEN_IN_APPLICATION
+            )
+        )
+        if is_forbidden:
+            found.add(module)
+    # Dynamic imports (__import__, importlib.import_module)
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            func_name = ""
+            if isinstance(func, ast.Name):
+                func_name = func.id
+            elif isinstance(func, ast.Attribute):
+                func_name = func.attr
+            if func_name in ("__import__", "import_module") and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    module = arg.value
+                    if module in FORBIDDEN_IN_APPLICATION or any(
+                        module == forbidden or module.startswith(forbidden + ".")
+                        for forbidden in FORBIDDEN_IN_APPLICATION
+                    ):
+                        found.add(module)
+    return found
+
+
 def test_domain_layer_is_discoverable() -> None:
     assert DOMAIN_PACKAGE.is_dir(), "the domain package moved; update SOURCE_ROOT in this test"
+
+
+def test_application_layer_is_discoverable() -> None:
+    assert APPLICATION_PACKAGE.is_dir(), (
+        "the application package moved; update SOURCE_ROOT in this test"
+    )
 
 
 def test_domain_layer_imports_no_framework_or_outer_layer() -> None:
@@ -108,6 +159,17 @@ def test_domain_layer_imports_no_framework_or_outer_layer() -> None:
         if forbidden_imports(path)
     }
     assert not violations, f"domain must stay technology-agnostic: {violations}"
+
+
+def test_application_layer_imports_no_adapters_infrastructure_or_api() -> None:
+    violations = {
+        str(path.relative_to(SOURCE_ROOT)): sorted(forbidden_application_imports(path))
+        for path in python_files(APPLICATION_PACKAGE)
+        if forbidden_application_imports(path)
+    }
+    assert not violations, (
+        f"application layer must not depend on outer adapters, infrastructure, or api: {violations}"
+    )
 
 
 def test_domain_layer_does_not_import_relative_modules_outside_domain() -> None:
@@ -169,3 +231,39 @@ def test_boundary_checker_catches_a_relative_import_that_climbs_out_of_domain(
     offender = tmp_path / "escaping_module.py"
     offender.write_text("from ..infrastructure import db\n", encoding="utf-8")
     assert relative_imports_escaping_domain(offender) == {"..infrastructure"}
+
+
+def test_application_boundary_checker_actually_catches_forbidden_imports(
+    tmp_path: Path,
+) -> None:
+    """Guards the application boundary checker: verify it catches adapters, infrastructure, and api."""
+    offender = tmp_path / "bad_application_module.py"
+    offender.write_text(
+        "from agentpay.adapters.in_memory.payment_repository import InMemoryPaymentRepository\n"
+        "from agentpay.infrastructure.database.models import OrderModel\n"
+        "import agentpay.api.app\n",
+        encoding="utf-8",
+    )
+    assert forbidden_application_imports(offender) == {
+        "agentpay.adapters.in_memory.payment_repository",
+        "agentpay.infrastructure.database.models",
+        "agentpay.api.app",
+    }
+
+    offender.write_text(
+        'import importlib\nimportlib.import_module("agentpay.adapters")\n', encoding="utf-8"
+    )
+    assert forbidden_application_imports(offender) == {"agentpay.adapters"}
+
+
+def test_application_boundary_checker_allows_valid_application_imports(
+    tmp_path: Path,
+) -> None:
+    compliant = tmp_path / "good_application_module.py"
+    compliant.write_text(
+        "from __future__ import annotations\n"
+        "from agentpay.domain.money import Money\n"
+        "from agentpay.application.ports.payment_port import PaymentRepository\n",
+        encoding="utf-8",
+    )
+    assert forbidden_application_imports(compliant) == set()

@@ -1,8 +1,8 @@
-"""Thin Developer SDK Client for AgentPay (§109).
+"""Thin Developer SDK for AgentPay Control Plane (§109).
 
 Exposes typed interfaces for ActionRequest submission, approval status polling,
 product catalog discovery, and emergency kill switch controls. Supports both
-remote HTTP endpoints and optional in-process application dispatch.
+in-process application dispatch (for fast, hermetic execution) and remote HTTP endpoints.
 """
 
 from __future__ import annotations
@@ -11,7 +11,10 @@ import json
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentpay.api.app import AgentPayApiApp
 
 
 class AgentPayClientError(Exception):
@@ -150,8 +153,8 @@ class EmergencyClient:
 class AgentPay:
     """Thin developer SDK client for the AgentPay platform (§109).
 
-    Can be instantiated with an in-process application for hermetic local testing,
-    or with base_url and credentials for remote network execution.
+    Can be instantiated with an in-process AgentPayApiApp for fast, hermetic local
+    testing, or with base_url and credentials for remote network execution.
     """
 
     def __init__(
@@ -160,7 +163,7 @@ class AgentPay:
         bearer_token: str | None = None,
         tenant_id: str = "tenant_01",
         base_url: str = "http://localhost:8000",
-        app: Any | None = None,
+        app: AgentPayApiApp | None = None,
     ) -> None:
         self.api_key = api_key
         self.bearer_token = bearer_token
