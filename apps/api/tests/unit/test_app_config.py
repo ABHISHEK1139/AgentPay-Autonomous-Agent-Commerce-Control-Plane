@@ -20,6 +20,7 @@ import pytest
 from agentpay.adapters.mock.mock_decision_engine import MockDecisionEngine
 from agentpay.adapters.mock.mock_payment_provider import MockPaymentProvider
 from agentpay.adapters.model_gateway.model_gateway import ModelGateway
+from agentpay.adapters.model_gateway.openai_compatible_provider import OpenAiCompatibleModelProvider
 from agentpay.adapters.razorpay_payment_provider import InMemoryRazorpaySimulator
 from agentpay.adapters.stripe_payment_provider import InMemoryStripeSimulator
 from agentpay.api.factory import create_app
@@ -42,6 +43,51 @@ def test_default_local_config() -> None:
     assert config.seed_demo_data is True
     assert config.allow_unsafe_demo_seed is False
     assert config.tenant_id == "tenant_01"
+    assert config.model_user_agent is None
+    assert config.model_provider_timeout_seconds == 5.0
+    assert config.model_gateway_timeout_seconds == 3.0
+
+
+def test_openai_compatible_model_environment_settings() -> None:
+    config = AppConfig.from_env(
+        {
+            "AGENTPAY_DECISION_ENGINE": "openai_compatible",
+            "AGENTPAY_MODEL_API_KEY": "runtime-unit-test-key",
+            "AGENTPAY_MODEL_BASE_URL": "https://api.xingchiapi.com/v1",
+            "AGENTPAY_MODEL_NAME": "gpt-6.1-sol",
+            "AGENTPAY_MODEL_PROVIDER_NAME": "xingchiapi",
+            "AGENTPAY_MODEL_USER_AGENT": "Qoder",
+            "AGENTPAY_MODEL_PROVIDER_TIMEOUT_SECONDS": "45",
+            "AGENTPAY_MODEL_GATEWAY_TIMEOUT_SECONDS": "50",
+        }
+    )
+    assert config.decision_engine == DecisionEngineType.OPENAI_COMPATIBLE
+    assert config.model_base_url == "https://api.xingchiapi.com/v1"
+    assert config.model_name == "gpt-6.1-sol"
+    assert config.model_provider_name == "xingchiapi"
+    assert config.model_user_agent == "Qoder"
+    assert config.model_provider_timeout_seconds == 45.0
+    assert config.model_gateway_timeout_seconds == 50.0
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    ["AGENTPAY_MODEL_PROVIDER_TIMEOUT_SECONDS", "AGENTPAY_MODEL_GATEWAY_TIMEOUT_SECONDS"],
+)
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "invalid"])
+def test_model_timeouts_reject_non_positive_or_non_finite_values(env_name: str, value: str) -> None:
+    with pytest.raises(ConfigValidationError, match=env_name):
+        AppConfig.from_env({"AGENTPAY_DECISION_ENGINE": "openai_compatible", env_name: value})
+
+
+def test_model_user_agent_rejects_header_line_breaks() -> None:
+    with pytest.raises(ConfigValidationError, match="AGENTPAY_MODEL_USER_AGENT"):
+        AppConfig.from_env(
+            {
+                "AGENTPAY_DECISION_ENGINE": "openai_compatible",
+                "AGENTPAY_MODEL_USER_AGENT": "Qoder\r\nX-Injected: true",
+            }
+        )
 
 
 def test_explicit_development_mode() -> None:
@@ -186,6 +232,7 @@ def test_webhook_handler_fails_closed_without_secret() -> None:
             "x-webhook-timestamp": str(int(time.time())),
         },
         body={"event_id": "evt_no_secret_01"},
+        raw_body=b'{"event_id":"evt_no_secret_01"}',
     )
     assert status_code == 500
     assert body["error"]["code"] == "WEBHOOK_SECRET_NOT_CONFIGURED"
@@ -306,6 +353,31 @@ def test_factory_instantiates_model_gateway() -> None:
     config = AppConfig(decision_engine=DecisionEngineType.MODEL_GATEWAY)
     app = create_app(config=config)
     assert isinstance(app.orchestrator._decision_engine, ModelGateway)
+
+
+def test_factory_wires_openai_compatible_transport_settings() -> None:
+    config = AppConfig(
+        decision_engine=DecisionEngineType.OPENAI_COMPATIBLE,
+        model_api_key="runtime-unit-test-key",
+        model_base_url="https://api.xingchiapi.com/v1",
+        model_name="gpt-6.1-sol",
+        model_provider_name="xingchiapi",
+        model_user_agent="Qoder",
+        model_provider_timeout_seconds=45.0,
+        model_gateway_timeout_seconds=50.0,
+    )
+    app = create_app(config=config)
+    gateway = app.orchestrator._decision_engine
+    assert isinstance(gateway, ModelGateway)
+    assert gateway._timeout_seconds == 50.0
+    provider = gateway._provider
+    assert isinstance(provider, OpenAiCompatibleModelProvider)
+    assert provider.base_url == "https://api.xingchiapi.com/v1"
+    assert provider.model == "gpt-6.1-sol"
+    assert provider.provider_name == "xingchiapi"
+    assert provider.timeout_seconds == 45.0
+    assert provider.extra_headers == {"User-Agent": "Qoder"}
+    assert provider.api_key == "runtime-unit-test-key"
 
 
 def test_factory_explicit_provider_override() -> None:

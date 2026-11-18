@@ -15,7 +15,7 @@ export const EmergencyBanner: React.FC<EmergencyBannerProps> = ({ state, onResum
       role="alert"
       aria-live="assertive"
       aria-atomic="true"
-      className="bg-rose-600 text-white px-6 py-3.5 shadow-lg border-b border-rose-700 animate-pulse"
+      className="bg-rose-700 text-white px-6 py-3.5 shadow-lg border-b border-rose-800"
     >
       <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -39,7 +39,7 @@ export const EmergencyBanner: React.FC<EmergencyBannerProps> = ({ state, onResum
         <Button
           variant="secondary"
           size="sm"
-          className="bg-white text-rose-750 hover:bg-rose-50 border-0 font-bold shadow"
+          className="bg-white text-rose-700 hover:bg-rose-50 border-0 font-bold shadow"
           onClick={onResume}
           aria-label="Resume system operations and cancel emergency halt"
         >

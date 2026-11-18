@@ -5,8 +5,12 @@ import { EmergencyControlsModal } from "./EmergencyControlsModal";
 
 interface KillSwitchButtonProps {
   isPaused: boolean;
-  onPause: (action: EmergencyControlAction, operatorId: string, reason: string) => void;
-  onResume: () => void;
+  onPause: (
+    action: EmergencyControlAction,
+    operatorId: string,
+    reason: string
+  ) => void | Promise<void>;
+  onResume: () => void | Promise<void>;
 }
 
 export const KillSwitchButton: React.FC<KillSwitchButtonProps> = ({
@@ -20,8 +24,8 @@ export const KillSwitchButton: React.FC<KillSwitchButtonProps> = ({
     return (
       <Button
         variant="warning"
-        size="md"
-        className="font-black text-xs tracking-wider uppercase bg-amber-500 hover:bg-amber-600 border border-amber-600 shadow-md animate-pulse"
+        size="sm"
+        className="font-bold text-[11px] tracking-wide uppercase bg-amber-500 hover:bg-amber-600 border border-amber-600 shadow-md"
         onClick={onResume}
         aria-pressed="true"
         aria-label="Emergency pause active: Resume all transactions"
@@ -35,14 +39,15 @@ export const KillSwitchButton: React.FC<KillSwitchButtonProps> = ({
     <>
       <Button
         variant="danger"
-        size="md"
-        className="font-black text-xs tracking-wider uppercase shadow-lg shadow-rose-600/30 ring-2 ring-rose-400 hover:ring-rose-500 animate-pulse"
+        size="sm"
+        className="font-bold text-[11px] tracking-wide uppercase shadow-md shadow-rose-950/30 border border-rose-400/70 hover:bg-rose-500"
         onClick={() => setModalOpen(true)}
         aria-pressed="false"
         aria-haspopup="dialog"
         aria-label="Trigger emergency kill switch: pause all agent transactions per section 21 and 67"
       >
-        PAUSE ALL AGENT TRANSACTIONS (§67)
+        <span className="hidden xl:inline">PAUSE ALL AGENT TRANSACTIONS (§67)</span>
+        <span className="xl:hidden">PAUSE AGENTS</span>
       </Button>
 
       <EmergencyControlsModal

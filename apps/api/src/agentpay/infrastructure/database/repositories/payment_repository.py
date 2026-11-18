@@ -156,6 +156,30 @@ class SqlAlchemyRefundRepository(BaseSqlAlchemyRepository, RefundRepository):
                 existing.reason = refund.reason
             session.commit()
 
+    def list_for_payment_attempt(self, tenant_id: str, payment_attempt_id: str) -> list[Refund]:
+        with self._session() as session:
+            models = session.scalars(
+                select(RefundModel).where(
+                    RefundModel.tenant_id == tenant_id,
+                    RefundModel.payment_attempt_id == payment_attempt_id,
+                )
+            ).all()
+            return [
+                Refund(
+                    refund_id=model.refund_id,
+                    payment_attempt_id=model.payment_attempt_id,
+                    tenant_id=model.tenant_id,
+                    amount=Money(model.amount_minor, model.currency),
+                    reason=model.reason or "",
+                    created_at=(
+                        model.created_at
+                        if model.created_at.tzinfo is not None
+                        else model.created_at.replace(tzinfo=UTC)
+                    ),
+                )
+                for model in models
+            ]
+
 
 class SqlAlchemyIdempotencyStore(BaseSqlAlchemyRepository, IdempotencyStore):
     """SQLAlchemy-backed repository for IdempotencyRecord persistence."""

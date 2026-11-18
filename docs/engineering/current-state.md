@@ -1,10 +1,10 @@
 # Current State
 
-> **Evidence refresh:** 2026-10-18. Counts and status below reflect commands
+> **Evidence refresh:** 2026-11-18. Counts and status below reflect commands
 > actually run in this workspace, not historical README claims.
 
-Verified on this machine (Windows, PowerShell 5.1) with Python 3.12.10, Node v22.14.0, uv 0.12.22, ruff 0.16.10,
-mypy 2.4.0, pytest 9.1.1.
+Verified on this machine (Windows, PowerShell 5.1) with Python 3.12.10, Node v24.14.0, npm 11.9.0, uv 0.12.22,
+ruff 0.16.10, mypy 2.4.0, pytest 9.1.1.
 
 ## What exists
 
@@ -34,10 +34,10 @@ mypy 2.4.0, pytest 9.1.1.
 | Developer SDK | implemented | Thin typed Python client (`from agentpay import AgentPay`, §109) |
 | Web Control Center | implemented | `apps/web/`: 10-step inspectable pipeline, live API client integration (§14, §21, §66, §67), fail-closed approval grant→execute round-trip (§66), kill switch UI (§67), ARIA accessibility & keyboard navigation (§121) |
 | Ports & Adapters | implemented | Thread-safe in-memory repositories, Stripe & Razorpay payment adapters with HMAC-SHA256 signature verification and anti-replay windows, mock JEV decision engine |
-| Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), Alembic migrations `0001_initial_schema` … `0005_add_cart_tables` covering all 22 tables, verified on in-memory SQLite and offline SQL DDL generation |
-| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.2, agent-facing evidence endpoint (`GET /agent/products/{id}/evidence`, §32, §38), agent-facing cart endpoints (`POST /agent/carts`, `GET /agent/carts/{id}`, `POST /agent/carts/{id}/items`, `POST /agent/carts/{id}/items/remove`) and multi-item `POST /agent/checkout` with 8-field bound approvals (ADR-0006), HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
+| Relational Persistence (§49) | implemented | SQLAlchemy 2.0 models and tenant-scoped repositories (`infrastructure/database/`), Alembic migrations `0001_initial_schema` … `0007_order_cancellation_reason` covering all 22 tables, verified on in-memory SQLite, live PostgreSQL 17 (upgrade/downgrade round-trip + repository persistence), and offline SQL DDL generation |
+| HTTP API, Webhooks & Emergency Controls | implemented | Standard error envelopes with trace_id (§13, §47), OpenAPI 3.2, agent-facing evidence endpoint (`GET /agent/products/{id}/evidence`, §32, §38), agent-facing cart endpoints (`POST /agent/carts`, `GET /agent/carts/{id}`, `POST /agent/carts/{id}/items`, `POST /agent/carts/{id}/items/remove`) and multi-item `POST /agent/checkout` with 9-field bound approvals (ADR-0006, ADR-0007), HMAC-SHA256 Payment Webhooks (`POST /api/v1/webhooks/payments`, §61), Kill switch (§21, §67), strict least-privilege `ApiTestClient` with explicit caller persona requirements |
 | Operational Runbooks | implemented | All 9 named runbooks in `docs/runbooks/` (§133) |
-| Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-006 (§87) |
+| Engineering Journal | implemented | `docs/engineering/experiments.md` documenting EXP-001 through EXP-009 (§87) |
 | Security Assurance | implemented | OWASP ASVS v4.0.3 verification matrix, YAML index, exceptions in `security/asvs/` (§53) |
 | CLI & Server Runtime | implemented | Zero-dependency multi-threaded HTTP server (`server.py`), CLI runner (`cli.py`), application factory (`create_app()`) |
 | Standalone Packages | implemented | `packages/sdk`, `packages/protocol-types`, `packages/schemas`, `packages/test-utils` per §9 |
@@ -49,27 +49,38 @@ mypy 2.4.0, pytest 9.1.1.
 Verified command results:
 
 ```text
-uv run ruff format --check .                                            211 files already formatted
+uv run ruff format --check .                                            219 files already formatted
 uv run ruff check .                                                     All checks passed!
-uv run mypy                                                             Success: no issues found in 194 source files
-uv run pytest                                                           904 passed, 3 skipped
-node --test tests/web.test.mjs                                          6 passed (incl. live API & §121 accessibility)
+uv run mypy                                                             Success: no issues found in 200 source files
+uv run pytest                                                           972 passed, 3 skipped
+node --test tests/web.test.mjs                                          7 passed (incl. live API & §121 accessibility)
 uv run python tests/adversarial/stress_test_client_privilege.py          6/6 passed (incl. unconfigured fail-closed)
 uv run python tests/adversarial/stress_test_concurrency.py              4/4 passed
 uv run python tests/adversarial/stress_test_m1_tenant_isolation.py       4/4 passed (tenant partition enforcement)
 uv run python tests/adversarial/stress_test_m2_durable_webhooks.py       5/5 passed (durable replay & crash survival)
 uv run python tests/adversarial/stress_test_m2_saga_concurrency.py       8/8 passed (SAGA stock compensation)
 uv run python tests/adversarial/stress_test_m3_sandbox_config.py         103/103 passed (fail-closed environment profiles)
-uv run python tests/adversarial/stress_test_m4_approval_binding.py       6/6 passed (8-field exact binding)
+uv run python tests/adversarial/stress_test_m4_approval_binding.py       6/6 passed (9-field exact binding)
 uv run python tests/adversarial/stress_test_m4_challenger_edge_cases.py   6/6 passed (immutability & 30-thread race)
 uv run python tests/adversarial/stress_test_m6_shared_operational_controls.py 4/4 passed (multi-instance shared pause)
 uv run python tests/adversarial/stress_test_m7_auth_deployment_profile.py 5/5 passed (auth header vs token claims)
 uv run python tests/adversarial/stress_test_m8_sandbox_e2e_reconciliation.py 5/5 passed (simulated Razorpay sandbox E2E)
 Live validation: PostgreSQL migrations/schema passed, Redis `PONG` passed, Razorpay sandbox order creation passed
 with configured test credentials, and PostgreSQL dump/restore passed with 20 restored tables.
-Local AI validation: Ollama model `llamacpp:2cf98652fdc60fbb161f69c1c5cd5cca671992211d1214edb11dabeb56434a0d`
-(7.2 GB) passed through the OpenAI-compatible model gateway: normal commerce returned `ALLOW/LOW`, and
-prompt-injection input returned `DENY/HIGH`.
+Local AI validation: Ollama 0.40.16 with `qwen2.5:1.5b` passed through the real OpenAI-compatible provider and
+model gateway. Cold and warm commerce calls returned real non-fallback advisory `DENY/HIGH` responses in 58.555s
+and 1.231s respectively; prompt-injection input returned deterministic guardian `DENY/CRITICAL` with
+`PROMPT_INJECTION_DETECTED`. `ollama ps` reported 100% GPU placement, and an `nvidia-smi` sample on the RTX 3050
+Laptop GPU reported 1204 MiB used and 88% utilization. These are functional observations, not model-quality or
+production-performance evidence.
+Hosted AI validation: one real hosted completion returned advisory `REVIEW/MEDIUM`, confidence 0.93, in 41.867s.
+A later request received HTTP 503 and one bounded advisory-only retry received HTTP 502; both prove fail-closed
+fallback behavior, not current hosted availability.
+Live Control Center validation: authenticated emergency pause/resume and approval mutations were confirmed by
+independent API state; keyboard/focus contracts, all 8 scenarios, and a 526px responsive viewport were exercised
+through browser DOM, accessibility, network, and layout inspection. Screenshot capture was unavailable.
+Request-isolation regression validation: concurrent response-header ownership and both oversized-request trace
+cleanup paths passed focused regression tests and are included in the full backend result above.
 uv run python tests/adversarial/stress_test_model_gateway_resilience.py  6/6 passed
 uv run python tests/adversarial/stress_test_money.py                    6/6 passed
 uv run python tests/adversarial/stress_test_protocols.py                70/70 passed

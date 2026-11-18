@@ -58,7 +58,7 @@ def create_request_handler(
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Tenant-ID, X-API-Key, X-Request-ID, "
                 "X-Webhook-Signature, X-Webhook-Timestamp, X-Razorpay-Signature, "
-                "Stripe-Signature, Accept",
+                "Stripe-Signature, Accept, Idempotency-Key",
             )
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
@@ -197,9 +197,10 @@ def create_request_handler(
 
             # 5. Dispatch to AgentPay application (query string stripped so routes
             # with query parameters still match)
-            status_code, response_body = app.handle_request(
+            response = app.handle_request(
                 method, clean_path, headers_dict, json_body, raw_body=raw_bytes
             )
+            status_code, response_body = response
 
             # 6. Write HTTP response
             resp_bytes = json.dumps(response_body).encode("utf-8")
@@ -208,7 +209,7 @@ def create_request_handler(
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_bytes)))
 
-            for hk, hv in app.last_response_headers.items():
+            for hk, hv in response.headers.items():
                 self.send_header(hk, hv)
 
             self.end_headers()

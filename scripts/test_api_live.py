@@ -55,7 +55,7 @@ class LiveApiTester:
         method: str,
         path: str,
         headers: dict[str, str] | None = None,
-        data: dict[str, Any] | None = None,
+        data: dict[str, Any] | bytes | None = None,
     ) -> tuple[int, dict[str, Any], dict[str, str], float]:
         url = f"{self.base_url}{path}"
         req_headers = {"Accept": "application/json"}
@@ -64,7 +64,9 @@ class LiveApiTester:
 
         body_bytes = None
         if data is not None:
-            body_bytes = json.dumps(data).encode("utf-8")
+            # bytes pass through untouched so HMAC-signed payloads reach the
+            # server as the exact bytes that were signed (§61).
+            body_bytes = data if isinstance(data, bytes) else json.dumps(data).encode("utf-8")
             req_headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=body_bytes, headers=req_headers, method=method)
@@ -488,7 +490,7 @@ class LiveApiTester:
                 "x-webhook-timestamp": wh_ts,
                 "x-tenant-id": self.tenant_id,
             },
-            data=wh_body,
+            data=wh_raw.encode("utf-8"),
         )
         self.assert_test(
             "23. HMAC-SHA256 Webhook Ingestion",
@@ -507,7 +509,7 @@ class LiveApiTester:
                 "x-webhook-timestamp": wh_ts,
                 "x-tenant-id": self.tenant_id,
             },
-            data=wh_body,
+            data=wh_raw.encode("utf-8"),
         )
         self.assert_test(
             "24. Anti-Replay Webhook Defense",
@@ -526,7 +528,7 @@ class LiveApiTester:
                 "x-webhook-timestamp": wh_ts,
                 "x-tenant-id": self.tenant_id,
             },
-            data=wh_body,
+            data=wh_raw.encode("utf-8"),
         )
         self.assert_test(
             "25. Tampered Webhook Signature Rejection",

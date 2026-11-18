@@ -304,13 +304,11 @@ def test_live_server_signed_payment_webhook(live_server: tuple[str, int]) -> Non
         "status": "CAPTURED",
     }
     ts = int(datetime.now(UTC).timestamp())
-    raw_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    canonical = f"{ts}.{raw_json}"
+    # Providers sign the exact raw bytes sent; send the same bytes signed.
+    data_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     signature = hmac.new(
-        secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256
+        secret.encode("utf-8"), f"{ts}.".encode() + data_bytes, hashlib.sha256
     ).hexdigest()
-
-    data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{base_url}/api/v1/webhooks/payments",
         data=data_bytes,

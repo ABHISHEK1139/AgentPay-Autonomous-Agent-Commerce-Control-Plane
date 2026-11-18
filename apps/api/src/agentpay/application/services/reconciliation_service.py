@@ -238,6 +238,39 @@ class PaymentReconciler:
         refund: Refund | None = None
 
         if event_type == "payment.captured":
+            captured_amount_raw: Any = None
+            for candidate in (
+                payload.get("amount_minor"),
+                data_dict.get("amount_minor"),
+                payload.get("amount"),
+                data_dict.get("amount"),
+            ):
+                if candidate is not None:
+                    captured_amount_raw = candidate
+                    break
+            captured_currency_raw = payload.get("currency") or data_dict.get("currency")
+            if isinstance(captured_amount_raw, dict):
+                amount_object = captured_amount_raw
+                captured_amount_raw = amount_object.get("minor_units")
+                captured_currency_raw = captured_currency_raw or amount_object.get("currency")
+            if captured_amount_raw is not None:
+                if isinstance(captured_amount_raw, bool) or not isinstance(
+                    captured_amount_raw, int
+                ):
+                    raise InvalidPaymentError("Webhook captured amount must be integer minor units")
+                if captured_amount_raw != attempt.amount.minor_units:
+                    raise InvalidPaymentError(
+                        f"Webhook captured amount {captured_amount_raw} does not match "
+                        f"authorized amount {attempt.amount.minor_units}"
+                    )
+            if (
+                captured_currency_raw is not None
+                and str(captured_currency_raw).upper() != attempt.amount.currency
+            ):
+                raise InvalidPaymentError(
+                    f"Webhook captured currency '{captured_currency_raw}' does not match "
+                    f"authorized currency '{attempt.amount.currency}'"
+                )
             if attempt.status in (PaymentStatus.FAILED, PaymentStatus.DECLINED):
                 raise InvalidPaymentError(
                     f"Cannot capture payment '{effective_attempt_id}' in terminal failure status '{attempt.status.value}'"
@@ -404,7 +437,69 @@ class PaymentReconciler:
                     "refund_id": str(existing_refund_id) if existing_refund_id else None,
                 }
 
-            updated_attempt = attempt.transition_to(PaymentStatus.REFUNDED)
+            # Validate the webhook-declared refund amount when present (§41):
+            # positive minor units, same currency, never exceeding the captured
+            # balance. Absent amount means a full refund (backwards compatible
+            # with providers that omit it).
+            refund_minor_raw: Any = None
+            for candidate in (
+                payload.get("amount_minor"),
+                data_dict.get("amount_minor"),
+                payload.get("refund_amount_minor"),
+                data_dict.get("refund_amount_minor"),
+            ):
+                if candidate is not None:
+                    refund_minor_raw = candidate
+                    break
+            refund_currency_raw: Any = payload.get("currency") or data_dict.get("currency")
+            from agentpay.domain.money import Money as _Money
+
+            refund_amount: _Money
+            target_status: PaymentStatus
+            if refund_minor_raw is not None:
+                if isinstance(refund_minor_raw, bool) or not isinstance(refund_minor_raw, int):
+                    raise InvalidPaymentError(
+                        "Webhook refund amount_minor must be an integer "
+                        f"(minor units), got {refund_minor_raw!r}"
+                    )
+                if refund_minor_raw <= 0:
+                    raise InvalidPaymentError(
+                        f"Webhook refund amount_minor must be positive, got {refund_minor_raw}"
+                    )
+                prior_refunded_minor = 0
+                if self._refund_repo is not None:
+                    prior_refunded_minor = sum(
+                        refund.amount.minor_units
+                        for refund in self._refund_repo.list_for_payment_attempt(
+                            effective_tenant, effective_attempt_id
+                        )
+                    )
+                if prior_refunded_minor + refund_minor_raw > attempt.amount.minor_units:
+                    raise InvalidPaymentError(
+                        f"Cumulative webhook refunds of {prior_refunded_minor + refund_minor_raw} "
+                        f"{attempt.amount.currency} exceed captured balance {attempt.amount.minor_units} "
+                        f"{attempt.amount.currency}"
+                    )
+                if refund_currency_raw is not None and str(refund_currency_raw).upper() != (
+                    attempt.amount.currency
+                ):
+                    raise InvalidPaymentError(
+                        f"Webhook refund currency '{refund_currency_raw}' does not match "
+                        f"captured currency '{attempt.amount.currency}'"
+                    )
+                refund_amount = _Money(
+                    minor_units=refund_minor_raw, currency=attempt.amount.currency
+                )
+                target_status = (
+                    PaymentStatus.REFUNDED
+                    if refund_minor_raw == attempt.amount.minor_units
+                    else PaymentStatus.PARTIALLY_REFUNDED
+                )
+            else:
+                refund_amount = attempt.amount
+                target_status = PaymentStatus.REFUNDED
+
+            updated_attempt = attempt.transition_to(target_status)
             self._repo.save(effective_tenant, updated_attempt)
 
             refund_id = str(
@@ -419,15 +514,20 @@ class PaymentReconciler:
                 refund_id=refund_id,
                 payment_attempt_id=effective_attempt_id,
                 tenant_id=effective_tenant,
-                amount=attempt.amount,
+                amount=refund_amount,
                 reason=refund_reason,
             )
 
             if self._refund_repo is not None:
                 self._refund_repo.save(effective_tenant, refund)
 
-            # SAGA restock if applicable
-            if order is not None and self._order_repo is not None:
+            # SAGA restock if applicable. A partial payment refund does not
+            # cancel the order or restock inventory; only a full REFUNDED does.
+            if (
+                order is not None
+                and self._order_repo is not None
+                and target_status is PaymentStatus.REFUNDED
+            ):
                 if order.status is OrderStatus.CONFIRMED:
                     refunded_order = Order(
                         order_id=order.order_id,
@@ -449,7 +549,7 @@ class PaymentReconciler:
                         self._inventory_repo.release(
                             effective_tenant, order.variant_id, order.quantity
                         )
-            elif self._inventory_repo is not None:
+            elif self._inventory_repo is not None and target_status is PaymentStatus.REFUNDED:
                 variant_id = str(payload.get("variant_id") or data_dict.get("variant_id") or "")
                 if variant_id:
                     qty = int(payload.get("quantity") or data_dict.get("quantity") or 1)
@@ -467,7 +567,7 @@ class PaymentReconciler:
                         "amount_minor": refund.amount.minor_units,
                         "reason": refund.reason,
                         "order_id": order.order_id if order else None,
-                        "status": PaymentStatus.REFUNDED.value,
+                        "status": target_status.value,
                     },
                     agent_id=order.agent_id if order else None,
                     trace_id=trace_id,

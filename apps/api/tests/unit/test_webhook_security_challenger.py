@@ -126,6 +126,11 @@ def test_challenger_probe_1_forged_signatures() -> None:
 
     tampered_payload = dict(legit_payload)
     tampered_payload["amount"] = 999999
+    # Raw bytes are the tampered body (as a real HTTP server would receive);
+    # the signature was computed over the legitimate body and must not verify.
+    tampered_raw = json.dumps(tampered_payload, separators=(",", ":"), sort_keys=True).encode(
+        "utf-8"
+    )
     resp_tampered = client.request(
         "POST",
         "/api/v1/webhooks/payments",
@@ -136,6 +141,7 @@ def test_challenger_probe_1_forged_signatures() -> None:
         },
         json_body=tampered_payload,
         auth=False,
+        raw_body=tampered_raw,
     )
     assert resp_tampered.status_code == 401
     assert resp_tampered.body["error"]["code"] == "INVALID_WEBHOOK_SIGNATURE"

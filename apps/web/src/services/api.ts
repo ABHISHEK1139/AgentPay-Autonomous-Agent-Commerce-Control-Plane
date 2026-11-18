@@ -86,26 +86,32 @@ export class ControlCenterApiService {
 
   public async triggerEmergencyPause(operatorId: string, reason: string): Promise<EmergencyState> {
     if (!this._demoMode) {
+      let res: Response;
       try {
-        const res = await fetch(`${this._baseUrl}/api/v1/emergency/pause`, {
+        res = await fetch(`${this._baseUrl}/api/v1/emergency/pause`, {
           method: "POST",
           headers: this.buildHeaders(),
           body: JSON.stringify({ operator_id: operatorId, reason }),
         });
-        if (res.ok) {
-          const body = await res.json();
-          this._emergencyState = {
-            isPaused: Boolean(body.emergency_paused ?? body.paused ?? true),
-            pausedAt: body.paused_at || new Date().toISOString(),
-            pausedBy: operatorId,
-            reason,
-            scope: "GLOBAL",
-          };
-          return { ...this._emergencyState };
-        }
-      } catch {
-        // Fallback
+      } catch (err) {
+        throw new Error(
+          `Emergency pause could not reach the live API: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
+      if (!res.ok) {
+        throw new Error(
+          `Emergency pause failed (HTTP ${res.status}): ${await this.readApiError(res)}`
+        );
+      }
+      const body = await res.json();
+      this._emergencyState = {
+        isPaused: Boolean(body.emergency_paused ?? body.paused ?? true),
+        pausedAt: body.paused_at || new Date().toISOString(),
+        pausedBy: operatorId,
+        reason,
+        scope: "GLOBAL",
+      };
+      return { ...this._emergencyState };
     }
     this._emergencyState = {
       isPaused: true,
@@ -119,22 +125,28 @@ export class ControlCenterApiService {
 
   public async triggerEmergencyResume(operatorId: string): Promise<EmergencyState> {
     if (!this._demoMode) {
+      let res: Response;
       try {
-        const res = await fetch(`${this._baseUrl}/api/v1/emergency/resume`, {
+        res = await fetch(`${this._baseUrl}/api/v1/emergency/resume`, {
           method: "POST",
           headers: this.buildHeaders(),
           body: JSON.stringify({ operator_id: operatorId }),
         });
-        if (res.ok) {
-          this._emergencyState = {
-            isPaused: false,
-            scope: "GLOBAL",
-          };
-          return { ...this._emergencyState };
-        }
-      } catch {
-        // Fallback
+      } catch (err) {
+        throw new Error(
+          `Emergency resume could not reach the live API: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
+      if (!res.ok) {
+        throw new Error(
+          `Emergency resume failed (HTTP ${res.status}): ${await this.readApiError(res)}`
+        );
+      }
+      this._emergencyState = {
+        isPaused: false,
+        scope: "GLOBAL",
+      };
+      return { ...this._emergencyState };
     }
     this._emergencyState = {
       isPaused: false,

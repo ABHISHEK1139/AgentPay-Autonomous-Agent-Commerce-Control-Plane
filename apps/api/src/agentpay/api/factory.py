@@ -327,12 +327,26 @@ def _verify_database_schema_ready(engine: Any) -> None:
         "provider_transaction_mappings",
         "emergency_pause_records",
     }
+    from agentpay.infrastructure.database.models import Base
+
+    required_tables.update(Base.metadata.tables)
     missing = required_tables - existing_tables
     if missing or "alembic_version" not in existing_tables:
         missing_desc = sorted(missing or {"alembic_version"})
         raise ConfigValidationError(
             f"Database schema is not ready for environment. Missing required tables: {missing_desc}. "
             "Run 'agentpay migrate' or 'alembic upgrade head' before starting in production or sandbox mode (§49, AP-007)."
+        )
+
+    missing_columns = {
+        name: sorted(set(table.columns.keys()) - {c["name"] for c in inspector.get_columns(name)})
+        for name, table in Base.metadata.tables.items()
+    }
+    missing_columns = {name: columns for name, columns in missing_columns.items() if columns}
+    if missing_columns:
+        raise ConfigValidationError(
+            f"Database schema is not ready. Missing required columns: {missing_columns}. "
+            "Run 'agentpay migrate' or 'alembic upgrade head' before starting."
         )
 
 
@@ -528,8 +542,13 @@ def create_app(
                     base_url=cfg.model_base_url,
                     model=cfg.model_name,
                     provider_name=cfg.model_provider_name,
+                    timeout_seconds=cfg.model_provider_timeout_seconds,
+                    extra_headers=(
+                        {"User-Agent": cfg.model_user_agent} if cfg.model_user_agent else None
+                    ),
                     allow_private_network=cfg.model_allow_private_network,
-                )
+                ),
+                timeout_seconds=cfg.model_gateway_timeout_seconds,
             )
         elif cfg.decision_engine == DecisionEngineType.MODEL_GATEWAY:
             if cfg.openrouter_api_key and not is_placeholder_secret(cfg.openrouter_api_key):

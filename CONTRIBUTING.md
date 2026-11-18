@@ -31,8 +31,8 @@ Every pull request must pass all quality gates locally and in CI without excepti
 ```powershell
 uv run ruff format --check .       # Code style & formatting across all Python files
 uv run ruff check .                # Strict linter rules
-uv run mypy                        # Strict static type checking (0 errors across 194 files)
-uv run pytest                      # 904 passed, 3 opt-in credential tests skipped
+uv run mypy                        # Strict static type checking (0 errors across 200 files)
+uv run pytest                      # 972 passed, 3 opt-in credential tests skipped
 node --test tests/web.test.mjs     # 6 Control Center web suites (ARIA §121 & live API client)
 ```
 

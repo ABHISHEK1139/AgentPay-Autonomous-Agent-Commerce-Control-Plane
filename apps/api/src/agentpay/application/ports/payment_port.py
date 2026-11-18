@@ -77,6 +77,10 @@ class RefundRepository(Protocol):
         """Persist or update a refund."""
         ...
 
+    def list_for_payment_attempt(self, tenant_id: str, payment_attempt_id: str) -> list[Refund]:
+        """Return refunds already recorded for one payment attempt."""
+        ...
+
 
 @runtime_checkable
 class OrderRepository(Protocol):

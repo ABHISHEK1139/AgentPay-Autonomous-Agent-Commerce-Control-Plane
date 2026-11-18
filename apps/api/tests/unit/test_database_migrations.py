@@ -158,7 +158,7 @@ def test_alembic_current_and_heads_inspection() -> None:
 
     script = ScriptDirectory.from_config(config)
     heads = script.get_heads()
-    assert heads == ["0007_add_order_cancellation_reason"]
+    assert heads == ["0007_order_cancellation_reason"]
 
     rev1 = script.get_revision("0001_initial_schema")
     assert rev1 is not None
@@ -189,7 +189,26 @@ def test_alembic_current_and_heads_inspection() -> None:
     assert rev6.doc == "add_approval_binding_agent"
     assert rev6.down_revision == "0005_add_cart_tables"
 
-    rev7 = script.get_revision("0007_add_order_cancellation_reason")
+    rev7 = script.get_revision("0007_order_cancellation_reason")
     assert rev7 is not None
     assert rev7.doc == "add_order_cancellation_reason"
     assert rev7.down_revision == "0006_add_approval_agent_id"
+
+
+def test_revision_ids_fit_postgres_version_column() -> None:
+    """Every revision ID must fit alembic_version.version_num VARCHAR(32) on PostgreSQL (§49, §100).
+
+    SQLite does not enforce VARCHAR lengths, so an over-long ID only fails when
+    stamping the version table on a real PostgreSQL database.
+    """
+    config = get_alembic_config("sqlite:///:memory:")
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(config)
+    revisions = list(script.walk_revisions())
+    assert revisions, "migration chain must not be empty"
+    for rev in revisions:
+        assert len(rev.revision) <= 32, (
+            f"Revision {rev.revision!r} is {len(rev.revision)} chars; PostgreSQL "
+            "alembic_version.version_num is VARCHAR(32)"
+        )

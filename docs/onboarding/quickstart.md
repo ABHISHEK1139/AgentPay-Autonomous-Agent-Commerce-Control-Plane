@@ -226,10 +226,10 @@ curl -X POST http://127.0.0.1:8000/api/v1/emergency/resume `
 AgentPay maintains a zero-tolerance policy for test failures, lint errors, or type regressions. To run the full verification battery:
 
 ```powershell
-uv run ruff format --check .       # Code style (211 files clean)
+uv run ruff format --check .       # Code style (219 files clean)
 uv run ruff check .                # Lint rules (clean)
-uv run mypy                        # Strict static type checking (0 errors across 194 files)
-uv run pytest                      # 904 passed, 3 opt-in credential tests skipped
+uv run mypy                        # Strict static type checking (0 errors across 200 files)
+uv run pytest                      # 972 passed, 3 opt-in credential tests skipped
 node --test tests/web.test.mjs     # 6 Control Center web tests (ARIA §121 & live client)
 ```
 

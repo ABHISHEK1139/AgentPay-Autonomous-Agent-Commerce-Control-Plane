@@ -18,10 +18,10 @@
 A full vertical slice is **implemented and verified** (independently re-run, not taken on trust).
 This section is the map of what actually exists:
 
-- **Gates, all green:** `ruff format --check` (213 files), `ruff check` (clean), `mypy --strict`
-  (196 files, clean), `pytest` (**943 passed, 0 failed, 3 explicitly opt-in skips**). Tool versions are locked:
+- **Gates, all green:** `ruff format --check` (219 files), `ruff check` (clean), `mypy --strict`
+  (200 files, clean), `pytest` (**972 passed, 0 failed, 3 explicitly opt-in skips**). Tool versions are locked:
   ruff 0.16.10, mypy 2.4.0, pytest 9.1.1, hypothesis 6.168.5.
-- **Auxiliary suites, all green:** 6 node web tests (`node --test tests/web.test.mjs`, including §121
+- **Auxiliary suites, all green:** 7 node web tests (`node --test tests/web.test.mjs`, including §121
   ARIA accessibility, keyboard contracts, and authenticated live API client integration), 70/70 protocol
   adversarial probes, 4/4 concurrency probes, 6/6 test-client privilege probes (including strict unconfigured
   fail-closed verification), 6/6 currency/money probes, 8/8 webhook replay/concurrency probes,
@@ -29,7 +29,7 @@ This section is the map of what actually exists:
   audit-chain verifier CLI (`scripts/verify_audit_chain.py --help`), and CycloneDX 1.5 SBOM & SLSA 1.2 provenance generator
   (`scripts/generate_sbom.py --verify`).
 - **Backend confirmed present:** 17 domain modules (`Money` + ISO 4217 `currencies` exponent table,
-  `ActionRequest`, identity, policy, approval with exact 8-field binding, SHA-256 chained audit
+  `ActionRequest`, identity, policy, approval with exact 9-field binding (ADR-0007, strengthening §20), SHA-256 chained audit
   ledger with redaction, commerce, multi-item `Cart` (ADR-0006, single-merchant), evidence conflicts,
   payments, decision, safety budgets, tool
   registry, `OutboxEvent`, `SecurityEvent`); application ports, services (`AgentAuthorizationService`,
@@ -44,7 +44,8 @@ This section is the map of what actually exists:
   test client (`ApiTestClient`, strictly requiring explicit caller personas or bearer credentials).
 - **Adapters confirmed present:** tenant-partitioned, lock-guarded in-memory repositories AND
   SQLAlchemy 2.0 relational models/repositories (`infrastructure/database/`, verified against
-  in-memory SQLite and Alembic migrations `0001_initial_schema` … `0005_add_cart_tables`
+  in-memory SQLite and live PostgreSQL 17 (upgrade/downgrade round-trip + repository persistence)
+  via Alembic migrations `0001_initial_schema` … `0007_order_cancellation_reason`
   covering all 22 relational tables);
   `StripePaymentProvider` and `RazorpayPaymentProvider` with cryptographic HMAC-SHA256 signature
   verification, timestamp tolerance windows, and webhook event normalization; `MockPaymentProvider`;
@@ -98,7 +99,7 @@ uv run pytest --hypothesis-show-statistics   # proves property tests really ran 
 Auxiliary verification suites (outside `pytest`; all verified green):
 
 ```powershell
-node --test tests/web.test.mjs                                           # 6 web tests (forwards to apps/web/tests/)
+node --test tests/web.test.mjs                                           # 7 web tests (forwards to apps/web/tests/)
 uv run python tests/adversarial/stress_test_protocols.py                 # 70/70 adversarial probes
 uv run python tests/adversarial/stress_test_concurrency.py               # 4/4 concurrency probes
 uv run python tests/adversarial/stress_test_client_privilege.py          # 6/6 least-privilege client probes

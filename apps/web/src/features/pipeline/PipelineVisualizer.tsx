@@ -13,7 +13,7 @@ export const PipelineVisualizer: React.FC<PipelineVisualizerProps> = ({ executio
 
   if (!execution) {
     return (
-      <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-slate-500">
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-500 shadow-sm">
         Select or run a scenario to inspect the 10-step pipeline.
       </div>
     );
@@ -27,72 +27,92 @@ export const PipelineVisualizer: React.FC<PipelineVisualizerProps> = ({ executio
   const getOverallBadge = (status: PipelineExecution["overallStatus"]): { variant: BadgeVariant; label: string } => {
     switch (status) {
       case "COMPLETED":
-        return { variant: "success", label: "TRANSACTION ALLOWED & COMPLETED" };
+        return { variant: "success", label: "ALLOWED & COMPLETED" };
       case "BLOCKED":
-        return { variant: "warning", label: "HALTED FOR HUMAN APPROVAL (§66)" };
+        return execution.scenarioId === "scen_6"
+          ? { variant: "info", label: "PAYMENT UNKNOWN — RECONCILIATION REQUIRED (§43)" }
+          : { variant: "warning", label: "HALTED FOR HUMAN APPROVAL (§66)" };
       case "FAILED":
-        return { variant: "danger", label: "BLOCKED BY POLICY / INTEGRITY FAIL-CLOSED (§2.4)" };
+        return { variant: "danger", label: "BLOCKED FAIL-CLOSED (§2.4)" };
       case "RUNNING":
-        return { variant: "info", label: "PIPELINE EXECUTING..." };
+        return { variant: "info", label: "SIMULATION RUNNING…" };
       case "PAUSED":
         return { variant: "danger", label: "SYSTEM EMERGENCY PAUSED (§21, §67)" };
     }
   };
 
+  const navigateToStep = (index: number) => {
+    setSelectedStepIndex(index);
+    document.getElementById(`pipeline-step-${index}`)?.focus();
+  };
+
+  const formatMoney = () =>
+    new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: execution.currency,
+      minimumFractionDigits: 2,
+    }).format(execution.amountMinor / 100);
+
   const badge = getOverallBadge(execution.overallStatus);
+  const completedSteps = execution.steps.filter((step) => step.status !== "IDLE" && step.status !== "RUNNING").length;
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-4 border-b border-slate-100">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-bold text-slate-900">
-              Autonomous Transaction Pipeline (§111)
+    <section
+      aria-labelledby="pipeline-title"
+      aria-busy={execution.overallStatus === "RUNNING"}
+      className="bg-white/95 rounded-2xl border border-slate-200 p-5 sm:p-6 shadow-sm"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-4 pb-5 mb-5 border-b border-slate-100">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h2 id="pipeline-title" className="text-lg font-bold tracking-tight text-slate-900">
+              Transaction Trust Pipeline
             </h2>
             <Badge variant={badge.variant}>{badge.label}</Badge>
           </div>
-          <p className="text-xs text-slate-500 mt-0.5 font-mono">
-            Action: <span className="text-slate-800 font-semibold">{execution.actionId}</span> • Tenant:{" "}
-            <span className="text-slate-800">{execution.tenantId}</span> • Agent:{" "}
-            <span className="text-slate-800">{execution.agentId}</span>
+          <p className="text-[11px] text-slate-500 mt-2 font-mono break-words leading-relaxed">
+            {execution.actionId} • {execution.tenantId} • {execution.agentId}
           </p>
         </div>
 
-        <div className="flex items-center gap-3 text-xs font-mono">
-          <div className="bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700">
-            Amount: <span className="font-bold text-slate-900">₹{(execution.amountMinor / 100).toLocaleString("en-IN", { minimumFractionDigits: 2 })}</span>
+        <div className="flex items-center gap-2 text-xs font-mono">
+          <div className="bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 text-slate-600">
+            Amount <span className="block font-bold text-sm text-slate-900 mt-0.5">{formatMoney()}</span>
           </div>
-          <div className="bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700">
-            Total Latency:{" "}
-            <span className="font-bold text-slate-900">
-              {execution.steps.reduce((acc, s) => acc + s.durationMs, 0)}ms
-            </span>
+          <div className="bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 text-slate-600">
+            Progress <span className="block font-bold text-sm text-slate-900 mt-0.5">{completedSteps}/10 steps</span>
           </div>
         </div>
       </div>
 
-      {/* 10-Step Horizontal Scrollable or Wrapped Grid */}
-      <div className="overflow-x-auto pb-2">
-        <div className="flex items-stretch gap-2 min-w-[1300px]">
-          {execution.steps.map((step, idx) => (
-            <React.Fragment key={step.id}>
-              <StepNode
-                step={step}
-                index={idx}
-                isSelected={selectedStepIndex === idx}
-                onClick={() => setSelectedStepIndex(idx)}
-              />
-              {idx < execution.steps.length - 1 && (
-                <div className="flex items-center justify-center text-slate-300 px-0.5 select-none font-bold text-xs">
-                  →
-                </div>
-              )}
-            </React.Fragment>
-          ))}
-        </div>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <p className="text-xs text-slate-500">
+          Select a step to inspect its evidence. Use arrow keys to move between steps.
+        </p>
+        <span className="hidden sm:inline text-[10px] font-mono uppercase tracking-wider text-slate-400">§111 Live transaction viewer</span>
       </div>
 
-      {/* Detail Inspection Drawer */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3" role="group" aria-label="Transaction pipeline steps">
+        {execution.steps.map((step, idx) => (
+          <StepNode
+            key={step.id}
+            step={step}
+            index={idx}
+            isSelected={selectedStepIndex === idx}
+            tabIndex={selectedStepIndex === idx || (selectedStepIndex === null && idx === 0) ? 0 : -1}
+            onClick={() => setSelectedStepIndex(idx)}
+            onNavigate={navigateToStep}
+            stepCount={execution.steps.length}
+          />
+        ))}
+      </div>
+
+      <p className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {selectedStep && selectedStepIndex !== null
+          ? `Step ${selectedStepIndex + 1}, ${selectedStep.title}, ${selectedStep.status}`
+          : "No pipeline step selected"}
+      </p>
+
       {selectedStep && (
         <StepDrawer
           step={selectedStep}
@@ -100,6 +120,6 @@ export const PipelineVisualizer: React.FC<PipelineVisualizerProps> = ({ executio
           onClose={() => setSelectedStepIndex(null)}
         />
       )}
-    </div>
+    </section>
   );
 };

@@ -2,7 +2,7 @@
 
 > **Document Status**: Authoritative Engineering Journal  
 > **Governing Specifications**: `AGENTS.md` (§81 Exploration Permission, §87 Engineering Journal, §5818 Uncertainty Resolution)  
-> **Last Updated**: Sprint 13 Hardening (2026-10-10)  
+> **Last Updated**: Local GPU inference, hosted-model, and Control Center verification (2026-11-18)
 
 ---
 
@@ -132,3 +132,66 @@ Every formal experiment in AgentPay must record:
   - Dedicated adapter layer achieved 100% translation fidelity across all 4 protocols while maintaining 0 external imports in the domain core (7/7 boundary tests passed).
 - **Trade-Off Analysis**: Adds an explicit mapping step for each external protocol, but isolates core transaction semantics from third-party protocol churn.
 - **Architectural Decision**: Adopted in `apps/api/src/agentpay/adapters/protocols/`.
+
+---
+
+### EXP-007: Hosted OpenAI-Compatible Advisory Model Through the Real Factory Path (§2.2, §22, §23, §25)
+- **Status**: `ADOPTED` for configurable transport; hosted service availability remains `UNVERIFIED`.
+- **Date**: 2026-11-17
+- **Governing Invariant**: `AGENTS.md` §2.2, §22, §23, §25 ("AI is advisory; model calls use a constrained gateway and untrusted input cannot alter policy.")
+- **Hypothesis**: If provider-specific HTTP identity and timeouts are explicit runtime configuration, the existing OpenAI-compatible provider can use a slow hosted endpoint without hard-coding a vendor or weakening deterministic authorization.
+- **Alternatives Evaluated**:
+  1. *Factory defaults*: provider timeout 5s, gateway timeout 3s, and the default AgentPay User-Agent.
+  2. *Hard-code the hosted provider's required User-Agent and model*: rejected because it would make the provider-neutral adapter vendor-specific.
+  3. *Validated runtime transport configuration*: optional User-Agent plus independent positive-finite provider/gateway timeouts.
+- **Methodology & Experimental Setup**: Real `OpenAiCompatibleModelProvider` and `ModelGateway` calls to the supplied HTTPS `/v1` endpoint; real `create_app(config=...)` composition followed by an in-process `POST /api/v1/actions`; prompt-injection context; the pre-existing rogue-advisory policy test; and focused configuration/factory tests. The credential was supplied only at runtime and is not recorded here.
+- **Empirical Findings & Data**:
+  - `GET /v1/models` returned HTTP 200 and listed the selected model. The default AgentPay User-Agent was rejected with HTTP 403 `client_not_allowed`; an explicit truthful client User-Agent was accepted.
+  - A real hosted completion through the provider/gateway returned `REVIEW`, `MEDIUM` risk, confidence `0.93` in **41.867s**, exceeding both factory defaults.
+  - Injection-laden context returned deterministic `DENY` / `CRITICAL` with `PROMPT_INJECTION_DETECTED`.
+  - A later factory-composed API request received a real provider HTTP 503 and completed the policy-compliant mock-payment action in **1.051s**; audit recorded the hosted provider's fail-closed `REVIEW` / `HIGH` fallback. A single bounded advisory-only retry received HTTP 502 in **5.798s**. No further retry was made, so these later calls prove fallback behavior, not a fresh completion.
+  - The existing policy-authority probe supplied advisory `ALLOW` with confidence `1.0` for a ₹50,000 action; deterministic policy still returned `FAILED` / `DENY` (`1 passed`).
+  - Configuration, validation, and factory wiring: **49 passed**. Zero, negative, NaN, infinite, and malformed timeouts are rejected; CR/LF User-Agent header injection is rejected.
+- **Trade-Off Analysis**: Longer timeouts accommodate slow responses but occupy request resources for longer. Runtime headers solve provider compatibility without making a vendor part of the domain. The observed 503/502 responses mean no availability, production-readiness, or provider-certification claim is justified.
+- **Architectural Decision**: Adopted option 3 in `config/config.py` and `api/factory.py`; non-secret examples are documented in `.env.example`. Deterministic policy remains authoritative in `PurchaseOrchestrator`.
+
+---
+
+### EXP-008: Control Center Live Mutation Truthfulness and Keyboard Interaction (§20, §21, §66, §67, §121)
+- **Status**: `ADOPTED`
+- **Date**: 2026-11-17
+- **Governing Invariant**: `AGENTS.md` §2.4, §20, §21, §66, §67, §121 ("Never fabricate success; emergency controls fail closed; security-critical UI is keyboard accessible.")
+- **Hypothesis**: If live mutations await backend confirmation and dialogs manage focus explicitly, the Control Center will accurately represent server state while remaining operable without a mouse.
+- **Alternatives Evaluated**:
+  1. *Optimistic local success with silent fallback*: rejected because a failed emergency pause or approval could appear successful.
+  2. *Disable live controls*: rejected because implemented backend capabilities would become unusable.
+  3. *Await confirmed mutations, surface errors, and implement dialog focus lifecycle*: selected.
+- **Methodology & Experimental Setup**: Real browser DOM/accessibility/network inspection against the running API and Vite frontend; keyboard events for Tab, Shift+Tab, Escape, Enter/Space and arrow navigation; approval reject/authorize flows; authenticated emergency pause/resume with independent API reads; scenario runs; a 526px viewport; Node web tests and a production TypeScript/Vite build.
+- **Empirical Findings & Data**:
+  - Authenticated live pause and resume each returned HTTP 200. Independent status reads confirmed `paused=true` / active `ALL`, then `paused=false` / no active scopes. Unauthenticated reads returned 401; authenticated reads returned 200.
+  - Approval rejection reduced the queue from 2 to 1 and displayed `REJECTED`; authorization reduced it to 0 and displayed `AUTHORIZED`. Decision notes reset on reopen.
+  - Modal initial focus, forward/reverse focus wrapping, Escape close, invoking-button focus restoration, and body-scroll restoration all passed.
+  - All 8 scenarios and 10 pipeline steps were present. Scenario 1 completed; Scenario 2 halted for human approval; Scenario 6 ended at `PAYMENT UNKNOWN — RECONCILIATION REQUIRED`. Paused scenarios were marked skipped rather than failed. Keyboard step navigation passed and the 526px viewport had no horizontal overflow (`body.scrollWidth=510`).
+  - Node suite: **7/7 passed**; production TypeScript/Vite build passed.
+- **Trade-Off Analysis**: Waiting for the server adds real network latency but removes false success. Browser DOM, accessibility, network, keyboard, and layout measurements were used because screenshot capture was unavailable; this is not a screenshot-based visual review. Hidden-tab timer throttling affected simulator timing, so final state was asserted instead of wall-clock animation timing.
+- **Architectural Decision**: Adopted option 3 in `services/api.ts`, `components/ui/Modal.tsx`, approval/emergency components, and the scenario pipeline. Demo mode remains explicitly labeled deterministic simulation; live mutations throw on failure.
+
+---
+
+### EXP-009: Local GPU Advisory Inference Through the OpenAI-Compatible Gateway (§22, §23, §25, §113)
+- **Status**: `ADOPTED` for the local validation path; model quality and production performance remain `UNVERIFIED`.
+- **Date**: 2026-11-18
+- **Governing Invariant**: `AGENTS.md` §22, §23, §25, §113 ("Model providers are interchangeable; calls remain constrained by the gateway; untrusted input cannot alter policy.")
+- **Hypothesis**: If a local OpenAI-compatible inference server is configured with an explicit loopback-only private-network exception, the existing provider and gateway can execute real advisory completions without a hosted credential or any adapter changes.
+- **Alternatives Evaluated**:
+  1. *Hosted-provider-only validation*: rejected as the sole evidence path because the observed hosted endpoint was slow and subsequently returned 503/502 responses.
+  2. *Mock-only local validation*: rejected because it cannot prove real model serialization, transport, response parsing, or inference execution.
+  3. *Local Ollama inference through the existing provider/gateway*: selected, with `allow_private_network=True` only in the temporary loopback experiment harness.
+- **Methodology & Experimental Setup**: Installed Ollama 0.40.16 and downloaded `qwen2.5:1.5b` (986 MB download). A temporary harness constructed the real `OpenAiCompatibleModelProvider` for `http://127.0.0.1:11434/v1` and the real `ModelGateway`, using 120s provider and 130s gateway timeouts. It ran one cold and one warm ordinary commerce context, asserted that neither response contained provider/network/timeout/malformed-response fallback factors, then ran an injection-laden context. Ollama process placement and an NVIDIA GPU sample were inspected after inference on the RTX 3050 Laptop GPU.
+- **Empirical Findings & Data**:
+  - Cold real completion: provider `ollama-local`, model `qwen2.5:1.5b`, advisory `DENY` / `HIGH`, confidence `0.95`, factors `amount`, `category`, `tenant_id`, `agent_id`; elapsed **58.555s**, including initial model loading.
+  - Warm real completion: the same advisory output and factors in **1.231s**. These two observations are functional evidence, not a statistically meaningful latency benchmark.
+  - Injection context returned deterministic guardian `DENY` / `CRITICAL`, confidence `0.99`, with `PROMPT_INJECTION_DETECTED` in **0.0s** measured at harness precision; it did not require a model call.
+  - `ollama ps` reported `qwen2.5:1.5b`, digest `65ec06548149`, 1.2 GB, **100% GPU**, 4096 context, `llamacpp`. An `nvidia-smi` sample reported the NVIDIA GeForce RTX 3050 Laptop GPU at 1204 MiB used and 88% utilization.
+- **Trade-Off Analysis**: Local inference removes hosted credentials and network availability from this experiment, but the small model's advisory decisions are not evidence of recommendation quality, safety certification, or production throughput. Enabling private-network access expands the SSRF boundary and therefore remains an explicit non-default setting limited to this loopback harness.
+- **Architectural Decision**: The existing OpenAI-compatible adapter and `ModelGateway` required no local-provider-specific code change. Deterministic policy remains authoritative; the model's `DENY` outputs are advisory responses, not policy judgments.

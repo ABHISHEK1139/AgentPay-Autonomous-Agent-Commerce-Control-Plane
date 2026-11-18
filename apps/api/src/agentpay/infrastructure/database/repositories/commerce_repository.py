@@ -126,17 +126,24 @@ class SqlAlchemyProductRepository(BaseSqlAlchemyRepository, ProductRepository):
                 raise ValueError("ProductVariant entity must be provided")
             target_variant = variant
 
+        # Tenant scope is explicit (§49, §50): never resolve a variant's
+        # tenant from an unfiltered cross-tenant product lookup.
+        if not resolved_tenant_id or not str(resolved_tenant_id).strip():
+            raise ValueError(f"tenant_id is required to save variant '{target_variant.variant_id}'")
+
         with self._session() as session:
-            if resolved_tenant_id is None:
-                parent = session.scalar(
-                    select(ProductModel).where(ProductModel.product_id == target_variant.product_id)
+            parent = session.scalar(
+                select(ProductModel).where(
+                    ProductModel.tenant_id == resolved_tenant_id,
+                    ProductModel.product_id == target_variant.product_id,
                 )
-                if parent is not None:
-                    resolved_tenant_id = parent.tenant_id
-                else:
-                    raise ValueError(
-                        f"Cannot resolve tenant_id for variant '{target_variant.variant_id}'"
-                    )
+            )
+            if parent is None:
+                raise CrossTenantAccessError(
+                    f"Variant '{target_variant.variant_id}' references product "
+                    f"'{target_variant.product_id}' not found in tenant "
+                    f"'{resolved_tenant_id}'"
+                )
 
             stmt = select(ProductVariantModel).where(
                 ProductVariantModel.tenant_id == resolved_tenant_id,

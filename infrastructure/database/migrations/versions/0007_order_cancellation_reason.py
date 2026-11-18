@@ -1,6 +1,6 @@
 """add_order_cancellation_reason
 
-Revision ID: 0007_add_order_cancellation_reason
+Revision ID: 0007_order_cancellation_reason
 Revises: 0006_add_approval_agent_id
 Create Date: 2026-11-01 00:00:00.000000
 
@@ -12,7 +12,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0007_add_order_cancellation_reason"
+# Alembic's alembic_version.version_num is VARCHAR(32) on PostgreSQL; keep IDs within it.
+revision: str = "0007_order_cancellation_reason"
 down_revision: str | Sequence[str] | None = "0006_add_approval_agent_id"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

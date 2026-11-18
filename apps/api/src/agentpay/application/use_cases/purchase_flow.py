@@ -1093,6 +1093,37 @@ class PurchaseOrchestrator:
                 )
 
         # 2. Payment Execution (§39, §41)
+        # Fail closed when no provider is wired: an order must never be
+        # CONFIRMED without a PaymentAttempt (§2.4, §41).
+        if self._payment_provider is None:
+            if self._inventory_repo is not None:
+                try:
+                    self._inventory_repo.release(tenant_id, variant_id, quantity)
+                except Exception:
+                    logger.exception(
+                        "Inventory compensation failed after missing payment provider",
+                        extra={
+                            "action_id": action.action_id,
+                            "tenant_id": tenant_id,
+                            "variant_id": variant_id,
+                        },
+                    )
+            self._audit(
+                AuditEventType.ORDER_CANCELLED,
+                action,
+                tenant_id,
+                actor="order_service",
+                data={"reason": "Payment provider not configured"},
+                trace_id=trace_id,
+            )
+            return PurchaseExecutionResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                rejection_reason="Payment provider not configured",
+            )
+
         payment_attempt = None
         if self._payment_provider is not None:
             idem_key = idempotency_key or f"idem_{action.action_id}"
@@ -1290,7 +1321,7 @@ class PurchaseOrchestrator:
             quantity=quantity,
             total_amount=action.amount,
             status=OrderStatus.CONFIRMED,
-            payment_attempt_id=payment_attempt.attempt_id if payment_attempt else None,
+            payment_attempt_id=payment_attempt.attempt_id,
         )
 
         if self._order_repo is not None:
@@ -1298,11 +1329,7 @@ class PurchaseOrchestrator:
                 self._order_repo.save(tenant_id, order)
             except Exception as exc:
                 # SAGA COMPENSATION: Trigger refund if payment was captured and release inventory (§44)
-                if (
-                    self._payment_provider is not None
-                    and payment_attempt is not None
-                    and payment_attempt.status is PaymentStatus.CAPTURED
-                ):
+                if payment_attempt.status is PaymentStatus.CAPTURED:
                     try:
                         self._payment_provider.refund(
                             tenant_id=tenant_id,
@@ -1354,7 +1381,7 @@ class PurchaseOrchestrator:
                     request_hash=action.action_id,
                     result_data={
                         "order_id": order.order_id,
-                        "payment_id": payment_attempt.attempt_id if payment_attempt else None,
+                        "payment_id": payment_attempt.attempt_id,
                         "status": "COMPLETED",
                         "decision": PolicyDecision.ALLOW.value,
                         "amount_minor": action.amount.minor_units,
@@ -1452,40 +1479,29 @@ class PurchaseOrchestrator:
                     payment=cached_payment,
                 )
 
-        # 1. Pre-verify binding if approval exists, preventing unauthorized consumption burn on mismatch (§20)
+        # 1. Fetch and verify the approval WITHOUT consuming it (§20).
+        # Lifecycle, category, price, inventory, and merchant revalidation
+        # (steps 3-5 below) run BEFORE the single-use consume, so transient
+        # drift or revocation fails without burning the human approval.
+        # The atomic consume happens immediately before execution (step 6).
         resolved_merchant_id = self._resolve_action_merchant_id(tenant_id, action, variant_id)
-        if self._approval_repo is not None:
-            pre_appr = self._approval_repo.get(tenant_id, approval_id)
-            if pre_appr is not None and pre_appr.is_approved:
-                self._approval_service.verify_binding(
-                    pre_appr, action, merchant_id=resolved_merchant_id
-                )
-
-        # 2. Atomic check-and-consume or lock-guarded consumption to prevent TOCTOU race (§20, §177 Vector 10)
-        with self._approval_lock:
-            if hasattr(self._approval_repo, "atomic_consume"):
-                consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
-            else:
-                approval = self._approval_repo.get(tenant_id, approval_id)
-                if approval is None:
-                    raise InvalidCommerceError(
-                        f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
-                    )
-                if approval.status == ApprovalStatus.CONSUMED:
-                    raise ApprovalAlreadyConsumedError(
-                        f"Approval '{approval_id}' has already been consumed"
-                    )
-                if not approval.is_approved:
-                    raise ApprovalBindingMismatchError(
-                        f"Approval is in status '{approval.status.value}', not APPROVED"
-                    )
-                consumed_approval = approval.consume()
-                self._approval_repo.save(tenant_id, consumed_approval)
-
-        # 3. Strict binding verification on consumed approval (§0.4, §20)
-        self._approval_service.verify_binding(
-            consumed_approval, action, merchant_id=resolved_merchant_id
-        )
+        pre_appr = self._approval_repo.get(tenant_id, approval_id)
+        if pre_appr is None:
+            raise InvalidCommerceError(
+                f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+            )
+        if pre_appr.status == ApprovalStatus.CONSUMED:
+            raise ApprovalAlreadyConsumedError(
+                f"Approval '{approval_id}' has already been consumed"
+            )
+        if not pre_appr.is_approved:
+            raise ApprovalBindingMismatchError(
+                f"Approval is in status '{pre_appr.status.value}', not APPROVED"
+            )
+        self._approval_service.verify_binding(pre_appr, action, merchant_id=resolved_merchant_id)
+        # Candidate approval used for revalidation; the atomic consume in
+        # step 6 rebinds `consumed_approval` to the CONSUMED record.
+        consumed_approval = pre_appr
 
         # 3. Agent Identity & Lifecycle validation (§14, §15, §16, §177 Vectors 1 & 4, B-AUTH-02)
         agent = None
@@ -1716,6 +1732,33 @@ class PurchaseOrchestrator:
                         decision=PolicyDecision.DENY,
                         rejection_reason=f"Order amount exceeds merchant max order limit of {merchant.max_order_amount_minor} minor units",
                     )
+
+        # 6. Atomic check-and-consume AFTER revalidation (§20, §177 Vector 10)
+        # to prevent TOCTOU race and approval burn on transient drift.
+        with self._approval_lock:
+            if hasattr(self._approval_repo, "atomic_consume"):
+                consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
+            else:
+                approval = self._approval_repo.get(tenant_id, approval_id)
+                if approval is None:
+                    raise InvalidCommerceError(
+                        f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                    )
+                if approval.status == ApprovalStatus.CONSUMED:
+                    raise ApprovalAlreadyConsumedError(
+                        f"Approval '{approval_id}' has already been consumed"
+                    )
+                if not approval.is_approved:
+                    raise ApprovalBindingMismatchError(
+                        f"Approval is in status '{approval.status.value}', not APPROVED"
+                    )
+                consumed_approval = approval.consume()
+                self._approval_repo.save(tenant_id, consumed_approval)
+
+        # 6b. Strict binding verification on the consumed record (§0.4, §20)
+        self._approval_service.verify_binding(
+            consumed_approval, action, merchant_id=resolved_merchant_id
+        )
 
         # Persist immutable catalog evidence observed during re-verification (§32)
         self._record_catalog_evidence(
@@ -2623,35 +2666,24 @@ class PurchaseOrchestrator:
         cart = self._cart_repo.get(tenant_id, cart_id) if self._cart_repo is not None else None
         resolved_merchant_id = cart.merchant_id if cart is not None else None
 
+        # Fetch and verify WITHOUT consuming (§20). Cart, lifecycle, price,
+        # and merchant revalidation below run BEFORE the atomic consume so
+        # transient failures do not burn the single-use human approval.
         pre_appr = self._approval_repo.get(tenant_id, approval_id)
-        if pre_appr is not None and pre_appr.is_approved:
-            self._approval_service.verify_binding(
-                pre_appr, action, merchant_id=resolved_merchant_id
+        if pre_appr is None:
+            raise InvalidCommerceError(
+                f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
             )
-
-        with self._approval_lock:
-            if hasattr(self._approval_repo, "atomic_consume"):
-                consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
-            else:
-                approval = self._approval_repo.get(tenant_id, approval_id)
-                if approval is None:
-                    raise InvalidCommerceError(
-                        f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
-                    )
-                if approval.status == ApprovalStatus.CONSUMED:
-                    raise ApprovalAlreadyConsumedError(
-                        f"Approval '{approval_id}' has already been consumed"
-                    )
-                if not approval.is_approved:
-                    raise ApprovalBindingMismatchError(
-                        f"Approval is in status '{approval.status.value}', not APPROVED"
-                    )
-                consumed_approval = approval.consume()
-                self._approval_repo.save(tenant_id, consumed_approval)
-
-        self._approval_service.verify_binding(
-            consumed_approval, action, merchant_id=resolved_merchant_id
-        )
+        if pre_appr.status == ApprovalStatus.CONSUMED:
+            raise ApprovalAlreadyConsumedError(
+                f"Approval '{approval_id}' has already been consumed"
+            )
+        if not pre_appr.is_approved:
+            raise ApprovalBindingMismatchError(
+                f"Approval is in status '{pre_appr.status.value}', not APPROVED"
+            )
+        self._approval_service.verify_binding(pre_appr, action, merchant_id=resolved_merchant_id)
+        consumed_approval = pre_appr
 
         agent = None
         if self._agent_repo is not None:
@@ -2743,6 +2775,31 @@ class PurchaseOrchestrator:
         if merchant_verification is not None:
             merchant_verification = replace(merchant_verification, cart=cart)
             return merchant_verification
+
+        # Atomic check-and-consume AFTER revalidation (§20, §177 Vector 10).
+        with self._approval_lock:
+            if hasattr(self._approval_repo, "atomic_consume"):
+                consumed_approval = self._approval_repo.atomic_consume(tenant_id, approval_id)
+            else:
+                approval = self._approval_repo.get(tenant_id, approval_id)
+                if approval is None:
+                    raise InvalidCommerceError(
+                        f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
+                    )
+                if approval.status == ApprovalStatus.CONSUMED:
+                    raise ApprovalAlreadyConsumedError(
+                        f"Approval '{approval_id}' has already been consumed"
+                    )
+                if not approval.is_approved:
+                    raise ApprovalBindingMismatchError(
+                        f"Approval is in status '{approval.status.value}', not APPROVED"
+                    )
+                consumed_approval = approval.consume()
+                self._approval_repo.save(tenant_id, consumed_approval)
+
+        self._approval_service.verify_binding(
+            consumed_approval, action, merchant_id=resolved_merchant_id
+        )
 
         for _item, variant, line_product, inventory in lines:
             self._record_catalog_evidence(
@@ -2913,6 +2970,27 @@ class PurchaseOrchestrator:
                     raise
 
         # 2. One payment for the whole cart (§39, §41)
+        # Fail closed when no provider is wired: cart orders must never be
+        # CONFIRMED without a PaymentAttempt (§2.4, §41).
+        if self._payment_provider is None:
+            self._release_cart_reservations(tenant_id, lines, action)
+            self._audit(
+                AuditEventType.ORDER_CANCELLED,
+                action,
+                tenant_id,
+                actor="order_service",
+                data={"cart_id": cart.cart_id, "reason": "Payment provider not configured"},
+                trace_id=trace_id,
+            )
+            return CartCheckoutResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                cart=cart,
+                rejection_reason="Payment provider not configured",
+            )
+
         payment_attempt = None
         if self._payment_provider is not None:
             idem_key = idempotency_key or f"idem_{action.action_id}"
@@ -3072,17 +3150,13 @@ class PurchaseOrchestrator:
                 quantity=item.quantity,
                 total_amount=variant.price.multiply(item.quantity),
                 status=OrderStatus.CONFIRMED,
-                payment_attempt_id=payment_attempt.attempt_id if payment_attempt else None,
+                payment_attempt_id=payment_attempt.attempt_id,
             )
             if self._order_repo is not None:
                 try:
                     self._order_repo.save(tenant_id, order)
                 except Exception as exc:
-                    if (
-                        self._payment_provider is not None
-                        and payment_attempt is not None
-                        and payment_attempt.status is PaymentStatus.CAPTURED
-                    ):
+                    if payment_attempt.status is PaymentStatus.CAPTURED:
                         try:
                             self._payment_provider.refund(
                                 tenant_id=tenant_id,
@@ -3128,11 +3202,7 @@ class PurchaseOrchestrator:
                 checked_out_cart = cart.mark_checked_out()
                 self._cart_repo.save(tenant_id, checked_out_cart)
             except Exception as exc:
-                if (
-                    self._payment_provider is not None
-                    and payment_attempt is not None
-                    and payment_attempt.status is PaymentStatus.CAPTURED
-                ):
+                if payment_attempt.status is PaymentStatus.CAPTURED:
                     try:
                         self._payment_provider.refund(
                             tenant_id=tenant_id,
@@ -3192,7 +3262,7 @@ class PurchaseOrchestrator:
                     result_data={
                         "cart_id": cart.cart_id,
                         "order_ids": [order.order_id for order in orders],
-                        "payment_id": payment_attempt.attempt_id if payment_attempt else None,
+                        "payment_id": payment_attempt.attempt_id,
                         "status": "COMPLETED",
                         "decision": PolicyDecision.ALLOW.value,
                         "amount_minor": action.amount.minor_units,

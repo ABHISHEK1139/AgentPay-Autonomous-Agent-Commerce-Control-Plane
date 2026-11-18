@@ -51,8 +51,39 @@ def forbidden_imports(path: Path) -> set[str]:
     found: set[str] = set()
     for module in imported_modules(path):
         root = module.split(".")[0]
-        if module in FORBIDDEN_IN_DOMAIN or root in FORBIDDEN_IN_DOMAIN:
+        # Prefix match: `import agentpay.infrastructure.db` must be caught,
+        # not just `from agentpay.infrastructure import db`.
+        is_forbidden = (
+            module in FORBIDDEN_IN_DOMAIN
+            or root in FORBIDDEN_IN_DOMAIN
+            or any(
+                module == forbidden or module.startswith(forbidden + ".")
+                for forbidden in FORBIDDEN_IN_DOMAIN
+            )
+        )
+        if is_forbidden:
             found.add(module)
+    # Dynamic imports (`__import__`, `importlib.import_module`) are invisible
+    # to static `Import`/`ImportFrom` scans; flag string literals that name a
+    # forbidden module so the domain cannot launder a framework import.
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            func_name = ""
+            if isinstance(func, ast.Name):
+                func_name = func.id
+            elif isinstance(func, ast.Attribute):
+                func_name = func.attr
+            if func_name in ("__import__", "import_module") and node.args:
+                arg = node.args[0]
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    module = arg.value
+                    if module in FORBIDDEN_IN_DOMAIN or any(
+                        module == forbidden or module.startswith(forbidden + ".")
+                        for forbidden in FORBIDDEN_IN_DOMAIN
+                    ):
+                        found.add(module)
     return found
 
 
@@ -110,6 +141,13 @@ def test_boundary_checker_actually_catches_a_forbidden_import(tmp_path: Path) ->
 
     offender.write_text("from agentpay.infrastructure import db\n", encoding="utf-8")
     assert forbidden_imports(offender) == {"agentpay.infrastructure"}
+
+    # Dotted submodule form must also be caught (prefix match).
+    offender.write_text("import agentpay.infrastructure.database.models\n", encoding="utf-8")
+    assert forbidden_imports(offender) == {"agentpay.infrastructure.database.models"}
+
+    offender.write_text('import importlib\nimportlib.import_module("fastapi")\n', encoding="utf-8")
+    assert forbidden_imports(offender) == {"fastapi"}
 
 
 def test_boundary_checker_allows_the_imports_the_domain_actually_needs(tmp_path: Path) -> None:

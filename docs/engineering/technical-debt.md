@@ -36,7 +36,7 @@ resolution is a decision to accept the debt, and should say so explicitly.
 - **Resolution:** `make` and `just` are now installed (winget) and a `Makefile` and `justfile`
   were added, delegating to the verified `uv run` / `node --test` commands. `make all` (and
   `just all`) runs the full gate battery and was verified green.
-- **Status:** **Resolved** (`Makefile`, `justfile`; verified via `make all` → 904 passed tests).
+- **Status:** **Resolved** (`Makefile`, `justfile`; verified via `make all` → 951 passed tests).
 
 ## TD-004 — No automated commercial security scanning in CI
 
@@ -63,3 +63,24 @@ resolution is a decision to accept the debt, and should say so explicitly.
   and §84 worktrees could not be followed. AI-generated-code provenance (§175) could not be recorded.
 - **Resolution:** initialise git, commit the skeleton, and record provenance.
 - **Status:** **Resolved** (Git repository initialized, provenance tracked).
+
+## TD-006 — Two oversized files concentrate change risk
+
+- **Reason:** `apps/api/src/agentpay/api/app.py` (4094 lines, `_dispatch` ~1600 lines over
+  ~30 routes) and `apps/api/src/agentpay/application/use_cases/purchase_flow.py`
+  (3217 lines, 32 methods, four >300-line methods) grew organically. Splitting them in
+  the same batch as security fixes would have risked swapping one defect for another.
+- **Impact:** every route or financial-pipeline change touches one of two files; review
+  and merge risk is the highest in the repository. A second, already-diverged copy of
+  the worker runtime (`apps/api/.../workers` vs `apps/worker/agentpay_worker`) and of
+  the SDK client (`apps/api/.../client.py` vs `packages/sdk/...`) compounds the risk:
+  fixes in one copy do not reach the other.
+- **Planned resolution:** mechanically split (no behavior change) `app.py` into
+  `api/routes/{approvals,carts,checkout,protocols,tools,catalog,emergency,well_known}.py`,
+  `api/webhooks/{base,razorpay,stripe}.py`, `api/auth.py`, and `api/test_client.py`;
+  split `purchase_flow.py` into `purchase/{single_purchase,cart_checkout,saga_pipeline,tool_executor}.py`
+  behind a thin `PurchaseOrchestrator` facade; converge each duplicated copy to a single
+  canonical implementation with the other as a re-export. Each split lands with full
+  gate verification (`ruff`/`mypy`/`pytest` + adversarial suites).
+- **Status:** **Open** — documented; security fixes are verified first, splits follow
+  as separate small mergeable changes (§173).

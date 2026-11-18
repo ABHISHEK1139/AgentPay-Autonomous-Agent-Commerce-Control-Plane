@@ -10,6 +10,15 @@ interface ModalProps {
   ariaLabel?: string;
 }
 
+const focusableSelector = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "a[href]",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
 export const Modal: React.FC<ModalProps> = ({
   isOpen,
   onClose,
@@ -20,19 +29,61 @@ export const Modal: React.FC<ModalProps> = ({
   ariaLabel,
 }) => {
   const modalRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!isOpen) return;
 
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const getFocusable = () =>
+      Array.from(modalRef.current?.querySelectorAll<HTMLElement>(focusableSelector) ?? []).filter(
+        (element) => element.getAttribute("aria-hidden") !== "true"
+      );
+
+    const initialFocus =
+      modalRef.current?.querySelector<HTMLElement>("[data-autofocus]") ?? getFocusable()[0];
+    initialFocus?.focus();
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        e.preventDefault();
+        modalRef.current?.focus();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previouslyFocused?.focus();
+    };
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -47,7 +98,7 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-slate-950/70 backdrop-blur-sm animate-fade-in"
       role={role}
       aria-modal="true"
       aria-labelledby="modal-title"
@@ -55,16 +106,18 @@ export const Modal: React.FC<ModalProps> = ({
     >
       <div
         ref={modalRef}
-        className={`bg-white rounded-2xl shadow-2xl border border-slate-100 w-full ${widthClasses[maxWidth]} max-h-[90vh] flex flex-col overflow-hidden animate-scale-up`}
+        tabIndex={-1}
+        className={`bg-white rounded-2xl shadow-2xl shadow-slate-950/30 border border-white/20 w-full ${widthClasses[maxWidth]} max-h-[92vh] flex flex-col overflow-hidden animate-scale-up focus:outline-none`}
       >
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
-          <h2 id="modal-title" className="text-base font-semibold text-slate-900">
+        <div className="px-5 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-4 bg-slate-50/80">
+          <h2 id="modal-title" className="text-base font-bold tracking-tight text-slate-900">
             {title}
           </h2>
           <button
+            type="button"
             onClick={onClose}
             aria-label="Close dialog"
-            className="text-slate-400 hover:text-slate-600 rounded-lg p-1 hover:bg-slate-100 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-400"
+            className="text-slate-400 hover:text-slate-700 rounded-lg p-1.5 hover:bg-slate-200/70 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
             <svg
               className="w-5 h-5"
@@ -82,7 +135,7 @@ export const Modal: React.FC<ModalProps> = ({
             </svg>
           </button>
         </div>
-        <div className="p-6 overflow-y-auto">{children}</div>
+        <div className="p-5 sm:p-6 overflow-y-auto">{children}</div>
       </div>
     </div>
   );

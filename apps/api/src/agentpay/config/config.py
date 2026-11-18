@@ -10,6 +10,7 @@ Provides centralized, fail-closed configuration parsing and validation:
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -90,6 +91,18 @@ def _parse_bool(val: str | None, default: bool = False) -> bool:
     return val.strip().lower() in ("true", "1", "yes", "on")
 
 
+def _parse_positive_float(val: str | None, default: float, name: str) -> float:
+    if val is None or not val.strip():
+        return default
+    try:
+        parsed = float(val)
+    except ValueError as exc:
+        raise ConfigValidationError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ConfigValidationError(f"{name} must be a positive finite number")
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class AppConfig:
     """Immutable, validated configuration for the AgentPay control plane (§11, §12, AP-005)."""
@@ -133,6 +146,9 @@ class AppConfig:
     model_base_url: str = "http://127.0.0.1:11434/v1"
     model_name: str = "llama3.2"
     model_provider_name: str = "openai-compatible"
+    model_user_agent: str | None = None
+    model_provider_timeout_seconds: float = 5.0
+    model_gateway_timeout_seconds: float = 3.0
     model_allow_private_network: bool = False
 
     # Live payments safety flag (§151)
@@ -223,6 +239,26 @@ class AppConfig:
             if not self.model_name.strip():
                 raise ConfigValidationError(
                     "AGENTPAY_MODEL_NAME is required when decision_engine is 'openai_compatible'."
+                )
+            for field_name, env_name in (
+                ("model_provider_timeout_seconds", "AGENTPAY_MODEL_PROVIDER_TIMEOUT_SECONDS"),
+                ("model_gateway_timeout_seconds", "AGENTPAY_MODEL_GATEWAY_TIMEOUT_SECONDS"),
+            ):
+                value = getattr(self, field_name)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise ConfigValidationError(f"{env_name} must be a positive finite number")
+            if self.model_user_agent is not None and (
+                not self.model_user_agent.strip()
+                or "\r" in self.model_user_agent
+                or "\n" in self.model_user_agent
+            ):
+                raise ConfigValidationError(
+                    "AGENTPAY_MODEL_USER_AGENT must be non-empty and cannot contain line breaks"
                 )
 
         # 6. Advisory AI / OpenRouter credential validation (§23)
@@ -337,6 +373,17 @@ class AppConfig:
         model_base = (e.get("AGENTPAY_MODEL_BASE_URL") or "http://127.0.0.1:11434/v1").strip()
         model_name = (e.get("AGENTPAY_MODEL_NAME") or "llama3.2").strip()
         model_provider_name = (e.get("AGENTPAY_MODEL_PROVIDER_NAME") or "openai-compatible").strip()
+        model_user_agent = (e.get("AGENTPAY_MODEL_USER_AGENT") or "").strip() or None
+        model_provider_timeout = _parse_positive_float(
+            e.get("AGENTPAY_MODEL_PROVIDER_TIMEOUT_SECONDS"),
+            default=5.0,
+            name="AGENTPAY_MODEL_PROVIDER_TIMEOUT_SECONDS",
+        )
+        model_gateway_timeout = _parse_positive_float(
+            e.get("AGENTPAY_MODEL_GATEWAY_TIMEOUT_SECONDS"),
+            default=3.0,
+            name="AGENTPAY_MODEL_GATEWAY_TIMEOUT_SECONDS",
+        )
         model_allow_private = _parse_bool(
             e.get("AGENTPAY_MODEL_ALLOW_PRIVATE_NETWORK"),
             default=False,
@@ -375,6 +422,9 @@ class AppConfig:
             model_base_url=model_base,
             model_name=model_name,
             model_provider_name=model_provider_name,
+            model_user_agent=model_user_agent,
+            model_provider_timeout_seconds=model_provider_timeout,
+            model_gateway_timeout_seconds=model_gateway_timeout,
             model_allow_private_network=model_allow_private,
             live_payments_enabled=live_flag,
         )

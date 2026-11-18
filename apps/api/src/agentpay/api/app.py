@@ -104,6 +104,9 @@ Receive = Callable[[], Coroutine[Any, Any, dict[str, Any]]]
 Send = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 _current_trace_id: ContextVar[str | None] = ContextVar("_current_trace_id", default=None)
+_current_response_headers: ContextVar[dict[str, str] | None] = ContextVar(
+    "_current_response_headers", default=None
+)
 MAX_REQUEST_BODY_BYTES: int = 1024 * 1024  # 1 MiB payload limit (§62, B-SRV-01)
 
 
@@ -277,6 +280,13 @@ class AgentPayApiApp:
     def last_response_headers(self) -> dict[str, str]:
         return dict(self._last_response_headers)
 
+    def _update_response_headers(self, headers: dict[str, str]) -> None:
+        current_headers = _current_response_headers.get()
+        if current_headers is None:
+            self._last_response_headers.update(headers)
+        else:
+            current_headers.update(headers)
+
     def _extract_protocol_tenant(self, path: str, body: dict[str, Any] | None) -> str:
         """Extract tenant context from protocol payload when header is omitted."""
         if not body or not isinstance(body, dict):
@@ -299,78 +309,6 @@ class AgentPayApiApp:
         if body.get("tenant_id"):
             return str(body["tenant_id"])
         return ""
-
-    def _ensure_resource_inventory(
-        self, tenant_id: str, variant_id: str, action: ActionRequest | None = None
-    ) -> None:
-        """Ensure virtual inventory, variant, and product exist for digital resources and non-catalog payment mandates."""
-        if not variant_id:
-            return
-
-        from agentpay.domain.commerce import Inventory, Product, ProductVariant
-        from agentpay.domain.money import Money
-
-        if (
-            self.orchestrator._variant_repo is not None
-            and self.orchestrator._variant_repo.get(tenant_id, variant_id) is None
-        ):
-            price = action.amount if (action and action.amount) else Money(1000, "INR")
-            prod_id = f"prod_{variant_id}"
-
-            default_merchant_id = "merch_01"
-            if self.orchestrator._merchant_repo is not None:
-                for candidate in ["merch_prime", "merch_01", "merch_acme"]:
-                    m = self.orchestrator._merchant_repo.get(tenant_id, candidate)
-                    if m is not None and m.is_active:
-                        default_merchant_id = m.merchant_id
-                        break
-
-            category = "electronics"
-            if self.orchestrator._permissions_repo is not None and action is not None:
-                perms = self.orchestrator._permissions_repo.get(tenant_id, action.agent_id)
-                if perms is not None and perms.allowed_categories:
-                    category = perms.allowed_categories[0]
-
-            if (
-                self.orchestrator._product_repo is not None
-                and self.orchestrator._product_repo.get(tenant_id, prod_id) is None
-            ):
-                self.orchestrator._product_repo.save(
-                    tenant_id,
-                    Product(
-                        product_id=prod_id,
-                        tenant_id=tenant_id,
-                        merchant_id=default_merchant_id,
-                        name=f"Digital Resource {variant_id}",
-                        category=category,
-                        description="Auto-provisioned protocol resource",
-                    ),
-                )
-
-            self.orchestrator._variant_repo.save(
-                tenant_id,
-                ProductVariant(
-                    variant_id=variant_id,
-                    product_id=prod_id,
-                    sku=f"SKU-{variant_id}",
-                    name=f"Digital Resource {variant_id}",
-                    price=price,
-                ),
-            )
-
-        if (
-            self.orchestrator._inventory_repo is not None
-            and self.orchestrator._inventory_repo.get(tenant_id, variant_id) is None
-        ):
-            self.orchestrator._inventory_repo.save(
-                tenant_id,
-                Inventory(
-                    variant_id=variant_id,
-                    tenant_id=tenant_id,
-                    available=999999,
-                    reserved=0,
-                ),
-            )
 
     @property
     def is_emergency_paused(self) -> bool:
@@ -471,7 +409,7 @@ class AgentPayApiApp:
     ) -> tuple[int, dict[str, Any]]:
         effective_trace_id = trace_id or _current_trace_id.get()
         if headers:
-            self._last_response_headers.update(headers)
+            self._update_response_headers(headers)
         err = ApiErrorResponse(
             error=ApiErrorDetail(
                 code=code,
@@ -643,7 +581,7 @@ class AgentPayApiApp:
             return status, body, rl_headers
 
         # Both passed: store rate limit headers for success responses
-        self._last_response_headers.update(
+        self._update_response_headers(
             {
                 "x-ratelimit-limit": str(agent_res.limit),
                 "x-ratelimit-remaining": str(agent_res.remaining),
@@ -939,45 +877,45 @@ class AgentPayApiApp:
             hdrs.get("x-trace-id") or hdrs.get("traceparent") or f"trace_{uuid.uuid4().hex[:12]}"
         )
         tenant_id = hdrs.get("x-tenant-id", "")
-
-        ctx_token = _current_trace_id.set(trace_id)
-        self._last_response_headers = {
+        response_headers = {
             "x-trace-id": trace_id,
             "x-request-id": request_id,
         }
 
-        # Request body size boundary enforcement (§62, B-SRV-01)
-        if raw_body is not None and len(raw_body) > MAX_REQUEST_BODY_BYTES:
-            status_code, resp_data = self._error_response(
-                413,
-                "PAYLOAD_TOO_LARGE",
-                f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
-                request_id,
-                details={"max_bytes": MAX_REQUEST_BODY_BYTES, "received_bytes": len(raw_body)},
-            )
-            return ApiResponse(status_code, resp_data, self._last_response_headers)
-
-        content_length_str = hdrs.get("content-length", "")
-        if content_length_str:
-            try:
-                cl = int(content_length_str)
-                if cl > MAX_REQUEST_BODY_BYTES:
-                    status_code, resp_data = self._error_response(
-                        413,
-                        "PAYLOAD_TOO_LARGE",
-                        f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
-                        request_id,
-                        details={"max_bytes": MAX_REQUEST_BODY_BYTES, "declared_bytes": cl},
-                    )
-                    return ApiResponse(status_code, resp_data, self._last_response_headers)
-            except ValueError:
-                pass
-
+        ctx_token = _current_trace_id.set(trace_id)
+        headers_token = _current_response_headers.set(response_headers)
         try:
+            # Request body size boundary enforcement (§62, B-SRV-01)
+            if raw_body is not None and len(raw_body) > MAX_REQUEST_BODY_BYTES:
+                status_code, resp_data = self._error_response(
+                    413,
+                    "PAYLOAD_TOO_LARGE",
+                    f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
+                    request_id,
+                    details={"max_bytes": MAX_REQUEST_BODY_BYTES, "received_bytes": len(raw_body)},
+                )
+                return ApiResponse(status_code, resp_data, response_headers)
+
+            content_length_str = hdrs.get("content-length", "")
+            if content_length_str:
+                try:
+                    cl = int(content_length_str)
+                    if cl > MAX_REQUEST_BODY_BYTES:
+                        status_code, resp_data = self._error_response(
+                            413,
+                            "PAYLOAD_TOO_LARGE",
+                            f"Request body exceeds maximum permitted size of {MAX_REQUEST_BODY_BYTES} bytes",
+                            request_id,
+                            details={"max_bytes": MAX_REQUEST_BODY_BYTES, "declared_bytes": cl},
+                        )
+                        return ApiResponse(status_code, resp_data, response_headers)
+                except ValueError:
+                    pass
+
             status_code, resp_data = self._dispatch(
                 method, path, hdrs, body, request_id, tenant_id, trace_id, raw_body=raw_body
             )
-            return ApiResponse(status_code, resp_data, self._last_response_headers)
+            return ApiResponse(status_code, resp_data, response_headers)
         except RateLimitExceededError as err:
             ceil_secs = max(1, math.ceil(err.retry_after_seconds))
             rl_headers = {
@@ -994,15 +932,15 @@ class AgentPayApiApp:
                 },
                 headers=rl_headers,
             )
-            return ApiResponse(status_code, resp_data, self._last_response_headers)
+            return ApiResponse(status_code, resp_data, response_headers)
         except UnknownToolError as err:
             status_code, resp_data = self._error_response(400, "UNKNOWN_TOOL", str(err), request_id)
-            return ApiResponse(status_code, resp_data, self._last_response_headers)
+            return ApiResponse(status_code, resp_data, response_headers)
         except UnauthorizedToolAccessError as err:
             status_code, resp_data = self._error_response(
                 403, "UNAUTHORIZED_TOOL_ACCESS", str(err), request_id
             )
-            return ApiResponse(status_code, resp_data, self._last_response_headers)
+            return ApiResponse(status_code, resp_data, response_headers)
         except Exception:
             status_code, resp_data = self._error_response(
                 500,
@@ -1011,8 +949,10 @@ class AgentPayApiApp:
                 request_id,
                 trace_id=trace_id,
             )
-            return ApiResponse(status_code, resp_data, self._last_response_headers)
+            return ApiResponse(status_code, resp_data, response_headers)
         finally:
+            self._last_response_headers = dict(response_headers)
+            _current_response_headers.reset(headers_token)
             _current_trace_id.reset(ctx_token)
 
     def handle_request_with_headers(
@@ -1096,19 +1036,27 @@ class AgentPayApiApp:
                 },
             )
 
-        # 3. Compute and Verify HMAC-SHA256 Signature (Supports Raw PSP Bytes & Canonical Serialization)
+        # 3. Compute and Verify HMAC-SHA256 Signature over RAW request bytes
+        # (§61). Real providers sign the exact bytes received (Stripe:
+        # `timestamp.raw_body`; Razorpay: `raw_body`). Re-serialized JSON
+        # must never be accepted: key order/spacing changes would make
+        # verification depend on a canonicalization the provider never used.
         header_ts = headers.get("x-webhook-timestamp", "").strip()
-        raw_json_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
-        canonical = f"{header_ts}.{raw_json_str}" if header_ts else raw_json_str
 
         candidate_byte_payloads: list[bytes] = []
         if raw_body:
             candidate_byte_payloads.append(raw_body)
             if header_ts:
                 candidate_byte_payloads.append(f"{header_ts}.".encode() + raw_body)
-
-        candidate_byte_payloads.append(canonical.encode("utf-8"))
-        candidate_byte_payloads.append(raw_json_str.encode("utf-8"))
+        else:
+            # No raw bytes captured (in-process callers must pass raw_body).
+            # Fail closed rather than verifying against re-serialized JSON.
+            return self._error_response(
+                400,
+                "INVALID_PAYLOAD",
+                "Raw webhook body bytes required for signature verification",
+                request_id,
+            )
 
         received_sigs: list[str] = []
         if "," in sig_header:
@@ -1192,7 +1140,7 @@ class AgentPayApiApp:
         ).strip()
         replay_key = f"webhook:{event_id}"
         cache_key = f"{provider}:{provider_account_id}:{event_id}"
-        payload_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        payload_hash = hashlib.sha256(raw_body).hexdigest()
 
         with self._webhook_lock:
             if cache_key in self._processed_webhook_events:
@@ -1389,6 +1337,54 @@ class AgentPayApiApp:
                 400, "INVALID_PAYLOAD", "Webhook body must be a JSON object", request_id
             )
 
+        # 3b. Optional timestamp freshness (§61). Razorpay does not sign a
+        #    timestamp, so it cannot be required; when a timestamp IS present
+        #    (header or payload), enforce the same 300s / -30s window as the
+        #    generic and Stripe handlers. Replay dedup (claim_event) remains
+        #    the primary defense when no timestamp is supplied.
+        razorpay_ts_str = headers.get("x-webhook-timestamp", "").strip()
+        if not razorpay_ts_str:
+            ts_candidate = (
+                parsed_body.get("timestamp")
+                if parsed_body.get("timestamp") is not None
+                else parsed_body.get("created_at")
+            )
+            if ts_candidate is not None:
+                razorpay_ts_str = str(ts_candidate).strip()
+        if razorpay_ts_str:
+            razorpay_event_dt: datetime | None = None
+            try:
+                razorpay_ts_num = float(razorpay_ts_str)
+                if razorpay_ts_num > 1e11:
+                    razorpay_ts_num = razorpay_ts_num / 1000.0
+                razorpay_event_dt = datetime.fromtimestamp(razorpay_ts_num, tz=UTC)
+            except (ValueError, OverflowError):
+                try:
+                    razorpay_event_dt = datetime.fromisoformat(
+                        razorpay_ts_str.replace("Z", "+00:00")
+                    )
+                except ValueError:
+                    return self._error_response(
+                        400,
+                        "INVALID_WEBHOOK_TIMESTAMP",
+                        f"Unparseable Razorpay webhook timestamp '{razorpay_ts_str}'",
+                        request_id,
+                    )
+            if razorpay_event_dt is not None:
+                razorpay_age = (datetime.now(UTC) - razorpay_event_dt).total_seconds()
+                if razorpay_age > 300.0 or razorpay_age < -30.0:
+                    return self._error_response(
+                        401,
+                        "EXPIRED_WEBHOOK_TIMESTAMP",
+                        f"Razorpay webhook timestamp expired or future skew exceeds tolerance ({int(razorpay_age)}s outside -30s..300s window)",
+                        request_id,
+                        details={
+                            "age_seconds": razorpay_age,
+                            "max_age_seconds": 300,
+                            "max_future_skew_seconds": 30,
+                        },
+                    )
+
         # 4. Extract Event Metadata
         event_id = str(
             headers.get("x-razorpay-event-id")
@@ -1519,7 +1515,11 @@ class AgentPayApiApp:
                 "event_type": canonical_event_type,
                 "data": {
                     "provider_payment_id": prov_payment_id,
-                    "amount": payment_entity.get("amount") or parsed_body.get("amount"),
+                    "amount": (
+                        payment_entity.get("amount")
+                        if payment_entity.get("amount") is not None
+                        else parsed_body.get("amount")
+                    ),
                     "currency": (
                         payment_entity.get("currency") or parsed_body.get("currency") or "INR"
                     ).upper(),
@@ -1829,7 +1829,9 @@ class AgentPayApiApp:
                 "event_type": canonical_event_type,
                 "data": {
                     "provider_payment_id": prov_payment_id,
-                    "amount": obj.get("amount") or parsed_body.get("amount"),
+                    "amount": obj.get("amount")
+                    if obj.get("amount") is not None
+                    else parsed_body.get("amount"),
                     "currency": (
                         obj.get("currency") or parsed_body.get("currency") or "INR"
                     ).upper(),
@@ -3328,7 +3330,9 @@ class AgentPayApiApp:
 
             try:
                 v_id = metadata.get("variant_id", "")
-                self._ensure_resource_inventory(tenant_id, v_id, action)
+                # No auto-provisioning: unknown variants fail closed in
+                # execute_purchase (VARIANT_NOT_FOUND) rather than being created
+                # at an attacker-declared price (§2.4).
                 res = self.orchestrator.execute_purchase(
                     action=action,
                     tenant_id=tenant_id,
@@ -3399,7 +3403,9 @@ class AgentPayApiApp:
 
             try:
                 v_id = metadata.get("variant_id", "")
-                self._ensure_resource_inventory(tenant_id, v_id, action)
+                # No auto-provisioning: unknown variants fail closed in
+                # execute_purchase (VARIANT_NOT_FOUND) rather than being created
+                # at an attacker-declared price (§2.4).
                 res = self.orchestrator.execute_purchase(
                     action=action,
                     tenant_id=tenant_id,
@@ -3472,7 +3478,9 @@ class AgentPayApiApp:
 
             try:
                 v_id = metadata.get("variant_id", "")
-                self._ensure_resource_inventory(tenant_id, v_id, action)
+                # No auto-provisioning: unknown variants fail closed in
+                # execute_purchase (VARIANT_NOT_FOUND) rather than being created
+                # at an attacker-declared price (§2.4).
                 res = self.orchestrator.execute_purchase(
                     action=action,
                     tenant_id=tenant_id,
@@ -3515,7 +3523,28 @@ class AgentPayApiApp:
         more_body = True
         while more_body:
             message = await receive()
-            body_bytes += message.get("body", b"")
+            if message.get("type") == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            if len(body_bytes) + len(chunk) > MAX_REQUEST_BODY_BYTES:
+                req_id = headers.get("x-request-id", f"req_{uuid.uuid4().hex[:12]}")
+                status_code, resp_data = self._error_response(
+                    413, "PAYLOAD_TOO_LARGE", "Request body exceeds maximum permitted size", req_id
+                )
+                resp_bytes = json.dumps(resp_data).encode("utf-8")
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": status_code,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(resp_bytes)).encode("latin1")],
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": resp_bytes})
+                return
+            body_bytes += chunk
             more_body = message.get("more_body", False)
 
         body_json = None
@@ -3544,14 +3573,15 @@ class AgentPayApiApp:
                 await send({"type": "http.response.body", "body": resp_bytes})
                 return
 
-        status_code, resp_data = self.handle_request(method, path, headers, body_json)
+        response = self.handle_request(method, path, headers, body_json, raw_body=body_bytes)
+        status_code, resp_data = response
         resp_bytes = json.dumps(resp_data).encode("utf-8")
 
         resp_headers_raw: list[list[bytes]] = [
             [b"content-type", b"application/json"],
             [b"content-length", str(len(resp_bytes)).encode("latin1")],
         ]
-        for hk, hv in self.last_response_headers.items():
+        for hk, hv in response.headers.items():
             resp_headers_raw.append([hk.lower().encode("latin1"), str(hv).encode("latin1")])
 
         await send(
@@ -3929,7 +3959,10 @@ class ApiTestClient:
 
         ts_int = timestamp if timestamp is not None else int(datetime.now(UTC).timestamp())
         raw_json = json.dumps(full_payload, separators=(",", ":"), sort_keys=True)
-        canonical = f"{ts_int}.{raw_json}"
+        # Always capture raw bytes so the handler verifies the exact byte
+        # sequence (Stripe convention: HMAC over `timestamp.raw_body`).
+        effective_raw_body = raw_body if raw_body is not None else raw_json.encode("utf-8")
+        canonical = f"{ts_int}.".encode() + effective_raw_body
 
         effective_secret = (
             secret
@@ -3947,18 +3980,11 @@ class ApiTestClient:
         elif custom_signature is not None:
             hdrs["x-webhook-signature"] = custom_signature
         else:
-            if raw_body is not None:
-                hdrs["x-webhook-signature"] = hmac.new(
-                    effective_secret.encode("utf-8"),
-                    raw_body,
-                    hashlib.sha256,
-                ).hexdigest()
-            else:
-                hdrs["x-webhook-signature"] = hmac.new(
-                    effective_secret.encode("utf-8"),
-                    canonical.encode("utf-8"),
-                    hashlib.sha256,
-                ).hexdigest()
+            hdrs["x-webhook-signature"] = hmac.new(
+                effective_secret.encode("utf-8"),
+                canonical,
+                hashlib.sha256,
+            ).hexdigest()
 
         if headers:
             hdrs.update(headers)
@@ -3969,7 +3995,7 @@ class ApiTestClient:
             headers=hdrs,
             json_body=full_payload,
             auth=False,
-            raw_body=raw_body,
+            raw_body=effective_raw_body,
         )
 
     def post_razorpay_webhook(

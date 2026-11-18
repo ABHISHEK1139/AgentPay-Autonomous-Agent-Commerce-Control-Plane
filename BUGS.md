@@ -61,6 +61,21 @@ it is recorded so nobody wastes time re-investigating it.
 | BUG-06 | LOW | M4 challenger double-spend HTTP replay probe used default buyer instead of bound principal `user_01` | **Fixed & Verified** |
 | BUG-07 | LOW | M7 auth deployment profile probe buyer and approver identities unaligned with request principals | **Fixed & Verified** |
 | BUG-08 | LOW | Documentation metrics drifted in `AGENTS.md` and `BUGS.md` (updated to 943 passed, 213 formatted, 196 source files) | **Fixed & Verified** |
+| BUG-09 | **CRITICAL** | Protocol handlers auto-provisioned catalog entries at agent-declared prices with 999,999 inventory — price/currency/inventory checks compared attacker input to itself | **Fixed & Verified** |
+| BUG-10 | **CRITICAL** | `payment_provider=None` produced `CONFIRMED` orders with no `PaymentAttempt` — free orders without payment | **Fixed & Verified** |
+| BUG-11 | HIGH | Provider idempotency replay ignored amount/currency mismatch — same key, different amount returned the original attempt | **Fixed & Verified** |
+| BUG-12 | HIGH | Webhook `payment.refunded` forced full `REFUNDED` with the full captured amount, ignoring declared partial amounts | **Fixed & Verified** |
+| BUG-13 | MEDIUM | Approved-purchase revalidation ran *after* single-use consumption — transient drift burned the human approval | **Fixed & Verified** |
+| BUG-14 | MEDIUM | Razorpay webhook accepted webhooks with no timestamp freshness window | **Fixed & Verified** |
+| BUG-15 | MEDIUM | Generic webhook accepted HMAC over re-serialized canonical JSON, not just raw bytes | **Fixed & Verified** |
+| BUG-16 | MEDIUM | `SqlAlchemyProductRepository.save_variant` resolved the variant tenant from an unfiltered cross-tenant lookup | **Fixed & Verified** |
+| BUG-17 | LOW | Domain-purity checker was bypassed by dotted submodule imports (`import agentpay.infrastructure.db`) and dynamic imports | **Fixed & Verified** |
+| BUG-18 | LOW | Documentation drift (again): README/CONTRIBUTING/CHANGELOG/quickstart/release-gates/current-state still cited 904 tests / 211 files / 194 mypy files; 8-field binding cited after `agent_id` shipped; migrations cited as 0001–0005 with 0006–0007 present | **Fixed & Verified** |
+| BUG-19 | HIGH | Migration revision `0007_add_order_cancellation_reason` exceeded PostgreSQL's 32-character `alembic_version` column | **Fixed & Verified** |
+| BUG-20 | LOW | Live webhook harness signed canonical JSON but transmitted different bytes, causing false 401 failures | **Fixed & Verified** |
+| BUG-21 | HIGH | Live emergency pause/resume could display local success after network or HTTP failure | **Fixed & Verified** |
+| BUG-22 | MEDIUM | OpenAI-compatible factory could not configure provider-required User-Agent or slow-provider timeouts | **Fixed & Verified** |
+| BUG-23 | MEDIUM | Concurrent requests shared response headers; oversized-request early returns leaked trace context | **Fixed & Verified** |
 
 ---
 
@@ -1128,6 +1143,308 @@ Synchronized metrics across `AGENTS.md` and `BUGS.md` to reflect 943 pytest test
 
 ---
 
+## BUG-09 — Protocol handlers auto-provisioned catalog entries at attacker-declared prices
+
+**Severity: CRITICAL** · §2.4, §30, §32, §33 · **Status: Fixed & Verified**
+
+### Problem
+`AgentPayApiApp._ensure_resource_inventory` created a `Product`, `ProductVariant` (priced at
+the *attacker's* `action.amount`), and `Inventory(available=999999)` for any unknown
+`variant_id` on the AP2/UAP/x402 paths. The downstream price check then compared the
+attacker's amount to the price just created from that same amount — always matching. Any
+agent could purchase any resource at any self-declared price with unlimited inventory.
+
+### Resolution (Fixed & Verified)
+Removed `_ensure_resource_inventory` and its three call sites. Unknown variants now fail
+closed with `VARIANT_NOT_FOUND` / `DENY` in `PurchaseOrchestrator.execute_purchase`.
+Tests that encoded the fail-open behavior (`test_protocol_adapters.py` AP2 over-limit,
+x402; `test_release_hardening_e2e.py` AP2 E2E) now seed explicit catalog entries instead.
+Regression: `test_c1_unknown_protocol_variant_fails_closed` in
+`test_security_hardening_regression.py`.
+
+---
+
+## BUG-10 — No payment provider produced CONFIRMED orders for free
+
+**Severity: CRITICAL** · §2.4, §39, §41 · **Status: Fixed & Verified**
+
+### Problem
+Both order pipelines guarded payment creation with `if self._payment_provider is not
+None`; when no provider was wired (`None`), no `PaymentAttempt` was created yet the order
+was persisted as `OrderStatus.CONFIRMED` and the result returned `COMPLETED`.
+
+### Resolution (Fixed & Verified)
+Both `_execute_order_and_payment_pipeline` and `_execute_cart_order_and_payment_pipeline`
+fail closed when `payment_provider is None`: compensated (inventory released), audited as
+`ORDER_CANCELLED`, and returned as `FAILED` / `DENY` with reason
+`PAYMENT_PROVIDER_NOT_CONFIGURED`. (`create_app` always wires a provider, so the reachable
+risk was hand-constructed orchestrators and future wiring regressions.)
+Regression: `test_c2_missing_payment_provider_fails_closed`.
+
+---
+
+## BUG-11 — Provider idempotency ignored amount/currency mismatch
+
+**Severity: HIGH** · §42, §122 · **Status: Fixed & Verified**
+
+### Problem
+`MockPaymentProvider`, `InMemoryRazorpaySimulator`, and `InMemoryStripeSimulator`
+`create_payment` returned the stored attempt for any replay of `(tenant, idempotency_key)`
+without comparing amount or currency. The orchestrator's `IdempotencyStore` checked
+currency (B-IDEM-02), but direct provider callers bypassed it: 100,000 INR vs 100,000 USD
+under one key returned the original attempt.
+
+### Resolution (Fixed & Verified)
+All three providers now raise `IdempotencyConflictError` on amount-minor or currency
+mismatch for a replayed key. Regression: `test_c5_provider_idempotency_rejects_amount_mismatch`.
+
+---
+
+## BUG-12 — Webhook `payment.refunded` forced full refunds
+
+**Severity: HIGH** · §41, §44 · **Status: Fixed & Verified**
+
+### Problem
+`PaymentReconciler.reconcile_webhook_event` ignored any declared refund amount, always
+built `Refund(amount=attempt.amount)`, always transitioned to `REFUNDED`, refunded the
+order, and restocked full quantity — even for a partial refund webhook. This corrupted
+the §41 state machine (B-REF-01 fixed the same class of bug in provider `refund()` but the
+webhook path was missed) and cancelled orders that should have stayed confirmed.
+
+### Resolution (Fixed & Verified)
+When the webhook declares `amount_minor`/`currency`, the reconciler validates integer
+minor units, positivity, currency equality, and the captured-balance ceiling, then
+transitions to `REFUNDED` (full) or `PARTIALLY_REFUNDED` (partial). Only full refunds
+refund the order and restock inventory. Absent amount keeps the full-refund behavior
+(provider-compatible). Regressions: `test_c6_webhook_partial_refund_marks_partial_and_keeps_order`,
+`test_c6_webhook_over_refund_fails_closed`.
+
+---
+
+## BUG-13 — Approval consumed before revalidation burned single-use grants
+
+**Severity: MEDIUM** · §20, §44 · **Status: Fixed & Verified**
+
+### Problem
+`execute_approved_purchase` (and the cart twin) called `atomic_consume` first and only
+then revalidated agent lifecycle, category, live price, inventory, evidence, and merchant
+state. Any drift after approval returned `FAILED`/`DENY` — but the single-use human
+approval was already `CONSUMED`, forcing a new approval cycle for transient failures.
+
+### Resolution (Fixed & Verified)
+Both paths now fetch+verify binding without consuming, run all lifecycle/category/price/
+inventory/evidence/merchant revalidation, and only then perform the atomic consume and a
+post-consume binding re-verification immediately before execution. Idempotency had
+already been checked before consume and stays there. Regression:
+`test_c7_price_drift_does_not_burn_approval` (approval remains `APPROVED` after drift).
+
+---
+
+## BUG-14 — Razorpay webhook had no timestamp freshness window
+
+**Severity: MEDIUM** · §61 · **Status: Fixed & Verified**
+
+### Problem
+The generic and Stripe handlers enforced a 300s / −30s freshness window; the Razorpay
+handler (`_handle_razorpay_webhook`) verified HMAC only, so a captured Razorpay webhook
+could be replayed at any later time (still deduped by event ID — see B-WH-04 — but with
+no time bound).
+
+### Resolution (Fixed & Verified)
+Razorpay does not sign a timestamp, so it cannot be *required*. When a timestamp is
+present (header `x-webhook-timestamp` or payload `timestamp`/`created_at`), the same
+300s / −30s window is now enforced (header checked after HMAC verification so unsigned
+timestamps are never trusted). Replay dedup via `claim_event` remains primary when no
+timestamp is present. Regression: `test_c8_razorpay_expired_timestamp_rejected_when_present`.
+
+---
+
+## BUG-15 — Generic webhook accepted re-serialized JSON signatures
+
+**Severity: MEDIUM** · §61 · **Status: Fixed & Verified**
+
+### Problem
+`_handle_payment_webhook` built candidate byte payloads that included
+`canonical = timestamp + json.dumps(body, sort_keys=True)` and bare re-serialized JSON in
+addition to raw bytes. Real providers sign raw bytes; accepting a canonicalization the
+provider never used widens the verification surface and can disagree with the provider
+on key order/spacing edge cases.
+
+### Resolution (Fixed & Verified)
+The handler now verifies HMAC over raw bytes (`raw_body`) and `timestamp.raw_body` only,
+and returns `400 INVALID_PAYLOAD` when no raw bytes were captured instead of falling
+back to re-serialization. `ApiTestClient.post_webhook` now always sends raw bytes
+(signing `timestamp.raw_body`, Stripe convention); real-HTTP paths already captured raw
+bytes in `server.py`. Tests that signed canonical form without raw bytes were updated to
+send raw bytes (fail-closed 400 → now raw-byte-signed valid requests).
+
+---
+
+## BUG-16 — `save_variant` resolved tenant from an unfiltered cross-tenant lookup
+
+**Severity: MEDIUM** · §49, §50 · **Status: Fixed & Verified**
+
+### Problem
+`SqlAlchemyProductRepository.save_variant` without an explicit `tenant_id` ran
+`select(ProductModel).where(product_id == ...)` without a tenant filter and adopted
+whatever tenant the first matching product row carried — a cross-tenant read oracle in a
+write path, violating "every repository method makes tenant scope explicit."
+
+### Resolution (Fixed & Verified)
+`tenant_id` is now mandatory (fail-closed `ValueError` when missing/blank), and the
+parent-product check filters by `(tenant_id, product_id)`, raising
+`CrossTenantAccessError` on mismatch. The only caller already passed `tenant_id`
+explicitly. Regression: `test_c10_sql_variant_save_requires_tenant`.
+
+---
+
+## BUG-17 — Domain-purity checker bypasses
+
+**Severity: LOW** · §10 · **Status: Fixed & Verified**
+
+### Problem
+`test_architecture_boundaries.forbidden_imports` tested exact module membership and root
+equality only, so `import agentpay.infrastructure.database.models` (dotted submodule)
+passed. Dynamic imports (`__import__`, `importlib.import_module`) were invisible to the
+AST `Import` scan entirely. The checker proved it caught `from agentpay.infrastructure
+import db` but not the dotted form.
+
+### Resolution (Fixed & Verified)
+Prefix matching (`module == forbidden or module.startswith(forbidden + ".")`) plus
+string-literal scanning of `__import__`/`import_module` calls. Guard-the-guard tests
+extended with dotted-submodule and dynamic-import cases. Verified the domain still
+imports only stdlib + `agentpay.domain.*`.
+
+---
+
+## BUG-18 — Documentation drift (counts, field arity, migrations)
+
+**Severity: LOW** · §172 · **Status: Fixed & Verified**
+
+### Problem
+After commit `20a9953` (9-field binding, migrations `0006`–`0007`):
+gate counts (`904`/`211`/`194`) remained across `README.md`, `CONTRIBUTING.md`,
+`CHANGELOG.md`, `docs/onboarding/quickstart.md`, `docs/operations/release-gates.md`,
+`docs/engineering/current-state.md`, `docs/engineering/known-limitations.md`, and
+`docs/engineering/technical-debt.md` while `AGENTS.md` said `943`/`213`/`196` (also
+stale: actual `951`/`216`/`197` after this batch); "8-field" remained across README,
+architecture, threat model, overview, ASVS mapping, ADR-0006, and `AGENTS.md` §0.1 while
+the code enforces 9 fields; migrations were cited as `0001–0005` while `0006`–`0007`
+exist; no ADR covered the 9th field.
+
+### Resolution (Fixed & Verified)
+**ADR-0007** records the 9-field binding per §82 (this is the ADR the commit lacked).
+All gate counts synchronized to measured values (216 formatted files, 197 mypy files,
+951 passed / 3 skipped; 954 collected). All non-blueprint "8-field" references updated
+(headings reference ADR-0007 where they describe binding arity). Blueprint §20's numbered
+list is intentionally *not* edited (§0.5); ADR-0007 records the strengthening. Generated
+counts remain a known rot risk — see technical debt.
+
+---
+
+## BUG-19 — Migration revision exceeded PostgreSQL's 32-character version column
+
+**Severity: HIGH** · §49, §100 · **Status: Fixed & Verified**
+
+### Problem
+
+The Alembic revision ID `0007_add_order_cancellation_reason` is 34 characters. PostgreSQL
+stores `alembic_version.version_num` in `VARCHAR(32)`, so the migration could not record its
+own successful revision; SQLite does not enforce the same varchar length and hid the defect.
+
+### Resolution (Fixed & Verified)
+
+Renamed the revision and filename to `0007_order_cancellation_reason`, retained the correct
+`0006_add_approval_agent_id` parent, updated the head expectation, and added a regression that
+walks every revision and rejects IDs longer than 32 characters. Focused migration tests passed
+(`4 passed`); live PostgreSQL 17 upgrade, downgrade to base, re-upgrade, and repository
+persistence also passed.
+
+---
+
+## BUG-20 — Live webhook harness signed bytes different from those transmitted
+
+**Severity: LOW (test harness)** · §61, §78 · **Status: Fixed & Verified**
+
+### Problem
+
+`scripts/test_api_live.py` signed canonical JSON but independently serialized the outgoing
+request. Raw-byte HMAC verification correctly rejected the request with HTTP 401; this was a
+harness bug, not a server signature-bypass to be weakened.
+
+### Resolution (Fixed & Verified)
+
+The request helper now accepts bytes and sends them unchanged. Webhook probes sign and transmit
+the exact same raw payload while server verification remains raw-byte-only. The external live
+HTTP harness passed **26/26** checks after the correction.
+
+---
+
+## BUG-21 — Live emergency controls could fabricate pause/resume success
+
+**Severity: HIGH** · §2.4, §21, §67 · **Status: Fixed & Verified**
+
+### Problem
+
+`ControlCenterApiService.triggerEmergencyPause` and `triggerEmergencyResume` swallowed network
+errors and ignored non-OK responses, then mutated local state as though the operation succeeded.
+An operator could see a paused or resumed banner while the backend remained unchanged.
+
+### Resolution (Fixed & Verified)
+
+Live pause/resume now await the backend, throw with the API error envelope on network or HTTP
+failure, and update local state only after success. Browser pause/resume requests returned HTTP
+200 and independent API reads confirmed the real state transitions. Regression tests cover
+unreachable-API behavior; the web suite passed **7/7** and the production frontend build passed.
+The same browser pass verified approval execution, modal focus trapping/restoration, Escape
+handling, decision-note reset, and paused-scenario skip semantics.
+
+---
+
+## BUG-22 — Hosted model transport could not be configured through the factory
+
+**Severity: MEDIUM** · §22, §23, §159 · **Status: Fixed & Verified**
+
+### Problem
+
+The OpenAI-compatible factory hard-coded the provider's default User-Agent and 5s/3s
+provider/gateway timeouts. The supplied hosted endpoint rejected the default client identity
+with HTTP 403 and a successful completion took 41.867s, making the real factory path unusable
+without code changes.
+
+### Resolution (Fixed & Verified)
+
+Added optional `AGENTPAY_MODEL_USER_AGENT` and independent positive-finite
+`AGENTPAY_MODEL_PROVIDER_TIMEOUT_SECONDS` / `AGENTPAY_MODEL_GATEWAY_TIMEOUT_SECONDS` settings,
+validated against malformed/non-finite values and CR/LF header injection, and wired them through
+`create_app`. No vendor or credential is hard-coded. Focused configuration/factory tests passed
+**49/49**. Real hosted success, later 503/502 instability, fail-closed fallback, and deterministic
+policy authority are recorded in `docs/engineering/experiments.md` EXP-007.
+
+---
+
+## BUG-23 — Response headers and trace context were not request-isolated
+
+**Severity: MEDIUM** · §47, §52, §62 · **Status: Fixed & Verified**
+
+### Problem
+
+`AgentPayApiApp` stored in-progress response headers in one shared mutable dictionary. Two
+synchronized requests both received the second request's `x-request-id`; rate-limit metadata
+could cross the same boundary. Body-size 413 responses returned before the `finally` block,
+leaving the rejected request's trace ID installed in the caller's context. ASGI serialization
+also re-read shared headers instead of the completed response.
+
+### Resolution (Fixed & Verified)
+
+Response-header mutation is now scoped by `ContextVar`, each `ApiResponse` captures its own
+headers, transports serialize `response.headers`, and all early returns execute trace/header
+cleanup. The previous sequential `last_response_headers` inspection API remains available.
+The original failing races now pass, alongside transport and rate-limit regressions:
+**18 passed** in the focused suites.
+
+---
+
 ## Verification environment
 
 Windows, PowerShell 5.1, Python 3.12.10, uv 0.12.22, ruff 0.16.10, mypy 2.4.0, pytest 9.1.1.
@@ -1135,7 +1452,7 @@ PostgreSQL and Redis runtime validation has been completed with Docker container
 schema migration and PostgreSQL dump/restore verification. No external security assessment has
 been performed.
 
-Gates at the latest local verification: `ruff format` 213 files clean, `ruff check` clean,
-`mypy` 196 source files clean, `pytest` 943 passed / 3 opt-in credential tests skipped. All auxiliary
+Gates at the latest local verification: `ruff format` 219 files clean, `ruff check` clean,
+`mypy` 200 source files clean, `pytest` 972 passed / 3 opt-in credential tests skipped. All auxiliary
 adversarial harnesses (M1–M8, protocol, concurrency, client-privilege, money, webhooks, SSRF,
-model-gateway) re-run green after the B-MERGE, B-TOOL/B-EVID/B-WEB, and BUG-03..BUG-07 fixes.
+model-gateway) re-run green after the B-MERGE, B-TOOL/B-EVID/B-WEB, BUG-03..BUG-09..BUG-18 fixes.

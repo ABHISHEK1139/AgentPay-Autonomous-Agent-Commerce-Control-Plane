@@ -105,6 +105,8 @@ test("Frontend ARIA and keyboard accessibility contracts per §121", async () =>
   assert.ok(modalContent.includes('aria-modal="true"'), "Modal must set aria-modal='true'");
   assert.ok(modalContent.includes('aria-labelledby="modal-title"'), "Modal must set aria-labelledby");
   assert.ok(modalContent.includes('key === "Escape"'), "Modal must handle Escape key for keyboard dismissal");
+  assert.ok(modalContent.includes('e.key !== "Tab"'), "Modal must trap Tab navigation inside the dialog");
+  assert.ok(modalContent.includes("previouslyFocused?.focus()"), "Modal must restore focus on close");
   assert.ok(modalContent.includes('aria-label="Close dialog"'), "Close button must have accessible label");
 
   // 2. Emergency Banner Alert ARIA
@@ -272,6 +274,37 @@ test("Control Center Live API authenticated integration and fallbacks per §14, 
 
     const fallbackMetrics = await service.getMetrics();
     assert.ok(fallbackMetrics.demo === true || fallbackMetrics.status === "healthy");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Live emergency mutations never fabricate success when the API is unreachable", async () => {
+  const { ControlCenterApiService } = await import("../src/services/api.ts");
+  const service = new ControlCenterApiService();
+  const originalFetch = globalThis.fetch;
+  service.setDemoMode(false);
+  service.setBaseUrl("http://localhost:8000");
+  service.setAuthToken("tok_admin_live_123");
+  globalThis.fetch = async () => {
+    throw new Error("Network connection refused");
+  };
+
+  try {
+    await assert.rejects(
+      () => service.triggerEmergencyPause("sec_operator_01", "containment"),
+      /Emergency pause could not reach the live API/
+    );
+    assert.equal((await service.getEmergencyState()).isPaused, false);
+
+    service.setDemoMode(true);
+    await service.triggerEmergencyPause("sec_operator_01", "local drill");
+    service.setDemoMode(false);
+    await assert.rejects(
+      () => service.triggerEmergencyResume("sec_operator_01"),
+      /Emergency resume could not reach the live API/
+    );
+    assert.equal((await service.getEmergencyState()).isPaused, true);
   } finally {
     globalThis.fetch = originalFetch;
   }

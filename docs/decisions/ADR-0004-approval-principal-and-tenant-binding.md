@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted
+Accepted. Field list superseded by ADR-0007 (9 fields; `agent_id` added).
+The 8-field list below is retained as history; current enforcement is
+9-field everywhere.
 
 ## Context
 

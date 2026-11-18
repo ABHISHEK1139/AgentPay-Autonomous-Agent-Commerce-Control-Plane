@@ -14,7 +14,7 @@ import threading
 import uuid
 
 from agentpay.application.ports.payment_port import PaymentProvider
-from agentpay.domain.errors import InvalidPaymentError
+from agentpay.domain.errors import IdempotencyConflictError, InvalidPaymentError
 from agentpay.domain.money import Money
 from agentpay.domain.payments import (
     PaymentAttempt,
@@ -51,11 +51,21 @@ class MockPaymentProvider(PaymentProvider):
         idempotency_key: str,
     ) -> PaymentAttempt:
         with self._lock:
-            # Check idempotency replay
+            # Check idempotency replay (§42): same key must carry same
+            # amount and currency; a mismatch is a conflict, not a replay.
             key = (tenant_id, idempotency_key)
             if key in self._idempotency_map:
                 existing_attempt_id = self._idempotency_map[key]
-                return self._attempts[(tenant_id, existing_attempt_id)]
+                existing = self._attempts[(tenant_id, existing_attempt_id)]
+                if (
+                    existing.amount.minor_units != amount.minor_units
+                    or existing.amount.currency != amount.currency
+                ):
+                    raise IdempotencyConflictError(
+                        f"Idempotency key '{idempotency_key}' conflict: "
+                        f"stored {existing.amount} != incoming {amount}"
+                    )
+                return existing
 
             attempt_id = f"pay_{uuid.uuid4().hex[:16]}"
             provider_payment_id = f"rzp_mock_{uuid.uuid4().hex[:12]}"

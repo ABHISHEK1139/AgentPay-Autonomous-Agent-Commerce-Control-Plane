@@ -23,7 +23,7 @@ AgentPay is the control plane between autonomous AI agents and financial executi
                                                                                       ▼
                                                                       ┌─────────────────────────────────┐
                                                                       │ Human-in-the-Loop Approvals     │
-                                                                      │ (Exact 8-Field Bound Tokens)    │
+                                                                      │ (Exact 9-Field Bound Tokens)    │
                                                                       ├─────────────────────────────────┤
                                                                       │ Idempotent SAGA Orchestrator    │
                                                                       ├─────────────────────────────────┤
@@ -71,8 +71,8 @@ AgentPay is the control plane between autonomous AI agents and financial executi
 
 ### TM-05 — Approval Replay, Widening & Intra-Tenant Substitution (AP-006)
 - **Threat (STRIDE: S/E)**: An agent reuses an approved token for a different purchase, or Agent B (acting for User Bob) consumes an approval granted to User Alice.
-- **Mitigation (AP-006, ADR-0004)**: Cryptographic 8-field binding:
-  `action_id`, `amount`, `currency`, `merchant_id`, `resource_id`, `action_version`, `principal_id`, and `tenant_id`.
+- **Mitigation (AP-006, ADR-0004, ADR-0007)**: Cryptographic 9-field binding:
+  `action_id`, `amount`, `currency`, `merchant_id`, `resource_id`, `action_version`, `principal_id`, `tenant_id`, and `agent_id`.
   Approvals are single-use; `atomic_consume` executes an atomic database update with thread-safe locking and identity map expiration.
 - **Verification Evidence**: `tests/adversarial/stress_test_m4_approval_binding.py`, `tests/adversarial/stress_test_m4_challenger_edge_cases.py`.
 

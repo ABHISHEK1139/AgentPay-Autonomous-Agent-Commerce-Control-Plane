@@ -34,7 +34,9 @@ from agentpay.adapters.protocols import (
 from agentpay.api.app import AgentPayApiApp, ApiTestClient
 from agentpay.application.use_cases.purchase_flow import PurchaseExecutionResult
 from agentpay.domain.action_request import ActionStatus, AuthorizationMode
+from agentpay.domain.commerce import Inventory, Product, ProductVariant
 from agentpay.domain.errors import InvalidActionRequestError
+from agentpay.domain.money import Money
 from agentpay.domain.policy import PolicyDecision
 
 # ---------------------------------------------------------------------------
@@ -564,8 +566,58 @@ def test_api_acp_checkout_endpoint_success_and_errors() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _seed_variant(
+    product_repo: Any,
+    variant_repo: Any,
+    inventory_repo: Any,
+    *,
+    product_id: str,
+    variant_id: str,
+    price_minor: int,
+) -> None:
+    """Register a catalog product/variant/inventory explicitly.
+
+    Protocol handlers must never auto-provision catalog entries at an
+    agent-declared price: unknown variants fail closed. Tests seed the
+    catalog the same way production onboarding would.
+    """
+    product_repo.save(
+        "tenant_01",
+        Product(
+            product_id=product_id,
+            tenant_id="tenant_01",
+            merchant_id="merch_01",
+            name=f"Seeded {product_id}",
+            category="computers",
+            description="Explicitly seeded test catalog entry",
+        ),
+    )
+    variant_repo.save(
+        "tenant_01",
+        ProductVariant(
+            variant_id=variant_id,
+            product_id=product_id,
+            sku=f"SKU-{variant_id}",
+            name=f"Seeded {variant_id}",
+            price=Money(price_minor, "INR"),
+        ),
+    )
+    inventory_repo.save(
+        "tenant_01",
+        Inventory(variant_id=variant_id, tenant_id="tenant_01", available=10, reserved=0),
+    )
+
+
 def test_api_ap2_mandates_endpoint_under_and_over_limit() -> None:
-    orch, *_ = setup_orchestrator()
+    orch, _tenant_repo, _agent_repo, _perms_repo, _merchant_repo, product_repo, variant_repo, inventory_repo, *_ = setup_orchestrator()  # fmt: skip
+    _seed_variant(
+        product_repo,
+        variant_repo,
+        inventory_repo,
+        product_id="prod_inv_mandate_over",
+        variant_id="inv_mandate_over",
+        price_minor=250000,
+    )
     app = AgentPayApiApp(orchestrator=orch)
     client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}
@@ -670,7 +722,15 @@ def test_api_uap_rpc_endpoint() -> None:
 
 
 def test_api_x402_pay_endpoint() -> None:
-    orch, *_ = setup_orchestrator()
+    orch, _tenant_repo, _agent_repo, _perms_repo, _merchant_repo, product_repo, variant_repo, inventory_repo, *_ = setup_orchestrator()  # fmt: skip
+    _seed_variant(
+        product_repo,
+        variant_repo,
+        inventory_repo,
+        product_id="prod_x402_chal_402_api",
+        variant_id="x402_chal_402_api",
+        price_minor=1000,
+    )
     app = AgentPayApiApp(orchestrator=orch)
     client = ApiTestClient(app).as_buyer(principal_id="user_01")
     headers = {"x-tenant-id": "tenant_01"}

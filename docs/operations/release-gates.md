@@ -25,16 +25,16 @@ The following suite must pass locally and in GitHub Actions CI (`.github/workflo
 # 1. Dependency Synchronization
 uv sync --frozen
 
-# 2. Code Style & Formatting (211 files clean)
+# 2. Code Style & Formatting (219 files clean)
 uv run ruff format --check .
 
 # 3. Static Analysis & Linting (clean, 0 warnings)
 uv run ruff check .
 
-# 4. Strict Type Checking (194 files clean, 0 errors)
+# 4. Strict Type Checking (200 files clean, 0 errors)
 uv run mypy
 
-# 5. Full Pytest Suite (904 passed, 0 failed, 3 opt-in credential tests skipped)
+# 5. Full Pytest Suite (972 passed, 0 failed, 3 opt-in credential tests skipped)
 uv run pytest
 
 # 6. Web UI & Accessibility Suite (§121 ARIA & Keyboard Contracts)
@@ -91,7 +91,7 @@ git diff --name-only HEAD -- AGENTS.md
      ```powershell
      uv run alembic upgrade head
      ```
-   - All migrations (`0001_initial_schema`, `0002_add_provider_webhook_events`, `0003_add_approval_binding_principal`, `0004_add_emergency_pause_records`) must execute cleanly.
+   - All migrations (`0001_initial_schema` … `0007_order_cancellation_reason`) must execute cleanly. Pre-`0006` approval rows carry `agent_id=''` and cannot load (fail-closed); expire and re-issue them per ADR-0007.
 3. **Application Startup**:
    - Web application validates schema version during health check. If pending migrations exist, startup fails closed.
 

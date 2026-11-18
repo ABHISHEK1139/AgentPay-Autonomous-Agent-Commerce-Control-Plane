@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -128,7 +128,29 @@ class SqlAlchemyProviderWebhookEventRepository(
                     stmt = stmt.where(ProviderWebhookEventModel.provider_account_id == acc_id)
                 existing = session.scalar(stmt)
                 if existing is not None:
-                    return existing.to_domain(), False
+                    event = existing.to_domain()
+                    if event.status in (WebhookEventStatus.FAILED, WebhookEventStatus.QUARANTINED):
+                        retried = event.mark_processing()
+                        result = session.execute(
+                            update(ProviderWebhookEventModel)
+                            .where(
+                                ProviderWebhookEventModel.id == existing.id,
+                                ProviderWebhookEventModel.status == event.status.value,
+                            )
+                            .values(
+                                status=retried.status.value,
+                                attempt_count=retried.attempt_count,
+                                last_error_code=retried.last_error_code,
+                                updated_at=retried.updated_at,
+                            )
+                        )
+                        if getattr(result, "rowcount", 0) == 1:
+                            session.commit()
+                            return retried, True
+                        session.rollback()
+                        refreshed = session.get(ProviderWebhookEventModel, existing.id)
+                        return (refreshed.to_domain() if refreshed else event), False
+                    return event, False
 
                 existing_any = session.scalar(
                     select(ProviderWebhookEventModel).where(
@@ -137,11 +159,29 @@ class SqlAlchemyProviderWebhookEventRepository(
                     )
                 )
                 if existing_any is not None:
-                    return existing_any.to_domain(), False
+                    event = existing_any.to_domain()
+                    if event.status in (WebhookEventStatus.FAILED, WebhookEventStatus.QUARANTINED):
+                        retried = event.mark_processing()
+                        existing_any.status = retried.status.value
+                        existing_any.attempt_count = retried.attempt_count
+                        existing_any.last_error_code = retried.last_error_code
+                        existing_any.updated_at = retried.updated_at
+                        session.commit()
+                        return retried, True
+                    return event, False
 
                 existing_pk = session.get(ProviderWebhookEventModel, event.id)
                 if existing_pk is not None:
-                    return existing_pk.to_domain(), False
+                    event = existing_pk.to_domain()
+                    if event.status in (WebhookEventStatus.FAILED, WebhookEventStatus.QUARANTINED):
+                        retried = event.mark_processing()
+                        existing_pk.status = retried.status.value
+                        existing_pk.attempt_count = retried.attempt_count
+                        existing_pk.last_error_code = retried.last_error_code
+                        existing_pk.updated_at = retried.updated_at
+                        session.commit()
+                        return retried, True
+                    return event, False
                 raise
 
     def mark_processed(

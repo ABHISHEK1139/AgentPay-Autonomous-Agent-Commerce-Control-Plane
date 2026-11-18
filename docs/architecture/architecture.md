@@ -59,7 +59,7 @@ Dependency direction is strictly inward:
 | `domain/cart.py` | `Cart`, `CartItem`, `CartStatus`. | Single-merchant multi-item cart (ADR-0006). Frozen aggregate; merge/remove/lifecycle transitions validated; never an authority — prices, stock, policy and approvals re-verified at checkout. |
 | `domain/evidence.py` | `EvidenceConflictDetector`, `EvidenceRecord`, `ConflictType`. | Pre-flight price and stock conflict detection. Fails closed before payment (§32, §33). |
 | `domain/decision.py` | `Decision`, `DecisionRecommendation`, `RiskLevel`. | Advisory AI (JEV / LLM). Strictly subordinate to deterministic policy engine (§2.2, §134). |
-| `domain/approval.py` | `Approval`, `ApprovalBinding`, `ApprovalStatus`, `ApprovalTier`, `ApprovalPolicy`. | Exact 8-field binding to action, amount, merchant, resource, currency, version, tenant, principal. Single-use consumption (§20). |
+| `domain/approval.py` | `Approval`, `ApprovalBinding`, `ApprovalStatus`, `ApprovalTier`, `ApprovalPolicy`. | Exact 9-field binding to action, amount, merchant, resource, currency, version, tenant, principal, agent (ADR-0007). Single-use consumption (§20). |
 | `domain/payments.py` | `PaymentAttempt`, `PaymentStatus`, `Order`, `OrderStatus`, `Refund`, `IdempotencyRecord`. | Strict idempotency keys. On timeout, query provider; never blindly retry (§41, §43). |
 | `application/services/reconciliation_service.py` | `PaymentReconciler`. | Read-only provider query for UNKNOWN attempts; persists outcome; never creates, captures, or refunds (§43). |
 | `domain/audit.py` | `AuditEvent`, `AuditHasher`, `SensitiveFieldRedactor`, `AuditEventType`. | SHA-256 hash chaining over canonical JSON. Full metadata preimage validation (§29, §45). |
@@ -91,7 +91,7 @@ Built as an interactive, inspectable operator dashboard:
 ## 5. Deliberately Deferred & Operational Seams
 
 The following components are designed, implemented, and verified with in-memory or SQLite adapters, ready for production deployment:
-- **Relational Persistence & Migrations**: SQLAlchemy 2.0 models and tenant-partitioned repositories are implemented (`infrastructure/database/`), verified against in-memory SQLite, and managed via Alembic migrations (`0001` through `0004`). Production deployment targets PostgreSQL with WAL archiving (ADR-0001).
+- **Relational Persistence & Migrations**: SQLAlchemy 2.0 models and tenant-partitioned repositories are implemented (`infrastructure/database/`), verified against in-memory SQLite, and managed via Alembic migrations (`0001` through `0007`). Production deployment targets PostgreSQL with WAL archiving (ADR-0001).
 - **Distributed Cache & State**: Emergency pause and webhook deduplication persist to SQLite/PostgreSQL; in-process threading primitives provide fast-path caching.
 - **Payment Sandboxes (§151)**: Payment processing operates against real sandbox (`RazorpaySandboxProvider`) or mock adapters with the complete state machine and saga compensation lifecycle. Live-money processing is strictly disabled.
 

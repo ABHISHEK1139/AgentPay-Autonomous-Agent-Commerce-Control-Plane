@@ -4,8 +4,8 @@ Things a future engineer will otherwise discover the hard way.
 
 ## Operational & Environment Limitations
 
-- **External Services Are Not Required by the Test Suite**: All 904 automated backend tests and
-  6 web dashboard tests run hermetically against thread-safe in-memory repository adapters,
+- **External Services Are Not Required by the Test Suite**: All 972 automated backend tests and
+  7 web dashboard tests run hermetically against thread-safe in-memory repository adapters,
   in-memory SQLite (for SQLAlchemy 2.0 relational repositories in `test_database_persistence.py`),
   and the mock payment provider. Postgres and Redis are declared in `docker-compose.yml` /
   `.env.example`; live local validation (PostgreSQL migrations, Redis, dump/restore) was performed
@@ -40,9 +40,15 @@ Things a future engineer will otherwise discover the hard way.
 
 ## AI & Intelligence Boundaries
 
-- **Advisory AI Simulation**: The decision engine (JEV / LLM) operates via mock and structured decision adapters
-  to ensure deterministic, reproducible test execution. While external LLM gateways can be plugged in via
-  the application decision interface, live model API keys are omitted from hermetic test suites.
+- **Advisory AI Integration Evidence**: Hermetic tests use mock and structured decision adapters for
+  reproducibility. A supplied hosted OpenAI-compatible endpoint also completed one real advisory call in
+  41.867s; later factory-path calls received provider 503/502 responses and exercised fail-closed fallback.
+  This is integration evidence, not an availability or production-readiness claim. Credentials were used
+  only at runtime and are not stored in the repository or running server's persistent configuration.
+- **Control Center Live Reads and Identity**: Live mutations fail loudly on network/HTTP errors, but several
+  read methods retain explicitly labeled local fallback data when the API cannot be reached. The Control
+  Center has no operator sign-in flow; authenticated browser verification injected the repository's local
+  demo credential in memory. OIDC production authentication remains unconfigured.
 - **Deterministic Policy Priority (§2.2, §134)**: Even with advanced model integrations, the policy engine
   strictly refuses any model recommendation that exceeds configured financial thresholds.
 
@@ -54,6 +60,10 @@ Things a future engineer will otherwise discover the hard way.
   fail the build), plus CodeQL in a separate workflow. These are automated scanner *evidence*, not
   proof of absolute security. Commercial SAST suites and external penetration testing have **not**
   been conducted.
+- **ASVS mapping version gap**: The blueprint (§53) cites OWASP ASVS 5.0.0 as the baseline, but
+  `security/asvs/verification.yaml` and the mapping matrix are ASVS v4-shaped (`asvs-v4-mapping.md`,
+  `asvs_version: 4.0.3`). Re-mapping to v5 requires re-checking the published v5 control set
+  against current OWASP publications (§0.5) and is future work; no v5 compliance is claimed.
 
 ## Blueprint Status Matrix (Sprint 15 Verified on 2026-10-11)
 

@@ -68,6 +68,14 @@ class InMemoryRefundRepository(RefundRepository):
             tenant_store = self._refunds.setdefault(tenant_id, {})
             tenant_store[refund.refund_id] = refund
 
+    def list_for_payment_attempt(self, tenant_id: str, payment_attempt_id: str) -> list[Refund]:
+        with self._lock:
+            return [
+                refund
+                for refund in self._refunds.get(tenant_id, {}).values()
+                if refund.payment_attempt_id == payment_attempt_id
+            ]
+
 
 class InMemoryOrderRepository(OrderRepository):
     """Thread-safe in-memory store for Orders."""
@@ -249,6 +257,14 @@ class InMemoryProviderWebhookEventRepository(ProviderWebhookEventRepository):
             key = (prov, acc_id, evt_id)
             existing = self._by_provider_event.get(key)
             if existing is not None:
+                if existing.status in (
+                    WebhookEventStatus.FAILED,
+                    WebhookEventStatus.QUARANTINED,
+                ):
+                    retried = existing.mark_processing()
+                    self._by_id[retried.id] = retried
+                    self._by_provider_event[key] = retried
+                    return retried, True
                 return existing, False
 
             if not acc_id:

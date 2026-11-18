@@ -54,9 +54,9 @@ Adopt a first-class `Cart` aggregate with these semantics:
   prices; any mismatch is a `PRICE_MISMATCH` conflict and fails closed (§33). Per-item quantity
   above effective availability is an `INVENTORY_MISMATCH` conflict.
 - **Policy on the cart total**: the deterministic spending policy evaluates the recomputed total
-  once (per-transaction and daily limits). `REVIEW` produces a single approval bound (8-field
-  binding, ADR-0004) to `(action, total, merchant, cart_id, currency, action_version, principal,
-  tenant)`.
+  once (per-transaction and daily limits). `REVIEW` produces a single approval bound (9-field
+  binding, ADR-0007) to `(action, total, merchant, cart_id, currency, action_version, principal,
+  tenant, agent)`.
 - **One payment, N orders**: on `ALLOW` (or approved execution) the pipeline reserves every item
   atomically-or-compensates, creates exactly one payment for the total, then persists one
   `CONFIRMED` single-variant `Order` per cart item, all sharing the one `payment_attempt_id`.

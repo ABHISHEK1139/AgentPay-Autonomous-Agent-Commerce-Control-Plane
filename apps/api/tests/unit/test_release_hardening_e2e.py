@@ -171,6 +171,35 @@ def build_hardened_system() -> tuple[AgentPayApiApp, InMemoryAuditLedger]:
     )
     inventory_repo.save(tenant_id="tenant_alpha", inventory=inv)
 
+    # AP2 E2E references an explicit catalog variant priced at the requested
+    # amount; unknown variants must fail closed, never auto-provision.
+    ap2_prod = Product(
+        product_id="prod_ord_ref_992",
+        tenant_id="tenant_alpha",
+        merchant_id="merch_prime",
+        name="AP2 Mandate Equipment",
+        category="electronics",
+        description="Catalog entry for the AP2 approval workflow test",
+    )
+    product_repo.save(tenant_id="tenant_alpha", product=ap2_prod)
+    ap2_var = ProductVariant(
+        variant_id="ord_ref_992",
+        product_id="prod_ord_ref_992",
+        sku="AP2-992",
+        name="AP2 Mandate Equipment",
+        price=Money(minor_units=800000, currency="INR"),
+    )
+    variant_repo.save(tenant_id="tenant_alpha", variant=ap2_var)
+    inventory_repo.save(
+        tenant_id="tenant_alpha",
+        inventory=Inventory(
+            variant_id="ord_ref_992",
+            tenant_id="tenant_alpha",
+            available=10,
+            reserved=0,
+        ),
+    )
+
     app = AgentPayApiApp(orchestrator=orchestrator)
 
     return app, audit_ledger

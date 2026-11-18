@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `POST /agent/carts/{id}/items`, `POST /agent/carts/{id}/items/remove`, and multi-item
   `POST /agent/checkout` with asserted-total verification, per-line price/inventory conflict
   checks, emergency-pause fail-closed behavior, and agent impersonation denial. Cart checkouts
-  bind 8-field approvals to the cart (`action="checkout"`, `resource.type="cart"`) and execute
+  bind 9-field approvals to the cart (`action="checkout"`, `resource.type="cart"`) and execute
   through `POST /api/v1/approvals/{id}/execute`.
 - **Cart Checkout Orchestration**: reserve-all → one payment → N single-variant CONFIRMED orders
   (shared `payment_attempt_id`) → cart `CHECKED_OUT`, with saga compensation (release reservations /
@@ -35,10 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Domain Error `TOOL_EXECUTION_UNAVAILABLE`**: fail-closed `ToolExecutionUnavailableError` for registered-but-unimplemented tools, mapped to HTTP 501 with guidance to the canonical action/approval endpoints.
 
 ### Changed
-- Verified gate counts refreshed: 904 Python tests passing (3 opt-in skips), mypy clean across
-  194 source files, ruff clean across 211 files, 6 web tests passing.
+- Verified gate counts refreshed: 972 Python tests passing (3 opt-in skips), mypy clean across
+  200 source files, ruff clean across 219 files, 7 web tests passing.
+- Approval binding is now 9 fields (`agent_id` added; ADR-0007 supersedes ADR-0004's list).
 
 ### Fixed
+- **Full Codebase Security Hardening (2026-11-09)**: protocol handlers no longer auto-provision
+  catalog entries at an agent-declared price (unknown variants fail closed); orders require
+  a configured payment provider (no provider → `DENY`, never `CONFIRMED`); provider
+  idempotency rejects amount/currency mismatch; webhook partial refunds land in
+  `PARTIALLY_REFUNDED` without cancelling the order (over-refunds fail closed); approvals are
+  revalidated before atomic consumption so transient drift does not burn the single-use grant;
+  Razorpay webhooks enforce timestamp freshness when present; the generic webhook handler
+  verifies HMAC over raw request bytes only; `SqlAlchemyProductRepository.save_variant`
+  requires an explicit tenant; the domain-purity checker closes its dotted-submodule and
+  dynamic-import bypasses. Regression tests: `test_security_hardening_regression.py` (8 tests).
 - **B-WEB-01 (HIGH)**: Web approval resolution now calls the backend (grant/reject with `res.ok` checks, then chained execution on approval), surfaces execution failures instead of fabricating success, synchronizes live approval data, and keeps the deterministic demo simulation only in demo mode.
 - **B-TOOL-01 (MEDIUM)**: `execute_tool` no longer returns fabricated `"status": "executed"` for unimplemented tools — it fails closed with `TOOL_EXECUTION_UNAVAILABLE` (§2.4, §135).
 - **B-EVID-01 (MEDIUM)**: Purchases now persist immutable catalog evidence snapshots through `EvidenceRepository`, making recommendation provenance auditable after the fact (§2.3, §32).
