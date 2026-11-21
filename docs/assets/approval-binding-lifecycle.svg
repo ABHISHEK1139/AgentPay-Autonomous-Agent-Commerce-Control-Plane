@@ -1,0 +1,280 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090D16"/>
+      <stop offset="50%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#090D16"/>
+    </linearGradient>
+
+    <linearGradient id="primaryCard" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E293B" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#0F172A" stop-opacity="0.9"/>
+    </linearGradient>
+
+    <linearGradient id="cyanCard" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0891B2" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#0E7490" stop-opacity="0.05"/>
+    </linearGradient>
+
+    <linearGradient id="emeraldCard" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#047857" stop-opacity="0.05"/>
+    </linearGradient>
+
+    <linearGradient id="roseCard" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#E11D48" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#BE123C" stop-opacity="0.05"/>
+    </linearGradient>
+
+    <filter id="cardGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+
+    <filter id="accentGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="0" stdDeviation="8" flood-color="#06B6D4" flood-opacity="0.4"/>
+    </filter>
+
+    <marker id="arrowCyan" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#06B6D4"/>
+    </marker>
+    <marker id="arrowEmerald" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#10B981"/>
+    </marker>
+    <marker id="arrowRose" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M 0 0 L 8 4 L 0 8 z" fill="#F43F5E"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="520" rx="16" fill="url(#bgGrad)"/>
+  <rect width="1000" height="520" rx="16" fill="none" stroke="#334155" stroke-width="1.5" stroke-opacity="0.6"/>
+
+  <!-- Subtle Grid Pattern -->
+  <g opacity="0.07" stroke="#94A3B8" stroke-width="1">
+    <line x1="0" y1="65" x2="1000" y2="65"/>
+    <line x1="0" y1="130" x2="1000" y2="130"/>
+    <line x1="0" y1="195" x2="1000" y2="195"/>
+    <line x1="0" y1="260" x2="1000" y2="260"/>
+    <line x1="0" y1="325" x2="1000" y2="325"/>
+    <line x1="0" y1="390" x2="1000" y2="390"/>
+    <line x1="0" y1="455" x2="1000" y2="455"/>
+    <line x1="125" y1="0" x2="125" y2="520"/>
+    <line x1="250" y1="0" x2="250" y2="520"/>
+    <line x1="375" y1="0" x2="375" y2="520"/>
+    <line x1="500" y1="0" x2="500" y2="520"/>
+    <line x1="625" y1="0" x2="625" y2="520"/>
+    <line x1="750" y1="0" x2="750" y2="520"/>
+    <line x1="875" y1="0" x2="875" y2="520"/>
+  </g>
+
+  <!-- Title & Header -->
+  <g transform="translate(40, 42)">
+    <text font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#F8FAFC">
+      Exact 9-Field Cryptographic Human Approval Binding
+    </text>
+    <text y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="500" fill="#94A3B8">
+      ADR-0007 / AGENTS.md §20: Atomically Bound Parameters &amp; Fail-Closed Replay Prevention
+    </text>
+  </g>
+
+  <!-- Step 1: Action Request & 9 Bound Fields -->
+  <g transform="translate(40, 85)" filter="url(#cardGlow)">
+    <rect width="270" height="395" rx="12" fill="url(#primaryCard)" stroke="#0284C7" stroke-width="1.5"/>
+    
+    <!-- Card Header -->
+    <rect width="270" height="38" rx="12" fill="#0284C7" fill-opacity="0.2"/>
+    <circle cx="20" cy="19" r="6" fill="#38BDF8"/>
+    <text x="34" y="23" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="700" fill="#E0F2FE">
+      1. ActionRequest (9 Fields)
+    </text>
+
+    <!-- 9 Immutable Fields List -->
+    <g transform="translate(16, 52)" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11">
+      <!-- 1 -->
+      <rect y="0" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="18" fill="#38BDF8" font-weight="600">action_id</text>
+      <text x="135" y="18" fill="#94A3B8">"act_req_99a"</text>
+      
+      <!-- 2 -->
+      <rect y="34" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="52" fill="#38BDF8" font-weight="600">tenant_id</text>
+      <text x="135" y="52" fill="#94A3B8">"tenant_alpha"</text>
+
+      <!-- 3 -->
+      <rect y="68" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="86" fill="#38BDF8" font-weight="600">principal_id</text>
+      <text x="135" y="86" fill="#94A3B8">"usr_human_4"</text>
+
+      <!-- 4 -->
+      <rect y="102" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="120" fill="#38BDF8" font-weight="600">agent_id</text>
+      <text x="135" y="120" fill="#94A3B8">"procure_bot"</text>
+
+      <!-- 5 -->
+      <rect y="136" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="154" fill="#F59E0B" font-weight="600">amount</text>
+      <text x="135" y="154" fill="#FDE68A">500000 (minor)</text>
+
+      <!-- 6 -->
+      <rect y="170" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="188" fill="#F59E0B" font-weight="600">currency</text>
+      <text x="135" y="188" fill="#FDE68A">"INR" (ISO 4217)</text>
+
+      <!-- 7 -->
+      <rect y="204" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="222" fill="#38BDF8" font-weight="600">merchant_id</text>
+      <text x="135" y="222" fill="#94A3B8">"merch_dell_in"</text>
+
+      <!-- 8 -->
+      <rect y="238" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="256" fill="#38BDF8" font-weight="600">resource_id</text>
+      <text x="135" y="256" fill="#94A3B8">"sku_xps_15"</text>
+
+      <!-- 9 -->
+      <rect y="272" width="238" height="28" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <text x="10" y="290" fill="#38BDF8" font-weight="600">action_version</text>
+      <text x="135" y="290" fill="#94A3B8">1 (monotonic)</text>
+    </g>
+
+    <!-- Sub note -->
+    <text x="16" y="380" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="500" fill="#64748B">
+      Payload frozen prior to human review
+    </text>
+  </g>
+
+  <!-- Arrow 1 -> 2 -->
+  <path d="M 310 240 L 350 240" fill="none" stroke="#06B6D4" stroke-width="2" marker-end="url(#arrowCyan)"/>
+
+  <!-- Step 2: Human Approval & Token Issuance -->
+  <g transform="translate(358, 120)" filter="url(#cardGlow)">
+    <rect width="250" height="270" rx="12" fill="url(#primaryCard)" stroke="#D97706" stroke-width="1.5"/>
+    
+    <!-- Card Header -->
+    <rect width="250" height="38" rx="12" fill="#D97706" fill-opacity="0.2"/>
+    <circle cx="20" cy="19" r="6" fill="#FBBF24"/>
+    <text x="34" y="23" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="700" fill="#FEF3C7">
+      2. Human Signoff &amp; Token
+    </text>
+
+    <!-- Content -->
+    <g transform="translate(16, 52)">
+      <rect width="218" height="52" rx="8" fill="#1E293B" stroke="#475569" stroke-width="1"/>
+      <text x="10" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#F8FAFC">
+        Human Approver Action:
+      </text>
+      <text x="10" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" fill="#34D399">
+        APPROVE [Signature Signed]
+      </text>
+
+      <rect y="64" width="218" height="85" rx="8" fill="#0F172A" stroke="#D97706" stroke-width="1"/>
+      <text x="10" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#FDE68A">
+        Approval Record Binding:
+      </text>
+      <text x="10" y="42" font-family="ui-monospace, monospace" font-size="10" fill="#94A3B8">token: "appr_tok_8f12a"</text>
+      <text x="10" y="58" font-family="ui-monospace, monospace" font-size="10" fill="#94A3B8">status: PENDING_USE</text>
+      <text x="10" y="74" font-family="ui-monospace, monospace" font-size="10" fill="#38BDF8">binds_all_9_fields: TRUE</text>
+
+      <text y="172" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" fill="#94A3B8">
+        Single-Use Atomic Lock (§20)
+      </text>
+      <text y="190" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" fill="#64748B">
+        Token consumed immediately on checkout
+      </text>
+    </g>
+  </g>
+
+  <!-- Fork Arrows (Pass vs Fail) -->
+  <!-- Top Branch: Match -> Pass -->
+  <path d="M 608 210 Q 640 210, 660 170" fill="none" stroke="#10B981" stroke-width="2" marker-end="url(#arrowEmerald)"/>
+  <!-- Bottom Branch: Tamper -> Fail -->
+  <path d="M 608 270 Q 640 270, 660 330" fill="none" stroke="#F43F5E" stroke-width="2" marker-end="url(#arrowRose)"/>
+
+  <!-- Step 3A: Valid Execution (Match) -->
+  <g transform="translate(670, 85)" filter="url(#cardGlow)">
+    <rect width="290" height="175" rx="12" fill="url(#emeraldCard)" stroke="#10B981" stroke-width="1.5"/>
+    
+    <!-- Header -->
+    <rect width="290" height="34" rx="12" fill="#059669" fill-opacity="0.25"/>
+    <circle cx="18" cy="17" r="6" fill="#34D399"/>
+    <text x="32" y="21" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" fill="#D1FAE5">
+      3A. Exact Match Verification: PASS
+    </text>
+
+    <!-- Details -->
+    <g transform="translate(16, 48)">
+      <text y="12" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#E2E8F0">
+        All 9 parameters identical at checkout:
+      </text>
+      <text y="30" font-family="ui-monospace, monospace" font-size="10" fill="#34D399">
+        ✓ amount == 500000 &amp;&amp; curr == "INR"
+      </text>
+      <text y="46" font-family="ui-monospace, monospace" font-size="10" fill="#34D399">
+        ✓ merchant_id == "merch_dell_in"
+      </text>
+      <text y="62" font-family="ui-monospace, monospace" font-size="10" fill="#34D399">
+        ✓ token consumed atomically in DB
+      </text>
+
+      <rect y="76" width="258" height="34" rx="6" fill="#064E3B" stroke="#059669" stroke-width="1"/>
+      <text x="10" y="98" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#A7F3D0">
+        RESULT: Authorized &amp; Payment Executed
+      </text>
+    </g>
+  </g>
+
+  <!-- Step 3B: Tamper / Replay Detected (Fail Closed) -->
+  <g transform="translate(670, 285)" filter="url(#cardGlow)">
+    <rect width="290" height="195" rx="12" fill="url(#roseCard)" stroke="#E11D48" stroke-width="1.5"/>
+    
+    <!-- Header -->
+    <rect width="290" height="34" rx="12" fill="#BE123C" fill-opacity="0.25"/>
+    <circle cx="18" cy="17" r="6" fill="#FB7185"/>
+    <text x="32" y="21" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" fill="#FFE4E6">
+      3B. Discrepancy Detected: FAIL CLOSED
+    </text>
+
+    <!-- Details -->
+    <g transform="translate(16, 48)">
+      <text y="12" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#FDA4AF">
+        Discrepancy (e.g. Price Jump / Token Reuse):
+      </text>
+      <text y="30" font-family="ui-monospace, monospace" font-size="10" fill="#FB7185">
+        ✗ Amount modified: ₹5,000 → ₹50,000
+      </text>
+      <text y="46" font-family="ui-monospace, monospace" font-size="10" fill="#FB7185">
+        ✗ Replay: Token already marked CONSUMED
+      </text>
+      <text y="62" font-family="ui-monospace, monospace" font-size="10" fill="#FB7185">
+        ✗ Error: APPROVAL_BINDING_MISMATCH
+      </text>
+
+      <rect y="76" width="258" height="52" rx="6" fill="#4C0519" stroke="#E11D48" stroke-width="1"/>
+      <text x="10" y="96" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#FECDD3">
+        RESULT: Execution Blocked
+      </text>
+      <text x="10" y="114" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" fill="#FDA4AF">
+        SecurityEvent Emitted → Chained to SHA-256 Audit
+      </text>
+    </g>
+  </g>
+
+  <!-- Bottom Legend Bar -->
+  <g transform="translate(40, 495)">
+    <circle cx="6" cy="6" r="4" fill="#0284C7"/>
+    <text x="18" y="10" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" fill="#94A3B8">
+      9-Field Exact Parameter Verification
+    </text>
+    <circle cx="280" cy="6" r="4" fill="#10B981"/>
+    <text x="292" y="10" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" fill="#94A3B8">
+      Atomic Single-Use Token
+    </text>
+    <circle cx="490" cy="6" r="4" fill="#F43F5E"/>
+    <text x="502" y="10" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" fill="#94A3B8">
+      Tamper Fail-Closed Enforcement (§2.4)
+    </text>
+    <circle cx="780" cy="6" r="4" fill="#A855F7"/>
+    <text x="792" y="10" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" fill="#94A3B8">
+      Immutable Audit Trail
+    </text>
+  </g>
+</svg>

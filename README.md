@@ -1,6 +1,10 @@
 # AgentPay
 
 <p align="center">
+  <img src="docs/assets/agentpay-banner.svg" alt="AgentPay Autonomous Agent Commerce Control Plane Banner" width="100%">
+</p>
+
+<p align="center">
   <strong>Autonomous Agent Commerce Control Plane</strong><br>
   <em>Deterministic authorization, cryptographic invariants, and failure recovery for autonomous AI financial actions.</em>
 </p>
@@ -103,6 +107,13 @@ AgentPay is structured as a **modular monolith** adhering to strict Clean / Hexa
 
 ### Architectural Topology
 
+<p align="center">
+  <img src="docs/assets/architecture-diagram.svg" alt="AgentPay Architectural Topology" width="100%">
+</p>
+
+<details>
+<summary><strong>View ASCII Architecture Topology</strong></summary>
+
 ```text
  ┌─────────────────────────────────────────────────────────────────────────────────────────┐
  │                                   AGENT / CLIENT LAYER                                  │
@@ -157,6 +168,8 @@ AgentPay is structured as a **modular monolith** adhering to strict Clean / Hexa
  │  • Mock Provider (Chaos Injections)     │     │  • Independent CLI Verifier Script      │
  └─────────────────────────────────────────┘     └─────────────────────────────────────────┘
 ```
+
+</details>
 
 ### The 10-Step Canonical Lifecycle
 
@@ -215,6 +228,10 @@ The policy engine operates entirely on deterministic business logic and arithmet
   4. `BOUNDED_AUTONOMOUS`: Autonomous execution within strict pre-funded envelopes.
 
 ### 3.3 Exact 9-Field Cryptographic Human Approval Binding
+
+<p align="center">
+  <img src="docs/assets/approval-binding-lifecycle.svg" alt="Exact 9-Field Cryptographic Human Approval Binding Lifecycle" width="100%">
+</p>
 
 When an action requires human review, AgentPay issues an `Approval` bound to **exactly 9 contextual parameters** (ADR-0007, strengthening §20):
 
@@ -479,6 +496,10 @@ In alignment with honest engineering principles (§108, §144), AgentPay clearly
 ---
 
 ## 7. Interactive Showcase: 8 Pre-Configured Scenarios
+
+<p align="center">
+  <img src="docs/assets/control-center-dashboard.svg" alt="AgentPay Control Center & 8 Scenario Safety Harness" width="100%">
+</p>
 
 The web Control Center includes 8 pre-configured scenarios (§112) illustrating autonomous safety mechanisms:
 

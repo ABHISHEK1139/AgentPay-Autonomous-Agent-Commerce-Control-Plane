@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0d18" />
+      <stop offset="50%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#05070e" />
+    </linearGradient>
+
+    <!-- Accent Gradients -->
+    <linearGradient id="primaryGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.9" />
+      <stop offset="50%" stop-color="#6366f1" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0.4" />
+    </linearGradient>
+
+    <linearGradient id="pillGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#334155" />
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <style>
+    .title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-weight: 800; font-size: 58px; fill: url(#primaryGrad); letter-spacing: -1px; }
+    .subtitle { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-weight: 600; font-size: 24px; fill: #f8fafc; letter-spacing: 0.5px; }
+    .tagline { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 16px; fill: #94a3b8; font-weight: 400; }
+    .badge-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 600; fill: #38bdf8; }
+    .badge-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; font-weight: 500; fill: #cbd5e1; }
+    .grid-line { stroke: #1e293b; stroke-width: 1; stroke-opacity: 0.5; }
+    .accent-line { stroke: url(#primaryGrad); stroke-width: 2; }
+  </style>
+
+  <!-- Background Base -->
+  <rect width="1200" height="400" rx="16" fill="url(#bgGrad)" />
+
+  <!-- Background Grid -->
+  <g opacity="0.3">
+    <line x1="0" y1="50" x2="1200" y2="50" class="grid-line" />
+    <line x1="0" y1="100" x2="1200" y2="100" class="grid-line" />
+    <line x1="0" y1="150" x2="1200" y2="150" class="grid-line" />
+    <line x1="0" y1="200" x2="1200" y2="200" class="grid-line" />
+    <line x1="0" y1="250" x2="1200" y2="250" class="grid-line" />
+    <line x1="0" y1="300" x2="1200" y2="300" class="grid-line" />
+    <line x1="0" y1="350" x2="1200" y2="350" class="grid-line" />
+
+    <line x1="100" y1="0" x2="100" y2="400" class="grid-line" />
+    <line x1="250" y1="0" x2="250" y2="400" class="grid-line" />
+    <line x1="400" y1="0" x2="400" y2="400" class="grid-line" />
+    <line x1="550" y1="0" x2="550" y2="400" class="grid-line" />
+    <line x1="700" y1="0" x2="700" y2="400" class="grid-line" />
+    <line x1="850" y1="0" x2="850" y2="400" class="grid-line" />
+    <line x1="1000" y1="0" x2="1000" y2="400" class="grid-line" />
+    <line x1="1150" y1="0" x2="1150" y2="400" class="grid-line" />
+  </g>
+
+  <!-- Ambient Glow Spots -->
+  <circle cx="180" cy="190" r="140" fill="#6366f1" opacity="0.12" filter="url(#glow)" />
+  <circle cx="1020" cy="200" r="160" fill="#0ea5e9" opacity="0.10" filter="url(#glow)" />
+
+  <!-- Shield & Lock Security Icon Visual (Left) -->
+  <g transform="translate(100, 100)">
+    <!-- Shield Outer Glow -->
+    <path d="M 90 20 Q 90 120 90 120 Q 90 190 20 220 Q -50 190 -50 120 Q -50 20 -50 20 Q 20 0 90 20 Z" 
+          fill="none" stroke="#38bdf8" stroke-width="2" opacity="0.4" filter="url(#glow)" transform="translate(10, 0)" />
+    
+    <!-- Shield Main Body -->
+    <path d="M 100 25 Q 100 120 100 120 Q 100 185 20 215 Q -60 185 -60 120 Q -60 25 -60 25 Q 20 5 100 25 Z" 
+          fill="url(#shieldGrad)" stroke="#67e8f9" stroke-width="2.5" />
+
+    <!-- Circuit lines on shield -->
+    <path d="M 20 30 L 20 90 M 20 90 L -25 130 M 20 90 L 65 130" stroke="#f8fafc" stroke-width="2" opacity="0.6" stroke-linecap="round" />
+    <circle cx="20" cy="30" r="4" fill="#38bdf8" />
+    <circle cx="-25" cy="130" r="4" fill="#6366f1" />
+    <circle cx="65" cy="130" r="4" fill="#a855f7" />
+
+    <!-- Lock Emblem Center -->
+    <rect x="-10" y="80" width="60" height="48" rx="8" fill="#0f172a" stroke="#38bdf8" stroke-width="2.5" filter="url(#softGlow)" />
+    <path d="M 5 80 L 5 60 A 15 15 0 0 1 35 60 L 35 80" fill="none" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round" />
+    <circle cx="20" cy="100" r="4.5" fill="#f8fafc" />
+    <path d="M 20 104 L 20 114" stroke="#f8fafc" stroke-width="3" stroke-linecap="round" />
+  </g>
+
+  <!-- Central Typography -->
+  <g transform="translate(280, 110)">
+    <!-- Version Pill -->
+    <g transform="translate(0, -25)">
+      <rect x="0" y="0" width="180" height="28" rx="14" fill="#1e293b" stroke="#334155" stroke-width="1" />
+      <circle cx="14" cy="14" r="5" fill="#10b981" />
+      <text x="28" y="19" class="badge-text" font-size="12">AUTONOMOUS CONTROL PLANE</text>
+    </g>
+
+    <text x="0" y="55" class="title">AgentPay</text>
+    <text x="0" y="95" class="subtitle">Autonomous Agent Commerce Control Plane</text>
+    <text x="0" y="130" class="tagline">Deterministic authorization, cryptographic invariants, and failure recovery for autonomous AI agency.</text>
+  </g>
+
+  <!-- Bottom Capability Badges -->
+  <g transform="translate(280, 280)">
+    <!-- Badge 1: 9-Field Approval Binding -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="200" height="48" rx="10" fill="url(#pillGrad)" stroke="#475569" stroke-width="1.2" />
+      <circle cx="24" cy="24" r="9" fill="#0284c7" opacity="0.3" />
+      <path d="M 19 24 L 23 28 L 29 20" fill="none" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      <text x="44" y="21" class="badge-text">9-Field Binding</text>
+      <text x="44" y="37" class="badge-label">Exact Human-in-the-Loop</text>
+    </g>
+
+    <!-- Badge 2: SAGA Orchestrator -->
+    <g transform="translate(215, 0)">
+      <rect x="0" y="0" width="195" height="48" rx="10" fill="url(#pillGrad)" stroke="#475569" stroke-width="1.2" />
+      <circle cx="24" cy="24" r="9" fill="#6366f1" opacity="0.3" />
+      <path d="M 18 24 A 6 6 0 1 1 28 28 M 28 28 L 28 22 M 28 28 L 22 28" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+      <text x="44" y="21" class="badge-text" fill="#a5b4fc">SAGA Rollbacks</text>
+      <text x="44" y="37" class="badge-label">Partial Failure Recovery</text>
+    </g>
+
+    <!-- Badge 3: Minor-Unit Arithmetic -->
+    <g transform="translate(425, 0)">
+      <rect x="0" y="0" width="195" height="48" rx="10" fill="url(#pillGrad)" stroke="#475569" stroke-width="1.2" />
+      <circle cx="24" cy="24" r="9" fill="#8b5cf6" opacity="0.3" />
+      <text x="20" y="28" font-family="monospace" font-weight="bold" font-size="14" fill="#c084fc">#</text>
+      <text x="44" y="21" class="badge-text" fill="#c084fc">ISO 4217 Integer</text>
+      <text x="44" y="37" class="badge-label">Zero IEEE 754 Float Math</text>
+    </g>
+
+    <!-- Badge 4: SHA-256 Audit -->
+    <g transform="translate(635, 0)">
+      <rect x="0" y="0" width="200" height="48" rx="10" fill="url(#pillGrad)" stroke="#475569" stroke-width="1.2" />
+      <circle cx="24" cy="24" r="9" fill="#10b981" opacity="0.3" />
+      <path d="M 24 16 L 30 20 L 30 28 L 24 32 L 18 28 L 18 20 Z" fill="none" stroke="#34d399" stroke-width="1.8" />
+      <text x="44" y="21" class="badge-text" fill="#34d399">SHA-256 Ledger</text>
+      <text x="44" y="37" class="badge-label">Chained Immutable Audit</text>
+    </g>
+  </g>
+
+  <!-- Border Frame -->
+  <rect x="1" y="1" width="1198" height="398" rx="15" fill="none" stroke="#334155" stroke-width="1.5" opacity="0.7" />
+  <line x1="30" y1="399" x2="1170" y2="399" class="accent-line" opacity="0.8" />
+</svg>

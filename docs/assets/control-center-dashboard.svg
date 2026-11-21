@@ -1,0 +1,295 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 620" width="100%" height="100%">
+  <defs>
+    <linearGradient id="dbBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0F19"/>
+      <stop offset="100%" stop-color="#030712"/>
+    </linearGradient>
+
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1E293B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+
+    <linearGradient id="killSwitchGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#DC2626"/>
+      <stop offset="100%" stop-color="#991B1B"/>
+    </linearGradient>
+
+    <linearGradient id="approveBtnGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669"/>
+      <stop offset="100%" stop-color="#047857"/>
+    </linearGradient>
+
+    <filter id="subtleShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Frame Background -->
+  <rect width="1100" height="620" rx="14" fill="url(#dbBg)"/>
+  <rect width="1100" height="620" rx="14" fill="none" stroke="#334155" stroke-width="1.5"/>
+
+  <!-- Top App Navigation Bar -->
+  <g transform="translate(0, 0)">
+    <path d="M 0 14 Q 0 0 14 0 L 1086 0 Q 1100 0 1100 14 L 1100 56 L 0 56 Z" fill="url(#headerGrad)"/>
+    <line x1="0" y1="56" x2="1100" y2="56" stroke="#334155" stroke-width="1"/>
+
+    <!-- Logo & Title -->
+    <rect x="24" y="14" width="28" height="28" rx="6" fill="#0284C7"/>
+    <path d="M 33 28 L 38 20 L 43 28 Z" fill="#F8FAFC"/>
+    <circle cx="38" cy="32" r="2.5" fill="#38BDF8"/>
+    <text x="62" y="33" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="16" font-weight="800" fill="#F8FAFC" letter-spacing="-0.3">
+      AgentPay <tspan fill="#38BDF8" font-weight="600" font-size="13">CONTROL CENTER</tspan>
+    </text>
+
+    <!-- Center Navigation Tabs -->
+    <g transform="translate(320, 16)">
+      <rect x="0" y="0" width="84" height="26" rx="6" fill="#1E293B" stroke="#475569" stroke-width="1"/>
+      <text x="14" y="17" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#E2E8F0">Overview</text>
+
+      <rect x="94" y="0" width="94" height="26" rx="6" fill="#0284C7" fill-opacity="0.25" stroke="#38BDF8" stroke-width="1"/>
+      <text x="108" y="17" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="700" fill="#38BDF8">Approvals (2)</text>
+
+      <rect x="198" y="0" width="94" height="26" rx="6" fill="#1E293B" stroke="#475569" stroke-width="1"/>
+      <text x="214" y="17" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#94A3B8">Audit Chain</text>
+
+      <rect x="302" y="0" width="84" height="26" rx="6" fill="#1E293B" stroke="#475569" stroke-width="1"/>
+      <text x="316" y="17" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#94A3B8">Policies</text>
+    </g>
+
+    <!-- Right Controls: Tenant & Emergency Kill Switch -->
+    <g transform="translate(820, 13)">
+      <!-- Tenant Badge -->
+      <rect x="0" y="2" width="110" height="26" rx="6" fill="#0F172A" stroke="#334155" stroke-width="1"/>
+      <circle cx="12" cy="15" r="4" fill="#10B981"/>
+      <text x="22" y="19" font-family="ui-monospace, monospace" font-size="10" fill="#94A3B8">org_acme_corp</text>
+
+      <!-- Kill Switch (§21, §67) -->
+      <g transform="translate(122, 0)">
+        <rect width="138" height="30" rx="6" fill="url(#killSwitchGrad)" stroke="#EF4444" stroke-width="1" filter="url(#subtleShadow)"/>
+        <circle cx="16" cy="15" r="4" fill="#FFFFFF"/>
+        <text x="28" y="19" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="800" fill="#FFFFFF" letter-spacing="0.5">
+          KILL SWITCH: OFF
+        </text>
+      </g>
+    </g>
+  </g>
+
+  <!-- KPI / Telemetry Row -->
+  <g transform="translate(24, 70)">
+    <!-- KPI 1 -->
+    <rect x="0" y="0" width="248" height="62" rx="8" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+    <text x="16" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#64748B">24H AGENT SETTLEMENT</text>
+    <text x="16" y="46" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="800" fill="#F8FAFC">₹ 4,82,300 <tspan font-size="11" font-weight="600" fill="#10B981">↑ 12%</tspan></text>
+
+    <!-- KPI 2 -->
+    <rect x="264" y="0" width="248" height="62" rx="8" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+    <text x="16" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#64748B">POLICY PASS RATE</text>
+    <text x="16" y="46" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="800" fill="#10B981">97.8% <tspan font-size="11" font-weight="500" fill="#94A3B8">autonomous</tspan></text>
+
+    <!-- KPI 3 -->
+    <rect x="528" y="0" width="248" height="62" rx="8" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+    <text x="16" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#64748B">PENDING HUMAN REVIEW</text>
+    <text x="16" y="46" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="800" fill="#F59E0B">2 Actions <tspan font-size="11" font-weight="500" fill="#FDE68A">(&gt; ₹5,000 threshold)</tspan></text>
+
+    <!-- KPI 4 -->
+    <rect x="792" y="0" width="260" height="62" rx="8" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+    <text x="16" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#64748B">AUDIT CHAIN INTEGRITY</text>
+    <text x="16" y="46" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="800" fill="#38BDF8">100% VALID <tspan font-size="11" font-weight="500" fill="#94A3B8">(SHA-256)</tspan></text>
+  </g>
+
+  <!-- Left Column: Scenario Harness (§112) -->
+  <g transform="translate(24, 146)">
+    <rect width="248" height="450" rx="10" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+    <text x="16" y="24" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" fill="#E2E8F0">
+      DEMO SCENARIOS (§112)
+    </text>
+
+    <!-- Scenarios List -->
+    <g transform="translate(12, 38)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11">
+      <!-- 1 -->
+      <rect y="0" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="21" r="4" fill="#10B981"/>
+      <text x="26" y="19" font-weight="600" fill="#E2E8F0">1. Happy Path Purchase</text>
+      <text x="26" y="33" font-size="9" fill="#64748B">Autonomous approval under budget</text>
+
+      <!-- 2 (Active) -->
+      <rect y="48" width="224" height="42" rx="6" fill="#0284C7" fill-opacity="0.2" stroke="#0284C7" stroke-width="1"/>
+      <circle cx="14" cy="69" r="4" fill="#F59E0B"/>
+      <text x="26" y="67" font-weight="700" fill="#38BDF8">2. Human Approval Required</text>
+      <text x="26" y="81" font-size="9" fill="#93C5FD">Amount exceeds single limit</text>
+
+      <!-- 3 -->
+      <rect y="96" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="117" r="4" fill="#EF4444"/>
+      <text x="26" y="115" font-weight="600" fill="#E2E8F0">3. Policy Velocity Block</text>
+      <text x="26" y="129" font-size="9" fill="#64748B">Exceeds daily rate limit</text>
+
+      <!-- 4 -->
+      <rect y="144" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="165" r="4" fill="#F59E0B"/>
+      <text x="26" y="163" font-weight="600" fill="#E2E8F0">4. Evidence Conflict Flag</text>
+      <text x="26" y="177" font-size="9" fill="#64748B">Spec discrepancy &gt; 35%</text>
+
+      <!-- 5 -->
+      <rect y="192" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="213" r="4" fill="#EF4444"/>
+      <text x="26" y="211" font-weight="600" fill="#E2E8F0">5. Price Spike Defense</text>
+      <text x="26" y="225" font-size="9" fill="#64748B">Merchant price jump detected</text>
+
+      <!-- 6 -->
+      <rect y="240" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="261" r="4" fill="#8B5CF6"/>
+      <text x="26" y="259" font-weight="600" fill="#E2E8F0">6. Emergency Pause Active</text>
+      <text x="26" y="273" font-size="9" fill="#64748B">Fail-closed global lockdown</text>
+
+      <!-- 7 -->
+      <rect y="288" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="309" r="4" fill="#EC4899"/>
+      <text x="26" y="307" font-weight="600" fill="#E2E8F0">7. Circuit Breaker Open</text>
+      <text x="26" y="321" font-size="9" fill="#64748B">Payment gateway timeout fail</text>
+
+      <!-- 8 -->
+      <rect y="336" width="224" height="42" rx="6" fill="#1E293B" fill-opacity="0.5"/>
+      <circle cx="14" cy="357" r="4" fill="#14B8A6"/>
+      <text x="26" y="355" font-weight="600" fill="#E2E8F0">8. SAGA Rollback Recovery</text>
+      <text x="26" y="369" font-size="9" fill="#64748B">Inventory reverse on failure</text>
+    </g>
+
+    <text x="14" y="435" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" fill="#64748B">
+      Keyboard Navigation: [1-8] or [Tab]
+    </text>
+  </g>
+
+  <!-- Center/Right: Human Approval Context Card & Audit Stream -->
+  <g transform="translate(288, 146)">
+    <!-- Approval Action Card (Scenario 2 Detail) -->
+    <rect width="490" height="450" rx="10" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+
+    <!-- Card Header -->
+    <path d="M 0 10 Q 0 0 10 0 L 480 0 Q 490 0 490 10 L 490 44 L 0 44 Z" fill="#1E293B"/>
+    <circle cx="20" cy="22" r="5" fill="#F59E0B"/>
+    <text x="34" y="26" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="13" font-weight="700" fill="#FEF3C7">
+      PENDING HUMAN APPROVAL: Action act_9410f
+    </text>
+    <rect x="375" y="10" width="102" height="24" rx="4" fill="#D97706" fill-opacity="0.3"/>
+    <text x="385" y="26" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" font-weight="700" fill="#FDE68A">
+      EXP: 14m 22s
+    </text>
+
+    <!-- 11 Context Fields Grid -->
+    <g transform="translate(20, 56)">
+      <!-- Reason Banner -->
+      <rect width="450" height="32" rx="6" fill="#F59E0B" fill-opacity="0.1" stroke="#D97706" stroke-width="1"/>
+      <text x="12" y="20" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="600" fill="#FDE68A">
+        Trigger: Single purchase ₹8,499.00 exceeds agent policy limit ₹5,000.00
+      </text>
+
+      <!-- Fields List -->
+      <g transform="translate(0, 44)" font-family="ui-monospace, monospace" font-size="11">
+        <!-- Col 1 -->
+        <text y="14" fill="#64748B">Agent ID:</text>
+        <text x="110" y="14" fill="#38BDF8">procure_bot_dev</text>
+
+        <text y="34" fill="#64748B">Requested Item:</text>
+        <text x="110" y="34" fill="#F8FAFC">Crucial 64GB DDR5 RAM</text>
+
+        <text y="54" fill="#64748B">Verified Merchant:</text>
+        <text x="110" y="54" fill="#10B981">Crucial Direct (Whitelisted)</text>
+
+        <text y="74" fill="#64748B">Amount (Minor):</text>
+        <text x="110" y="74" fill="#F59E0B" font-weight="700">849900 INR (₹ 8,499.00)</text>
+
+        <text y="94" fill="#64748B">Catalog Price:</text>
+        <text x="110" y="94" fill="#E2E8F0">₹ 8,499.00 (verified 2m ago)</text>
+
+        <text y="114" fill="#64748B">Risk Score:</text>
+        <text x="110" y="114" fill="#10B981">0.12 (LOW)</text>
+
+        <text y="134" fill="#64748B">Evidence Check:</text>
+        <text x="110" y="134" fill="#38BDF8">3 Independent sources match</text>
+
+        <text y="154" fill="#64748B">Monthly Budget:</text>
+        <text x="110" y="154" fill="#E2E8F0">₹ 41,501 / ₹ 50,000 remain</text>
+
+        <text y="174" fill="#64748B">9-Field Hash:</text>
+        <text x="110" y="174" fill="#A855F7">sha256:b7e3f8902c114...</text>
+      </g>
+
+      <!-- Action Buttons -->
+      <g transform="translate(0, 245)">
+        <rect x="0" y="0" width="215" height="40" rx="8" fill="#1E293B" stroke="#475569" stroke-width="1"/>
+        <text x="80" y="25" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" fill="#EF4444">
+          ✕ REJECT
+        </text>
+
+        <rect x="235" y="0" width="215" height="40" rx="8" fill="url(#approveBtnGrad)" stroke="#10B981" stroke-width="1" filter="url(#subtleShadow)"/>
+        <text x="282" y="25" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" fill="#FFFFFF">
+          ✓ APPROVE &amp; EXECUTE
+        </text>
+      </g>
+
+      <!-- Binding Guarantee Footnote -->
+      <rect y="302" width="450" height="34" rx="6" fill="#0B132B" stroke="#1E293B" stroke-width="1"/>
+      <text x="12" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" fill="#94A3B8">
+        🔒 Cryptographic Guarantee: Approval binds strictly to ₹ 8,499.00 and Crucial Direct.
+      </text>
+    </g>
+  </g>
+
+  <!-- Right Column: Real-Time Audit Log Stream (§45) -->
+  <g transform="translate(794, 146)">
+    <rect width="282" height="450" rx="10" fill="#0F172A" stroke="#1E293B" stroke-width="1.5"/>
+    <text x="16" y="24" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="700" fill="#E2E8F0">
+      IMMUTABLE AUDIT STREAM
+    </text>
+    <circle cx="258" cy="20" r="4" fill="#10B981"/>
+
+    <!-- Events Stream -->
+    <g transform="translate(14, 38)" font-family="ui-monospace, monospace" font-size="10">
+      <!-- Item 1 -->
+      <rect y="0" width="254" height="64" rx="6" fill="#1E293B" fill-opacity="0.6"/>
+      <text x="10" y="16" fill="#38BDF8">ACTION_REQUEST_CREATED</text>
+      <text x="10" y="32" fill="#94A3B8">act_9410f • agent_dev</text>
+      <text x="10" y="48" fill="#64748B">hash: 9f41b2c... • 12:44:01</text>
+      <rect x="195" y="8" width="50" height="16" rx="4" fill="#0284C7" fill-opacity="0.3"/>
+      <text x="202" y="20" fill="#38BDF8" font-size="8">RECORDED</text>
+
+      <!-- Item 2 -->
+      <rect y="72" width="254" height="64" rx="6" fill="#1E293B" fill-opacity="0.6"/>
+      <text x="10" y="88" fill="#F59E0B">POLICY_EVALUATED</text>
+      <text x="10" y="104" fill="#94A3B8">HUMAN_APPROVAL_REQ</text>
+      <text x="10" y="120" fill="#64748B">hash: 2a19ff0... • 12:44:02</text>
+      <rect x="195" y="80" width="50" height="16" rx="4" fill="#D97706" fill-opacity="0.3"/>
+      <text x="202" y="92" fill="#FDE68A" font-size="8">PAUSED</text>
+
+      <!-- Item 3 -->
+      <rect y="144" width="254" height="64" rx="6" fill="#1E293B" fill-opacity="0.6"/>
+      <text x="10" y="160" fill="#10B981">SETTLEMENT_EXECUTED</text>
+      <text x="10" y="176" fill="#94A3B8">act_9408b • ₹ 1,299</text>
+      <text x="10" y="192" fill="#64748B">hash: 83c07ea... • 12:41:19</text>
+      <rect x="195" y="152" width="50" height="16" rx="4" fill="#059669" fill-opacity="0.3"/>
+      <text x="200" y="164" fill="#34D399" font-size="8">SUCCESS</text>
+
+      <!-- Item 4 -->
+      <rect y="216" width="254" height="64" rx="6" fill="#1E293B" fill-opacity="0.6"/>
+      <text x="10" y="232" fill="#EF4444">PRICE_SPIKE_DEFENSE</text>
+      <text x="10" y="248" fill="#94A3B8">act_9399e • blocked</text>
+      <text x="10" y="264" fill="#64748B">hash: 5db109a... • 12:38:50</text>
+      <rect x="195" y="224" width="50" height="16" rx="4" fill="#DC2626" fill-opacity="0.3"/>
+      <text x="202" y="236" fill="#FCA5A5" font-size="8">BLOCKED</text>
+
+      <!-- Item 5 -->
+      <rect y="288" width="254" height="64" rx="6" fill="#1E293B" fill-opacity="0.6"/>
+      <text x="10" y="304" fill="#A855F7">CHAIN_VERIFIED_CLEAN</text>
+      <text x="10" y="320" fill="#94A3B8">14,290 nodes validated</text>
+      <text x="10" y="336" fill="#64748B">cli: verify_audit_chain</text>
+      <rect x="195" y="296" width="50" height="16" rx="4" fill="#7E22CE" fill-opacity="0.3"/>
+      <text x="202" y="308" fill="#E9D5FF" font-size="8">TAMPER-0</text>
+    </g>
+
+    <text x="14" y="435" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="10" fill="#64748B">
+      All entries cryptographically chained (§45)
+    </text>
+  </g>
+</svg>

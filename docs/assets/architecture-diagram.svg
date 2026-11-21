@@ -1,0 +1,218 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 620" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b0f19" />
+      <stop offset="100%" stop-color="#030712" />
+    </linearGradient>
+
+    <!-- Column Gradients -->
+    <linearGradient id="untrustedGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b" stop-opacity="0.6" />
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.6" />
+    </linearGradient>
+
+    <linearGradient id="coreGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f2b48" stop-opacity="0.8" />
+      <stop offset="50%" stop-color="#0f172a" stop-opacity="0.9" />
+      <stop offset="100%" stop-color="#1e1b4b" stop-opacity="0.8" />
+    </linearGradient>
+
+    <linearGradient id="railsGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#064e3b" stop-opacity="0.5" />
+      <stop offset="100%" stop-color="#0f172a" stop-opacity="0.5" />
+    </linearGradient>
+
+    <!-- Component Fill Gradients -->
+    <linearGradient id="boxBlue" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+
+    <linearGradient id="boxAccent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1e293b" />
+      <stop offset="100%" stop-color="#1e1b4b" />
+    </linearGradient>
+
+    <linearGradient id="highlightBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#818cf8" />
+      <stop offset="100%" stop-color="#c084fc" />
+    </linearGradient>
+
+    <!-- Arrow Marker -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+    </marker>
+    <marker id="arrowGreen" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981" />
+    </marker>
+    <marker id="arrowOrange" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#f59e0b" />
+    </marker>
+  </defs>
+
+  <style>
+    .header-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 20px; font-weight: 700; fill: #f8fafc; }
+    .header-sub { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #94a3b8; }
+    .col-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; font-weight: 700; letter-spacing: 1px; }
+    .card-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 700; fill: #f1f5f9; }
+    .card-desc { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #94a3b8; }
+    .boundary-tag { font-family: monospace; font-size: 11px; font-weight: 600; fill: #ef4444; }
+    .flow-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; font-weight: 600; fill: #38bdf8; }
+  </style>
+
+  <!-- Canvas Background -->
+  <rect width="1100" height="620" rx="14" fill="url(#bg)" stroke="#1e293b" stroke-width="1.5" />
+
+  <!-- Top Title Banner -->
+  <g transform="translate(40, 35)">
+    <text x="0" y="0" class="header-title">AgentPay System Topology &amp; Security Boundaries</text>
+    <text x="0" y="20" class="header-sub">Architectural Separation: Probabilistic AI Agency vs. Deterministic Financial Authority (§2, §8, §18)</text>
+  </g>
+
+  <!-- COLUMN 1: UNTRUSTED DOMAIN (Left) -->
+  <g transform="translate(40, 80)">
+    <rect width="250" height="500" rx="12" fill="url(#untrustedGrad)" stroke="#4338ca" stroke-width="1.2" stroke-dasharray="4 4" />
+    <text x="20" y="32" class="col-title" fill="#a5b4fc">UNTRUSTED LAYER (§2.1)</text>
+    <text x="20" y="48" class="card-desc">No authority over money or policy</text>
+
+    <!-- Card 1: Autonomous AI Agents -->
+    <g transform="translate(15, 70)">
+      <rect width="220" height="75" rx="8" fill="url(#boxAccent)" stroke="#6366f1" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Autonomous AI Agents</text>
+      <text x="14" y="42" class="card-desc">• LLMs (OpenAI, Claude, Ollama)</text>
+      <text x="14" y="58" class="card-desc">• Autonomous Shopping Bots</text>
+    </g>
+
+    <!-- Card 2: External Protocols -->
+    <g transform="translate(15, 160)">
+      <rect width="220" height="85" rx="8" fill="url(#boxAccent)" stroke="#6366f1" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Commerce Protocols</text>
+      <text x="14" y="42" class="card-desc">• ACP (Agentic Commerce Protocol)</text>
+      <text x="14" y="58" class="card-desc">• AP2, UAP &amp; x402 Tokenized</text>
+      <text x="14" y="74" class="card-desc">• Signed Settlement Proofs</text>
+    </g>
+
+    <!-- Card 3: External Data Sources -->
+    <g transform="translate(15, 260)">
+      <rect width="220" height="75" rx="8" fill="url(#boxAccent)" stroke="#6366f1" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Merchant Web &amp; Catalogs</text>
+      <text x="14" y="42" class="card-desc">• Product descriptions (Untrusted)</text>
+      <text x="14" y="58" class="card-desc">• Price quotes &amp; Inventory APIs</text>
+    </g>
+
+    <!-- Card 4: Web Control Center -->
+    <g transform="translate(15, 350)">
+      <rect width="220" height="75" rx="8" fill="url(#boxAccent)" stroke="#6366f1" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Human Principal</text>
+      <text x="14" y="42" class="card-desc">• Web Control Center (React 19)</text>
+      <text x="14" y="58" class="card-desc">• Approval &amp; Kill-Switch Actions</text>
+    </g>
+
+    <!-- Red Security Boundary Indicator -->
+    <g transform="translate(15, 445)">
+      <rect width="220" height="40" rx="6" fill="#450a0a" stroke="#b91c1c" stroke-width="1" />
+      <text x="12" y="24" class="boundary-tag">⚠ AI BELOW AUTH BOUNDARY</text>
+    </g>
+  </g>
+
+  <!-- COLUMN 2: AGENTPAY CONTROL PLANE (Center - Largest) -->
+  <g transform="translate(320, 80)">
+    <rect width="470" height="500" rx="12" fill="url(#coreGrad)" stroke="url(#highlightBorder)" stroke-width="2" />
+    <text x="25" y="32" class="col-title" fill="#38bdf8">AGENTPAY DETERMINISTIC CONTROL PLANE</text>
+    <text x="25" y="48" class="card-desc">Zero Trust Execution Engine • Strict Policy Governance</text>
+
+    <!-- Top Sub-Box: Perimeter Ingress -->
+    <g transform="translate(20, 65)">
+      <rect width="430" height="65" rx="8" fill="url(#boxBlue)" stroke="#38bdf8" stroke-width="1.2" />
+      <text x="14" y="22" class="card-title">Perimeter Security &amp; Request Parsing</text>
+      <text x="14" y="38" class="card-desc">Dual AuthN (Bearer / API Key) • Strict JSON Media-Type • Security Headers</text>
+      <text x="14" y="54" class="card-desc">Outbound SSRF IP Whitelisting &amp; DNS Rebinding Guard • Abuse Velocity Meter</text>
+    </g>
+
+    <!-- Mid Sub-Box: Policy Engine & Approval Layer -->
+    <g transform="translate(20, 145)">
+      <rect width="430" height="90" rx="8" fill="url(#boxBlue)" stroke="#818cf8" stroke-width="1.2" />
+      <text x="14" y="22" class="card-title">Deterministic Policy &amp; Approval Governance (§18, §20)</text>
+      <text x="14" y="38" class="card-desc">• Exact 9-Field Approval Binding (Action, Amount, Currency, Merchant, etc.)</text>
+      <text x="14" y="54" class="card-desc">• Multi-Tenant Isolation (Tenant-Scoped Keys, Zero Cross-Tenant Leaks)</text>
+      <text x="14" y="70" class="card-desc">• Hard Daily &amp; Per-Purchase Spending Envelopes • Single-Use Atomic Tokens</text>
+    </g>
+
+    <!-- Mid-Low Sub-Box: Transaction Orchestration & SAGA -->
+    <g transform="translate(20, 250)">
+      <rect width="430" height="90" rx="8" fill="url(#boxBlue)" stroke="#38bdf8" stroke-width="1.2" />
+      <text x="14" y="22" class="card-title">Distributed SAGA Purchase Orchestrator (§43, §44)</text>
+      <text x="14" y="38" class="card-desc">• Multi-Item Cart Execution with Atomic Status Transitions</text>
+      <text x="14" y="54" class="card-desc">• Exception-Safe Inventory Holds with Rollback Compensation</text>
+      <text x="14" y="70" class="card-desc">• Circuit Breaker State Machine • Exponential Jitter Backoff</text>
+    </g>
+
+    <!-- Bottom Sub-Box: Persistence & Cryptographic Audit -->
+    <g transform="translate(20, 355)">
+      <rect width="430" height="75" rx="8" fill="url(#boxBlue)" stroke="#34d399" stroke-width="1.2" />
+      <text x="14" y="22" class="card-title">Persistence, Outbox &amp; Audit Ledger (§45)</text>
+      <text x="14" y="38" class="card-desc">• PostgreSQL 17 / SQLite Relational Repositories (Row-Level Locking)</text>
+      <text x="14" y="54" class="card-desc">• Tamper-Evident SHA-256 Chained Audit Trail with Automated Redaction</text>
+      <text x="14" y="70" class="card-desc">• Outbox Event Dispatcher with Durable Skip-Locked Deduplication</text>
+    </g>
+
+    <!-- Emergency Kill Switch Badge -->
+    <g transform="translate(20, 445)">
+      <rect width="430" height="38" rx="6" fill="#1e1b4b" stroke="#6366f1" stroke-width="1" />
+      <circle cx="20" cy="19" r="6" fill="#10b981" />
+      <text x="35" y="23" font-family="monospace" font-size="11" fill="#38bdf8">KILL-SWITCH: Tenant-Scoped Emergency Pause &amp; Resume Active</text>
+    </g>
+  </g>
+
+  <!-- COLUMN 3: RAILS & INFRASTRUCTURE (Right) -->
+  <g transform="translate(820, 80)">
+    <rect width="240" height="500" rx="12" fill="url(#railsGrad)" stroke="#10b981" stroke-width="1.2" stroke-dasharray="4 4" />
+    <text x="20" y="32" class="col-title" fill="#6ee7b7">EXECUTION RAILS</text>
+    <text x="20" y="48" class="card-desc">External Payment &amp; Banks</text>
+
+    <!-- Card 1: Stripe -->
+    <g transform="translate(15, 70)">
+      <rect width="210" height="75" rx="8" fill="url(#boxBlue)" stroke="#10b981" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Stripe Provider</text>
+      <text x="14" y="42" class="card-desc">• HMAC Webhook Validation</text>
+      <text x="14" y="58" class="card-desc">• Tolerance Window Clocks</text>
+    </g>
+
+    <!-- Card 2: Razorpay -->
+    <g transform="translate(15, 160)">
+      <rect width="210" height="75" rx="8" fill="url(#boxBlue)" stroke="#10b981" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Razorpay Provider</text>
+      <text x="14" y="42" class="card-desc">• Order Creation &amp; Capture</text>
+      <text x="14" y="58" class="card-desc">• Webhook Replay Guard</text>
+    </g>
+
+    <!-- Card 3: Mock / Sandbox -->
+    <g transform="translate(15, 250)">
+      <rect width="210" height="75" rx="8" fill="url(#boxBlue)" stroke="#10b981" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">Mock Sandbox Rails</text>
+      <text x="14" y="42" class="card-desc">• Fault Injection Simulations</text>
+      <text x="14" y="58" class="card-desc">• Zero PAN/CVV Retention</text>
+    </g>
+
+    <!-- Card 4: ISO Currency Math -->
+    <g transform="translate(15, 340)">
+      <rect width="210" height="85" rx="8" fill="url(#boxBlue)" stroke="#10b981" stroke-width="1.2" />
+      <text x="14" y="24" class="card-title">ISO 4217 Currency Math</text>
+      <text x="14" y="42" class="card-desc">• 58 Standard Currencies</text>
+      <text x="14" y="58" class="card-desc">• Pure Minor-Unit Integers</text>
+      <text x="14" y="74" class="card-desc">• Decimal Exponent Tables</text>
+    </g>
+
+    <!-- Card 5: Safe Sandbox Badge -->
+    <g transform="translate(15, 445)">
+      <rect width="210" height="40" rx="6" fill="#064e3b" stroke="#059669" stroke-width="1" />
+      <text x="10" y="24" font-family="monospace" font-size="11" fill="#a7f3d0">🔒 SAFE DEFAULT: SANDBOX</text>
+    </g>
+  </g>
+
+  <!-- Flow Arrows connecting components -->
+  <path d="M 270 200 L 315 200" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)" />
+  <path d="M 270 380 L 315 380" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowOrange)" />
+  <path d="M 795 290 L 815 290" stroke="#10b981" stroke-width="2" marker-end="url(#arrowGreen)" />
+</svg>
