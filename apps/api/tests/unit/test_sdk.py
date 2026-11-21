@@ -28,6 +28,7 @@ def test_setup() -> tuple[AgentPay, AgentPayApiApp]:
     # Provision valid credentials for tenant_01
     api_key = client_helper.create_api_key(
         tenant_id="tenant_01",
+        principal_id="operator_01",
         role=UserRole.ADMIN,
     )
     sdk = AgentPay(api_key=api_key, tenant_id="tenant_01", app=app)

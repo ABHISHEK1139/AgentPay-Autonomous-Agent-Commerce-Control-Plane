@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable
 
 from agentpay.domain.outbox import OutboxEvent
@@ -17,10 +17,11 @@ EventHandler = Callable[[OutboxEvent], None]
 class EventBus:
     """Thread-safe in-process event bus for publishing domain outbox events (§105)."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_processed_events: int = 10_000) -> None:
         self._lock = threading.Lock()
         self._subscribers: dict[str, list[EventHandler]] = defaultdict(list)
-        self._processed_events: set[str] = set()
+        self._max_processed_events = max_processed_events
+        self._processed_events: OrderedDict[str, None] = OrderedDict()
 
     def subscribe(self, event_type: str, handler: EventHandler) -> None:
         """Subscribes an event handler to a specific event type or wildcard '*'."""
@@ -71,7 +72,12 @@ class EventBus:
             ]
 
         with self._lock:
-            self._processed_events.add(event.event_id)
+            if event.event_id in self._processed_events:
+                self._processed_events.move_to_end(event.event_id)
+            else:
+                self._processed_events[event.event_id] = None
+                if len(self._processed_events) > self._max_processed_events:
+                    self._processed_events.popitem(last=False)
 
         return executed
 

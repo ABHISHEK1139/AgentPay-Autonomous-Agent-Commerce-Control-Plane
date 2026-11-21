@@ -15,9 +15,11 @@ from agentpay.application.ports.payment_port import (
 )
 from agentpay.domain.errors import CrossTenantAccessError
 from agentpay.domain.payments import (
+    TRANSIENT_WEBHOOK_ERROR_CODES,
     IdempotencyRecord,
     Order,
     PaymentAttempt,
+    PaymentStatus,
     ProviderTransactionMapping,
     ProviderWebhookEvent,
     Refund,
@@ -45,6 +47,25 @@ class InMemoryPaymentRepository(PaymentRepository):
         with self._lock:
             tenant_store = self._attempts.setdefault(tenant_id, {})
             tenant_store[attempt.attempt_id] = attempt
+
+    def list_by_status(
+        self,
+        status: PaymentStatus,
+        tenant_id: str | None = None,
+    ) -> list[PaymentAttempt]:
+        with self._lock:
+            results: list[PaymentAttempt] = []
+            if tenant_id is not None:
+                tenant_store = self._attempts.get(tenant_id, {})
+                for a in tenant_store.values():
+                    if a.status == status:
+                        results.append(a)
+            else:
+                for tenant_store in self._attempts.values():
+                    for a in tenant_store.values():
+                        if a.status == status:
+                            results.append(a)
+            return results
 
 
 class InMemoryRefundRepository(RefundRepository):
@@ -95,6 +116,14 @@ class InMemoryOrderRepository(OrderRepository):
                 if candidate.payment_attempt_id == attempt_id or candidate.order_id == attempt_id:
                     return candidate
             return None
+
+    def find_all_by_payment_attempt(self, tenant_id: str, attempt_id: str) -> list[Order]:
+        with self._lock:
+            results: list[Order] = []
+            for candidate in self._orders.get(tenant_id, {}).values():
+                if candidate.payment_attempt_id == attempt_id or candidate.order_id == attempt_id:
+                    results.append(candidate)
+            return sorted(results, key=lambda o: o.created_at)
 
     def save(self, tenant_id: str, order: Order) -> None:
         if order.tenant_id != tenant_id:
@@ -257,9 +286,9 @@ class InMemoryProviderWebhookEventRepository(ProviderWebhookEventRepository):
             key = (prov, acc_id, evt_id)
             existing = self._by_provider_event.get(key)
             if existing is not None:
-                if (
-                    existing.status == WebhookEventStatus.FAILED
-                    and existing.last_error_code == "TEMPORARY_FAILURE"
+                if existing.status == WebhookEventStatus.FAILED and (
+                    existing.last_error_code in TRANSIENT_WEBHOOK_ERROR_CODES
+                    or existing.last_error_code == "TEMPORARY_FAILURE"
                 ):
                     retried = existing.mark_processing()
                     self._by_id[retried.id] = retried
@@ -268,8 +297,16 @@ class InMemoryProviderWebhookEventRepository(ProviderWebhookEventRepository):
                 return existing, False
 
             if not acc_id:
-                for (p, _, e), candidate in self._by_provider_event.items():
+                for (p, cand_acc, e), candidate in self._by_provider_event.items():
                     if p == prov and e == evt_id:
+                        if candidate.status == WebhookEventStatus.FAILED and (
+                            candidate.last_error_code in TRANSIENT_WEBHOOK_ERROR_CODES
+                            or candidate.last_error_code == "TEMPORARY_FAILURE"
+                        ):
+                            retried = candidate.mark_processing()
+                            self._by_id[retried.id] = retried
+                            self._by_provider_event[(p, cand_acc, e)] = retried
+                            return retried, True
                         return candidate, False
 
             self._by_id[ev.id] = ev

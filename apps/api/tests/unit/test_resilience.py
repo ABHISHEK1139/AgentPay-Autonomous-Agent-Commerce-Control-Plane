@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import threading
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -220,6 +221,58 @@ def test_circuit_breaker_concurrency_thread_safety() -> None:
 
     # Breaker state must remain valid enum without corruption
     assert breaker.state in (CircuitState.CLOSED, CircuitState.OPEN, CircuitState.HALF_OPEN)
+
+
+def test_circuit_breaker_half_open_concurrency_limiter() -> None:
+    """Feature 24: HALF_OPEN state strictly limits concurrent trial probes."""
+    fake_time = 100.0
+    cb = CircuitBreaker(
+        name="half_open_test",
+        failure_threshold=1,
+        recovery_timeout_seconds=5.0,
+        half_open_success_threshold=2,
+        half_open_max_concurrent_probes=1,
+        clock=lambda: fake_time,
+    )
+
+    # Trip to OPEN
+    cb.trip("manual")
+    assert cb.state == CircuitState.OPEN
+
+    # Advance clock to enter HALF_OPEN
+    fake_time += 6.0
+    state_after_timeout: CircuitState = cb.state
+    assert state_after_timeout == CircuitState.HALF_OPEN
+    assert cb.active_half_open_probes == 0
+
+    started = threading.Event()
+    continue_probe = threading.Event()
+
+    def slow_probe() -> str:
+        started.set()
+        continue_probe.wait(timeout=2.0)
+        return "success"
+
+    # Start first probe in a background thread
+    t = threading.Thread(target=lambda: cb.call(slow_probe))
+    t.start()
+    assert started.wait(timeout=1.0)
+    assert cb.active_half_open_probes == 1
+
+    # Second concurrent call while probe is in flight MUST be rejected with CircuitBreakerOpenError
+    with pytest.raises(CircuitBreakerOpenError):
+        cb.call(lambda: "instant")
+
+    # Also test context manager rejection
+    with pytest.raises(CircuitBreakerOpenError), cb:
+        pass
+
+    # Release first probe
+    continue_probe.set()
+    t.join(timeout=2.0)
+
+    # Active probes should now be back to 0
+    assert cb.active_half_open_probes == 0
 
 
 # ==============================================================================

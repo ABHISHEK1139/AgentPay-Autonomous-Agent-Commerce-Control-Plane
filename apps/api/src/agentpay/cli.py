@@ -23,6 +23,9 @@ from typing import Any
 from agentpay.adapters.in_memory.outbox_repository import InMemoryOutboxRepository
 from agentpay.api.factory import create_app
 from agentpay.config.config import AppConfig
+from agentpay.infrastructure.database.repositories.outbox_repository import (
+    SqlAlchemyOutboxRepository,
+)
 from agentpay.server import run_server
 from agentpay.workers import BackgroundWorker
 
@@ -65,8 +68,28 @@ def _handle_worker(args: argparse.Namespace) -> int:
     if db_url:
         config = config.with_overrides(database_url=db_url)
     app = create_app(config=config)
+
+    session_factory = getattr(app, "session_factory", None)
+    if session_factory is None and hasattr(app.orchestrator._approval_repo, "_session_or_factory"):
+        session_factory = getattr(app.orchestrator._approval_repo, "_session_or_factory", None)
+
+    outbox_repo: Any
+    if session_factory is not None:
+        outbox_repo = SqlAlchemyOutboxRepository(session_factory)
+    elif config.database_url:
+        from agentpay.infrastructure.database.session import (
+            create_database_engine,
+            create_session_factory,
+        )
+
+        engine = create_database_engine(config.database_url)
+        session_factory = create_session_factory(engine)
+        outbox_repo = SqlAlchemyOutboxRepository(session_factory)
+    else:
+        outbox_repo = InMemoryOutboxRepository()
+
     worker = BackgroundWorker(
-        outbox_repo=InMemoryOutboxRepository(),
+        outbox_repo=outbox_repo,
         payment_repo=app.orchestrator._payment_repo,
         payment_reconciler=app.reconciler,
         approval_repo=app.orchestrator._approval_repo,

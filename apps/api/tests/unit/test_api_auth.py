@@ -492,7 +492,9 @@ def test_valid_agent_operator_accessing_emergency_pause_returns_200(
     api_client: ApiTestClient,
 ) -> None:
     """Caller with AGENT_OPERATOR role successfully pauses cluster operations."""
-    token = api_client.create_token(tenant_id="tenant_01", role=UserRole.AGENT_OPERATOR)
+    token = api_client.create_token(
+        tenant_id="tenant_01", principal_id="sec_op_01", role=UserRole.AGENT_OPERATOR
+    )
     status, body = api_client.post(
         "/api/v1/emergency/pause",
         json_body={"operator_id": "sec_op_01", "reason": "Incident triage"},
@@ -508,8 +510,10 @@ def test_valid_admin_role_accessing_emergency_resume_returns_200(
     api_client: ApiTestClient,
 ) -> None:
     """Caller with ADMIN role successfully resumes cluster operations."""
-    token = api_client.create_token(tenant_id="tenant_01", role=UserRole.ADMIN)
-    api_client.app.pause_emergency(operator_id="admin_01", reason="pre-pause")
+    token = api_client.create_token(
+        tenant_id="tenant_01", principal_id="admin_01", role=UserRole.ADMIN
+    )
+    api_client.app.pause_emergency(operator_id="admin_01", reason="pre-pause", scope="tenant_01")
 
     status, body = api_client.post(
         "/api/v1/emergency/resume",
@@ -613,7 +617,7 @@ def test_fluent_admin_client_accessing_emergency_pause_succeeds(
     api_client: ApiTestClient,
 ) -> None:
     """A client elevated with as_admin() can trigger emergency pause (§14, §67)."""
-    status, body = api_client.as_admin().post(
+    status, body = api_client.as_admin(principal_id="sec_admin").post(
         "/api/v1/emergency/pause",
         json_body={"operator_id": "sec_admin", "reason": "authorized incident response"},
     )
@@ -793,7 +797,7 @@ def test_b_pause_01_scoped_emergency_pause_isolates_tenants(
             Inventory(variant_id="var_02", tenant_id="tenant_02", available=50, reserved=0),
         )
 
-    admin_client = api_client.as_admin()
+    admin_client = api_client.as_system_admin(principal_id="sec_op")
 
     # 1. Engage scoped pause specifically for tenant_01
     s_pause, pause_body = admin_client.post(

@@ -246,7 +246,7 @@ def test_token_budget_tracker_reset_clears_usage() -> None:
     assert tracker.get_usage("tenant_01") == (150, 50)
     tracker.reset()
     assert tracker.get_usage("tenant_01") == (0, 0)
-    assert tracker.get_usage("agent_01") == (0, 0)
+    assert tracker.get_usage("tenant_01", "agent_01") == (0, 0)
 
 
 def test_token_budget_tracker_double_consumption_on_identical_ids() -> None:

@@ -37,7 +37,16 @@ def test_asgi_preserves_bytes_and_bounds_body(
         sent.append(message)
 
     asyncio.run(
-        app({"type": "http", "method": "POST", "path": "/api/v1/webhooks/payments"}, receive, send)
+        app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/v1/webhooks/payments",
+                "headers": [[b"content-type", b"application/json"]],
+            },
+            receive,
+            send,
+        )
     )
     if oversized:
         assert sent[0]["status"] == 413

@@ -15,7 +15,12 @@ from agentpay.application.ports.payment_port import (
 )
 from agentpay.domain.errors import CrossTenantAccessError
 from agentpay.domain.money import Money
-from agentpay.domain.payments import IdempotencyRecord, PaymentAttempt, Refund
+from agentpay.domain.payments import (
+    IdempotencyRecord,
+    PaymentAttempt,
+    PaymentStatus,
+    Refund,
+)
 from agentpay.infrastructure.database.models.payment import PaymentAttemptModel
 from agentpay.infrastructure.database.models.payments import (
     IdempotencyRecordModel,
@@ -97,6 +102,20 @@ class SqlAlchemyPaymentRepository(BaseSqlAlchemyRepository, PaymentRepository):
                 existing.failure_reason = target_attempt.failure_reason
                 existing.updated_at = target_attempt.updated_at
             session.commit()
+
+    def list_by_status(
+        self,
+        status: PaymentStatus,
+        tenant_id: str | None = None,
+    ) -> list[PaymentAttempt]:
+        status_val = status.value if hasattr(status, "value") else str(status)
+        with self._session() as session:
+            stmt = select(PaymentAttemptModel).where(PaymentAttemptModel.status == status_val)
+            if tenant_id is not None:
+                stmt = stmt.where(PaymentAttemptModel.tenant_id == tenant_id)
+            stmt = stmt.order_by(PaymentAttemptModel.created_at)
+            models = session.scalars(stmt).all()
+            return [m.to_domain() for m in models]
 
 
 class SqlAlchemyRefundRepository(BaseSqlAlchemyRepository, RefundRepository):

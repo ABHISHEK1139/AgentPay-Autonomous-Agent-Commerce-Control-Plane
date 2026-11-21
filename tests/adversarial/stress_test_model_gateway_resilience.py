@@ -270,7 +270,7 @@ def probe_model_gateway_concurrency_burst_toctou() -> dict[str, Any]:
         t.join()
 
     allowed_count = sum(1 for r in results if r == DecisionRecommendation.ALLOW)
-    total_consumed, _ = tracker.get_usage("agent_burst")
+    total_consumed, _ = tracker.get_usage("tenant_01", "agent_burst")
 
     # In a strict budget model, at most 1 or 2 calls should be allowed (200 token limit, 150 per call).
     toctou_overshoot_observed = allowed_count > 2
@@ -296,7 +296,7 @@ def probe_token_budget_tracker_bugs() -> dict[str, Any]:
     tracker.consume("tenant_01", "agent_01", tokens=100, cost_minor_units=10)
     tracker.reset()
     t_used, c_used = tracker.get_usage("tenant_01")
-    a_t_used, a_c_used = tracker.get_usage("agent_01")
+    a_t_used, a_c_used = tracker.get_usage("tenant_01", "agent_01")
     reset_clean = t_used == 0 and c_used == 0 and a_t_used == 0 and a_c_used == 0
 
     # 2. Cross-Tenant Agent Collision: Tenant B must NOT be blocked by Tenant A

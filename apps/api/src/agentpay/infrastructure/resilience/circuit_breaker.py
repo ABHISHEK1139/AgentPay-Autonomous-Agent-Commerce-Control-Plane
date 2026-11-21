@@ -57,6 +57,7 @@ class CircuitBreaker:
         failure_threshold: int = 5,
         recovery_timeout_seconds: float = 10.0,
         half_open_success_threshold: int = 2,
+        half_open_max_concurrent_probes: int = 1,
         expected_exceptions: tuple[type[Exception], ...] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -66,11 +67,14 @@ class CircuitBreaker:
             raise ValueError("recovery_timeout_seconds must be positive")
         if half_open_success_threshold < 1:
             raise ValueError("half_open_success_threshold must be at least 1")
+        if half_open_max_concurrent_probes < 1:
+            raise ValueError("half_open_max_concurrent_probes must be at least 1")
 
         self._name = name
         self._failure_threshold = failure_threshold
         self._recovery_timeout_seconds = recovery_timeout_seconds
         self._half_open_success_threshold = half_open_success_threshold
+        self._half_open_max_concurrent_probes = half_open_max_concurrent_probes
         self._expected_exceptions = expected_exceptions or (Exception,)
         self._clock = clock
 
@@ -78,6 +82,7 @@ class CircuitBreaker:
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._trial_success_count = 0
+        self._active_half_open_probes = 0
         self._last_state_change = self._clock()
         self._last_failure_reason: str | None = None
 
@@ -121,6 +126,15 @@ class CircuitBreaker:
     def is_half_open(self) -> bool:
         return self.state == CircuitState.HALF_OPEN
 
+    @property
+    def half_open_max_concurrent_probes(self) -> int:
+        return self._half_open_max_concurrent_probes
+
+    @property
+    def active_half_open_probes(self) -> int:
+        with self._lock:
+            return self._active_half_open_probes
+
     def _check_and_update_state_under_lock(self) -> None:
         """Transitions from OPEN to HALF_OPEN if the recovery timeout has elapsed."""
         if self._state == CircuitState.OPEN:
@@ -128,10 +142,12 @@ class CircuitBreaker:
             if elapsed >= self._recovery_timeout_seconds:
                 self._state = CircuitState.HALF_OPEN
                 self._trial_success_count = 0
+                self._active_half_open_probes = 0
                 self._last_state_change = self._clock()
 
     def call(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Executes func guarded by the circuit breaker state machine."""
+        is_half_open_probe = False
         with self._lock:
             self._check_and_update_state_under_lock()
 
@@ -140,15 +156,27 @@ class CircuitBreaker:
                 retry_after = max(0.0, self._recovery_timeout_seconds - elapsed)
                 raise CircuitBreakerOpenError(name=self._name, retry_after_seconds=retry_after)
 
+            if self._state == CircuitState.HALF_OPEN:
+                if self._active_half_open_probes >= self._half_open_max_concurrent_probes:
+                    elapsed = self._clock() - self._last_state_change
+                    retry_after = max(0.0, self._recovery_timeout_seconds - elapsed)
+                    raise CircuitBreakerOpenError(name=self._name, retry_after_seconds=retry_after)
+                self._active_half_open_probes += 1
+                is_half_open_probe = True
+
         # Execute downstream invocation outside lock to avoid contention
         try:
             result = func(*args, **kwargs)
         except Exception as exc:
             self._record_failure(exc)
             raise
-
-        self._record_success()
-        return result
+        else:
+            self._record_success()
+            return result
+        finally:
+            if is_half_open_probe:
+                with self._lock:
+                    self._active_half_open_probes = max(0, self._active_half_open_probes - 1)
 
     def _record_success(self) -> None:
         """Records a successful call and transitions state if appropriate."""
@@ -159,6 +187,7 @@ class CircuitBreaker:
                     self._state = CircuitState.CLOSED
                     self._failure_count = 0
                     self._trial_success_count = 0
+                    self._active_half_open_probes = 0
                     self._last_state_change = self._clock()
                     self._last_failure_reason = None
             elif self._state == CircuitState.CLOSED:
@@ -178,16 +207,19 @@ class CircuitBreaker:
                 self._state = CircuitState.OPEN
                 self._last_state_change = self._clock()
                 self._trial_success_count = 0
+                self._active_half_open_probes = 0
             elif self._state == CircuitState.CLOSED:
                 self._failure_count += 1
                 if self._failure_count >= self._failure_threshold:
                     self._state = CircuitState.OPEN
                     self._last_state_change = self._clock()
+                    self._active_half_open_probes = 0
 
     def trip(self, reason: str = "manual_trip") -> None:
         """Manually trips the circuit breaker to OPEN state."""
         with self._lock:
             self._state = CircuitState.OPEN
+            self._active_half_open_probes = 0
             self._last_state_change = self._clock()
             self._last_failure_reason = reason
 
@@ -197,6 +229,7 @@ class CircuitBreaker:
             self._state = CircuitState.CLOSED
             self._failure_count = 0
             self._trial_success_count = 0
+            self._active_half_open_probes = 0
             self._last_state_change = self._clock()
             self._last_failure_reason = None
 
@@ -207,6 +240,12 @@ class CircuitBreaker:
                 elapsed = self._clock() - self._last_state_change
                 retry_after = max(0.0, self._recovery_timeout_seconds - elapsed)
                 raise CircuitBreakerOpenError(name=self._name, retry_after_seconds=retry_after)
+            if self._state == CircuitState.HALF_OPEN:
+                if self._active_half_open_probes >= self._half_open_max_concurrent_probes:
+                    elapsed = self._clock() - self._last_state_change
+                    retry_after = max(0.0, self._recovery_timeout_seconds - elapsed)
+                    raise CircuitBreakerOpenError(name=self._name, retry_after_seconds=retry_after)
+                self._active_half_open_probes += 1
         return self
 
     def __exit__(
@@ -215,8 +254,15 @@ class CircuitBreaker:
         exc_val: BaseException | None,
         exc_tb: Any,
     ) -> None:
-        if exc_val is not None:
-            if isinstance(exc_val, Exception) and not isinstance(exc_val, CircuitBreakerOpenError):
-                self._record_failure(exc_val)
-        else:
-            self._record_success()
+        try:
+            if exc_val is not None:
+                if isinstance(exc_val, Exception) and not isinstance(
+                    exc_val, CircuitBreakerOpenError
+                ):
+                    self._record_failure(exc_val)
+            else:
+                self._record_success()
+        finally:
+            with self._lock:
+                if self._state == CircuitState.HALF_OPEN:
+                    self._active_half_open_probes = max(0, self._active_half_open_probes - 1)

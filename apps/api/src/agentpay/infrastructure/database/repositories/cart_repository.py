@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from datetime import UTC, datetime
+
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpay.application.ports.commerce_port import CartRepository
-from agentpay.domain.cart import Cart
+from agentpay.domain.cart import Cart, CartStatus
 from agentpay.domain.errors import CrossTenantAccessError
 from agentpay.infrastructure.database.models.cart import CartItemModel, CartModel
 from agentpay.infrastructure.database.repositories.base import BaseSqlAlchemyRepository
@@ -77,3 +80,41 @@ class SqlAlchemyCartRepository(BaseSqlAlchemyRepository, CartRepository):
             )
             models = session.scalars(stmt).all()
             return [m.to_domain() for m in models]
+
+    def mark_processing(self, tenant_id: str, cart_id: str) -> bool:
+        with self._session() as session:
+            stmt = (
+                update(CartModel)
+                .where(
+                    CartModel.tenant_id == tenant_id,
+                    CartModel.cart_id == cart_id,
+                    CartModel.status == CartStatus.ACTIVE.value,
+                )
+                .values(
+                    status=CartStatus.PROCESSING.value,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            result = session.execute(stmt)
+            session.commit()
+            rowcount = result.rowcount if isinstance(result, CursorResult) else 0
+            return rowcount > 0
+
+    def mark_active(self, tenant_id: str, cart_id: str) -> bool:
+        with self._session() as session:
+            stmt = (
+                update(CartModel)
+                .where(
+                    CartModel.tenant_id == tenant_id,
+                    CartModel.cart_id == cart_id,
+                    CartModel.status == CartStatus.PROCESSING.value,
+                )
+                .values(
+                    status=CartStatus.ACTIVE.value,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+            result = session.execute(stmt)
+            session.commit()
+            rowcount = result.rowcount if isinstance(result, CursorResult) else 0
+            return rowcount > 0

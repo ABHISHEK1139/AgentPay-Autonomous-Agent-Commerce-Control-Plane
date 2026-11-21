@@ -186,8 +186,8 @@ class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
                     raise MalformedPayloadError(
                         f"{price_key} must be an integer, got {type(raw_price).__name__}"
                     )
-                if raw_price < 0:
-                    raise MalformedPayloadError(f"{price_key} cannot be negative")
+                if raw_price <= 0:
+                    raise MalformedPayloadError("Amount must be greater than zero")
 
         for budget_key in ("budget_cap_minor", "budget_max_minor"):
             if budget_key in parameters:
@@ -268,8 +268,8 @@ class UapAdapter(BaseProtocolAdapter[UapMessage, UapResponse]):
             raise MalformedPayloadError(
                 f"price_minor must be an integer, got {type(raw_price).__name__}"
             )
-        if raw_price < 0:
-            raise MalformedPayloadError("price_minor cannot be negative")
+        if raw_price <= 0:
+            raise MalformedPayloadError("Amount must be greater than zero")
         price_minor = raw_price
 
         raw_curr = p.get("currency", "INR")

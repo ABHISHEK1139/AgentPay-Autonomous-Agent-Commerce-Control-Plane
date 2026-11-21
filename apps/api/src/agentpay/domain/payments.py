@@ -409,6 +409,21 @@ _ALLOWED_WEBHOOK_EVENT_TRANSITIONS: Final[
 }
 
 
+TRANSIENT_WEBHOOK_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "TEMPORARY_FAILURE",
+        "RECONCILIATION_FAILED",
+        "DATABASE_TIMEOUT",
+        "LOCK_TIMEOUT",
+        "NETWORK_ERROR",
+        "PROVIDER_TIMEOUT",
+        "GATEWAY_TIMEOUT",
+        "SERVICE_UNAVAILABLE",
+        "TRANSIENT_ERROR",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderWebhookEvent:
     """Durable record of an external payment provider webhook event (§42, §61, AP-003)."""

@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import threading
@@ -61,6 +62,7 @@ from agentpay.application.ports.payment_port import (
     RefundRepository,
 )
 from agentpay.application.ports.rate_limit_port import RateLimiter
+from agentpay.application.services.abuse_detector import AbuseDetector
 from agentpay.application.services.reconciliation_service import PaymentReconciler
 from agentpay.application.use_cases.purchase_flow import (
     PurchaseExecutionResult,
@@ -108,6 +110,7 @@ _current_response_headers: ContextVar[dict[str, str] | None] = ContextVar(
     "_current_response_headers", default=None
 )
 MAX_REQUEST_BODY_BYTES: int = 1024 * 1024  # 1 MiB payload limit (§62, B-SRV-01)
+logger = logging.getLogger("agentpay.api")
 
 
 class ApiResponse(tuple[Any, ...]):
@@ -168,7 +171,10 @@ class AgentPayApiApp:
         require_observability_auth: bool = False,
         config: AppConfig | None = None,
         emergency_pause_store: EmergencyPauseStore | None = None,
+        abuse_detector: AbuseDetector | None = None,
+        session_factory: Any | None = None,
     ) -> None:
+        self.session_factory: Any | None = session_factory
         self.config: AppConfig | None = config
         self.emergency_pause_store: EmergencyPauseStore = (
             emergency_pause_store
@@ -197,7 +203,21 @@ class AgentPayApiApp:
             "1",
             "yes",
         )
-        self.require_observability_auth: bool = require_observability_auth or env_req_obs
+        if config is not None:
+            self.require_observability_auth: bool = (
+                require_observability_auth
+                if require_observability_auth
+                else config.require_observability_auth
+            )
+        else:
+            self.require_observability_auth = require_observability_auth or env_req_obs
+
+        if abuse_detector is not None:
+            self.abuse_detector: AbuseDetector = abuse_detector
+        else:
+            ledger = getattr(orchestrator, "_audit_ledger", None)
+            agent_repo = getattr(orchestrator, "_agent_repo", None)
+            self.abuse_detector = AbuseDetector(audit_ledger=ledger, agent_repo=agent_repo)
 
         if idempotency_store is not None:
             self.idempotency_store = idempotency_store
@@ -352,6 +372,7 @@ class AgentPayApiApp:
             else:
                 self._paused_scopes.add(f"tenant:{norm_scope}")
         self._pause_metadata = {
+            "operator_id": operator_id,
             "paused_by": operator_id,
             "reason": reason,
             "scope": norm_scope,
@@ -380,6 +401,7 @@ class AgentPayApiApp:
             if not self._paused_scopes:
                 self._emergency_paused = False
         self._pause_metadata = {
+            "operator_id": operator_id,
             "resumed_by": operator_id,
             "resumed_at": datetime.now(UTC).isoformat(),
             "scope": norm_scope,
@@ -592,6 +614,13 @@ class AgentPayApiApp:
         )
         return None
 
+    def _extract_client_ip(self, headers: dict[str, str]) -> str:
+        """Extract client IP address from proxy headers or fall back to loopback (§60, §62)."""
+        xff = headers.get("x-forwarded-for") or headers.get("x-real-ip") or headers.get("client-ip")
+        if xff:
+            return xff.split(",")[0].strip()
+        return "127.0.0.1"
+
     def _authenticate_request(
         self, headers: dict[str, str], request_id: str
     ) -> tuple[Credential | None, tuple[int, dict[str, Any]] | None]:
@@ -605,6 +634,11 @@ class AgentPayApiApp:
             if lower_auth.startswith("bearer ") or lower_auth.startswith("apikey "):
                 raw_secret = auth_header[7:].strip()
             else:
+                if self.abuse_detector is not None:
+                    self.abuse_detector.record_auth_failure(
+                        client_ip=self._extract_client_ip(headers),
+                        tenant_id=headers.get("x-tenant-id", "system"),
+                    )
                 return None, self._error_response(
                     401,
                     "UNAUTHENTICATED",
@@ -615,6 +649,11 @@ class AgentPayApiApp:
             raw_secret = api_key_header
 
         if not raw_secret:
+            if self.abuse_detector is not None:
+                self.abuse_detector.record_auth_failure(
+                    client_ip=self._extract_client_ip(headers),
+                    tenant_id=headers.get("x-tenant-id", "system"),
+                )
             return None, self._error_response(
                 401,
                 "UNAUTHENTICATED",
@@ -625,6 +664,11 @@ class AgentPayApiApp:
         secret_hash = Credential.hash_secret(raw_secret)
         cred = self.credential_repo.get_by_secret_hash(secret_hash)
         if cred is None:
+            if self.abuse_detector is not None:
+                self.abuse_detector.record_auth_failure(
+                    client_ip=self._extract_client_ip(headers),
+                    tenant_id=headers.get("x-tenant-id", "system"),
+                )
             return None, self._error_response(
                 401,
                 "UNAUTHENTICATED",
@@ -637,6 +681,11 @@ class AgentPayApiApp:
         # authentication correct even if a repository returns a colliding or stale
         # row, rather than trusting the index alone.
         if not cred.verify_secret(raw_secret):
+            if self.abuse_detector is not None:
+                self.abuse_detector.record_auth_failure(
+                    client_ip=self._extract_client_ip(headers),
+                    tenant_id=headers.get("x-tenant-id", "system"),
+                )
             return None, self._error_response(
                 401,
                 "UNAUTHENTICATED",
@@ -645,6 +694,11 @@ class AgentPayApiApp:
             )
 
         if cred.status is CredentialStatus.REVOKED:
+            if self.abuse_detector is not None:
+                self.abuse_detector.record_auth_failure(
+                    client_ip=self._extract_client_ip(headers),
+                    tenant_id=headers.get("x-tenant-id", "system"),
+                )
             return None, self._error_response(
                 401,
                 "UNAUTHENTICATED",
@@ -653,6 +707,11 @@ class AgentPayApiApp:
             )
 
         if cred.is_expired() or cred.status is CredentialStatus.EXPIRED:
+            if self.abuse_detector is not None:
+                self.abuse_detector.record_auth_failure(
+                    client_ip=self._extract_client_ip(headers),
+                    tenant_id=headers.get("x-tenant-id", "system"),
+                )
             return None, self._error_response(
                 401,
                 "UNAUTHENTICATED",
@@ -661,6 +720,11 @@ class AgentPayApiApp:
             )
 
         if not cred.is_active:
+            if self.abuse_detector is not None:
+                self.abuse_detector.record_auth_failure(
+                    client_ip=self._extract_client_ip(headers),
+                    tenant_id=headers.get("x-tenant-id", "system"),
+                )
             return None, self._error_response(
                 401,
                 "UNAUTHENTICATED",
@@ -708,6 +772,18 @@ class AgentPayApiApp:
         already proven by passing the tenant-binding check. Auditors and merchant
         administrators may not initiate commerce actions at all.
         """
+        if cred.tenant_id != tenant_id and cred.tenant_id != "SYSTEM":
+            return self._error_response(
+                403,
+                "CROSS_TENANT_ACCESS_DENIED",
+                f"Authenticated credential tenant '{cred.tenant_id}' does not match context tenant '{tenant_id}'",
+                request_id,
+                details={
+                    "credential_tenant_id": cred.tenant_id,
+                    "asserted_tenant_id": tenant_id,
+                },
+            )
+
         if cred.role is None:
             if agent_id is not None and agent_id != cred.principal_id:
                 return self._error_response(
@@ -721,6 +797,34 @@ class AgentPayApiApp:
                         "asserted_agent": agent_id,
                     },
                 )
+            if self.orchestrator._agent_repo is not None:
+                agent = self.orchestrator._agent_repo.get(tenant_id, cred.principal_id)
+                if agent is not None:
+                    if agent.tenant_id != tenant_id:
+                        return self._error_response(
+                            403,
+                            "CROSS_TENANT_ACCESS_DENIED",
+                            f"Agent '{cred.principal_id}' belongs to tenant '{agent.tenant_id}', not '{tenant_id}'",
+                            request_id,
+                            details={
+                                "authenticated_agent": cred.principal_id,
+                                "agent_tenant": agent.tenant_id,
+                                "asserted_tenant": tenant_id,
+                            },
+                        )
+                    if principal_id is not None and agent.principal_id != principal_id:
+                        return self._error_response(
+                            403,
+                            "PRINCIPAL_IMPERSONATION_DENIED",
+                            f"Authenticated agent '{cred.principal_id}' is delegated by principal "
+                            f"'{agent.principal_id}', cannot act for '{principal_id}' during {context}",
+                            request_id,
+                            details={
+                                "authenticated_agent": cred.principal_id,
+                                "asserted_principal": principal_id,
+                                "agent_principal": agent.principal_id,
+                            },
+                        )
             return None
 
         if cred.role not in self._COMMERCE_ACTOR_ROLES:
@@ -733,6 +837,38 @@ class AgentPayApiApp:
             )
 
         if cred.role in self._ACT_ON_BEHALF_ROLES:
+            if (
+                agent_id is not None
+                and principal_id is not None
+                and self.orchestrator._agent_repo is not None
+            ):
+                agent = self.orchestrator._agent_repo.get(tenant_id, agent_id)
+                if agent is not None:
+                    if agent.tenant_id != tenant_id:
+                        return self._error_response(
+                            403,
+                            "CROSS_TENANT_ACCESS_DENIED",
+                            f"Agent '{agent_id}' belongs to tenant '{agent.tenant_id}', not '{tenant_id}'",
+                            request_id,
+                            details={
+                                "asserted_agent": agent_id,
+                                "agent_tenant": agent.tenant_id,
+                                "asserted_tenant": tenant_id,
+                            },
+                        )
+                    if agent.principal_id != principal_id:
+                        return self._error_response(
+                            403,
+                            "PRINCIPAL_IMPERSONATION_DENIED",
+                            f"Agent '{agent_id}' is delegated by principal '{agent.principal_id}', "
+                            f"not '{principal_id}' during {context}",
+                            request_id,
+                            details={
+                                "asserted_principal": principal_id,
+                                "asserted_agent": agent_id,
+                                "agent_principal": agent.principal_id,
+                            },
+                        )
             return None
 
         # BUYER: may only act for its own principal (§16, §20).
@@ -750,18 +886,31 @@ class AgentPayApiApp:
             )
         if agent_id is not None and self.orchestrator._agent_repo is not None:
             agent = self.orchestrator._agent_repo.get(tenant_id, agent_id)
-            if agent is not None and agent.principal_id != cred.principal_id:
-                return self._error_response(
-                    403,
-                    "AGENT_IMPERSONATION_DENIED",
-                    f"Agent '{agent_id}' is not delegated by principal '{cred.principal_id}'",
-                    request_id,
-                    details={
-                        "authenticated_principal": cred.principal_id,
-                        "asserted_agent": agent_id,
-                        "agent_principal": agent.principal_id,
-                    },
-                )
+            if agent is not None:
+                if agent.tenant_id != tenant_id:
+                    return self._error_response(
+                        403,
+                        "CROSS_TENANT_ACCESS_DENIED",
+                        f"Agent '{agent_id}' belongs to tenant '{agent.tenant_id}', not '{tenant_id}'",
+                        request_id,
+                        details={
+                            "asserted_agent": agent_id,
+                            "agent_tenant": agent.tenant_id,
+                            "asserted_tenant": tenant_id,
+                        },
+                    )
+                if agent.principal_id != cred.principal_id:
+                    return self._error_response(
+                        403,
+                        "AGENT_IMPERSONATION_DENIED",
+                        f"Agent '{agent_id}' is not delegated by principal '{cred.principal_id}'",
+                        request_id,
+                        details={
+                            "authenticated_principal": cred.principal_id,
+                            "asserted_agent": agent_id,
+                            "agent_principal": agent.principal_id,
+                        },
+                    )
         return None
 
     def _approval_visible_to(self, cred: Credential, approval: Approval) -> bool:
@@ -882,6 +1031,11 @@ class AgentPayApiApp:
         response_headers = {
             "x-trace-id": trace_id,
             "x-request-id": request_id,
+            "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
+            "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+            "x-content-type-options": "nosniff",
+            "x-frame-options": "DENY",
+            "referrer-policy": "strict-origin-when-cross-origin",
         }
 
         ctx_token = _current_trace_id.set(trace_id)
@@ -913,6 +1067,21 @@ class AgentPayApiApp:
                         return ApiResponse(status_code, resp_data, response_headers)
                 except ValueError:
                     pass
+
+            # Strict Content-Type enforcement on mutating requests with non-empty body (§12, Feature 17)
+            method_upper = method.upper()
+            if method_upper in ("POST", "PUT", "PATCH"):
+                has_body = (raw_body is not None and len(raw_body) > 0) or (body is not None)
+                if has_body:
+                    ct = hdrs.get("content-type", "").strip().lower()
+                    if not ct.startswith("application/json"):
+                        status_code, resp_data = self._error_response(
+                            415,
+                            "UNSUPPORTED_MEDIA_TYPE",
+                            "Content-Type must be application/json for mutating requests",
+                            request_id,
+                        )
+                        return ApiResponse(status_code, resp_data, response_headers)
 
             status_code, resp_data = self._dispatch(
                 method, path, hdrs, body, request_id, tenant_id, trace_id, raw_body=raw_body
@@ -1211,11 +1380,12 @@ class AgentPayApiApp:
                     details=getattr(err, "details", {}),
                 )
             except Exception as err:
+                logger.exception("Webhook reconciliation failed: %s", err)
                 self.webhook_event_repo.save(claimed_event.mark_failed("RECONCILIATION_FAILED"))
                 return self._error_response(
                     500,
                     "RECONCILIATION_FAILED",
-                    f"Webhook reconciliation failed: {err}",
+                    "An unexpected error occurred during webhook reconciliation",
                     request_id,
                 )
 
@@ -1500,11 +1670,12 @@ class AgentPayApiApp:
                     details=getattr(err, "details", {}),
                 )
             except Exception as err:
+                logger.exception("Razorpay webhook reconciliation failed: %s", err)
                 self.webhook_event_repo.save(claimed_event.mark_failed("RECONCILIATION_FAILED"))
                 return self._error_response(
                     500,
                     "RECONCILIATION_FAILED",
-                    f"Razorpay webhook reconciliation failed: {err}",
+                    "An unexpected error occurred during webhook reconciliation",
                     request_id,
                 )
 
@@ -1812,11 +1983,12 @@ class AgentPayApiApp:
                     details=getattr(err, "details", {}),
                 )
             except Exception as err:
+                logger.exception("Stripe webhook reconciliation failed: %s", err)
                 self.webhook_event_repo.save(claimed_event.mark_failed("RECONCILIATION_FAILED"))
                 return self._error_response(
                     500,
                     "RECONCILIATION_FAILED",
-                    f"Stripe webhook reconciliation failed: {err}",
+                    "An unexpected error occurred during webhook reconciliation",
                     request_id,
                 )
 
@@ -2123,10 +2295,65 @@ class AgentPayApiApp:
                 }
 
             if path == "/api/v1/emergency/pause" and method == "POST":
-                req_data = body or {}
-                operator_id = str(req_data.get("operator_id") or cred.principal_id)
+                req_data = body if isinstance(body, dict) else {}
+                asserted_operator = req_data.get("operator_id")
+                if asserted_operator is not None and str(asserted_operator) != cred.principal_id:
+                    return self._error_response(
+                        403,
+                        "OPERATOR_IMPERSONATION_DENIED",
+                        f"Authenticated principal '{cred.principal_id}' cannot act as operator '{asserted_operator}'",
+                        request_id,
+                        details={
+                            "authenticated_principal": cred.principal_id,
+                            "asserted_operator": str(asserted_operator),
+                        },
+                    )
+                operator_id = cred.principal_id
+
+                is_platform_authority = (
+                    cred.tenant_id == "SYSTEM"
+                    or cred.has_scope("*")
+                    or cred.has_scope("platform:admin")
+                    or cred.has_scope("system:admin")
+                )
+
+                if is_platform_authority:
+                    scope = str(req_data.get("scope", "ALL"))
+                else:
+                    if "scope" in req_data and req_data["scope"] is not None:
+                        requested_scope = str(req_data["scope"]).strip()
+                        if requested_scope in ("ALL", "*"):
+                            return self._error_response(
+                                403,
+                                "CROSS_TENANT_ACCESS_DENIED",
+                                f"Tenant admin for '{cred.tenant_id}' cannot pause cluster-wide scope '{requested_scope}'",
+                                request_id,
+                                details={
+                                    "tenant_id": cred.tenant_id,
+                                    "requested_scope": requested_scope,
+                                },
+                            )
+                        norm_target = (
+                            requested_scope[len("tenant:") :]
+                            if requested_scope.startswith("tenant:")
+                            else requested_scope
+                        )
+                        if norm_target != cred.tenant_id:
+                            return self._error_response(
+                                403,
+                                "CROSS_TENANT_ACCESS_DENIED",
+                                f"Tenant admin for '{cred.tenant_id}' cannot pause foreign tenant '{norm_target}'",
+                                request_id,
+                                details={
+                                    "tenant_id": cred.tenant_id,
+                                    "requested_scope": requested_scope,
+                                },
+                            )
+                        scope = f"tenant:{cred.tenant_id}"
+                    else:
+                        scope = f"tenant:{cred.tenant_id}"
+
                 reason = str(req_data.get("reason", "Manual emergency pause"))
-                scope = str(req_data.get("scope", "ALL"))
                 self.pause_emergency(operator_id=operator_id, reason=reason, scope=scope)
                 return 200, {
                     "status": "PAUSED",
@@ -2137,9 +2364,64 @@ class AgentPayApiApp:
                 }
 
             if path == "/api/v1/emergency/resume" and method == "POST":
-                req_data = body or {}
-                operator_id = str(req_data.get("operator_id") or cred.principal_id)
-                scope = str(req_data.get("scope", "ALL"))
+                req_data = body if isinstance(body, dict) else {}
+                asserted_operator = req_data.get("operator_id")
+                if asserted_operator is not None and str(asserted_operator) != cred.principal_id:
+                    return self._error_response(
+                        403,
+                        "OPERATOR_IMPERSONATION_DENIED",
+                        f"Authenticated principal '{cred.principal_id}' cannot act as operator '{asserted_operator}'",
+                        request_id,
+                        details={
+                            "authenticated_principal": cred.principal_id,
+                            "asserted_operator": str(asserted_operator),
+                        },
+                    )
+                operator_id = cred.principal_id
+
+                is_platform_authority = (
+                    cred.tenant_id == "SYSTEM"
+                    or cred.has_scope("*")
+                    or cred.has_scope("platform:admin")
+                    or cred.has_scope("system:admin")
+                )
+
+                if is_platform_authority:
+                    scope = str(req_data.get("scope", "ALL"))
+                else:
+                    if "scope" in req_data and req_data["scope"] is not None:
+                        requested_scope = str(req_data["scope"]).strip()
+                        if requested_scope in ("ALL", "*"):
+                            return self._error_response(
+                                403,
+                                "CROSS_TENANT_ACCESS_DENIED",
+                                f"Tenant admin for '{cred.tenant_id}' cannot resume cluster-wide scope '{requested_scope}'",
+                                request_id,
+                                details={
+                                    "tenant_id": cred.tenant_id,
+                                    "requested_scope": requested_scope,
+                                },
+                            )
+                        norm_target = (
+                            requested_scope[len("tenant:") :]
+                            if requested_scope.startswith("tenant:")
+                            else requested_scope
+                        )
+                        if norm_target != cred.tenant_id:
+                            return self._error_response(
+                                403,
+                                "CROSS_TENANT_ACCESS_DENIED",
+                                f"Tenant admin for '{cred.tenant_id}' cannot resume foreign tenant '{norm_target}'",
+                                request_id,
+                                details={
+                                    "tenant_id": cred.tenant_id,
+                                    "requested_scope": requested_scope,
+                                },
+                            )
+                        scope = f"tenant:{cred.tenant_id}"
+                    else:
+                        scope = f"tenant:{cred.tenant_id}"
+
                 self.resume_emergency(operator_id=operator_id, scope=scope)
                 is_still_paused = self.is_emergency_paused
                 return 200, {
@@ -2201,6 +2483,22 @@ class AgentPayApiApp:
 
         # 5. Agent Catalog endpoints (§38)
         if path == "/agent/catalog" and method == "GET":
+            if self.abuse_detector is not None:
+                client_ip = self._extract_client_ip(headers)
+                sec_event = self.abuse_detector.record_catalog_query(
+                    tenant_id=tenant_id, client_ip=client_ip
+                )
+                if sec_event is not None and sec_event.action_taken.value in (
+                    "RATE_LIMIT",
+                    "BLOCK",
+                ):
+                    return self._error_response(
+                        429,
+                        "RATE_LIMIT_EXCEEDED",
+                        "Catalog query rate limit exceeded due to scraping burst detection",
+                        request_id,
+                        details={"client_ip": client_ip, "event_id": sec_event.event_id},
+                    )
             query = parse_qs(query_string).get("q", [""])[0].strip()
             products = []
             if self.orchestrator._product_repo is not None:
@@ -2540,19 +2838,6 @@ class AgentPayApiApp:
                     request_id,
                 )
             asserted_principal = req.get("principal_id")
-            identity_err = self._check_actor_identity(
-                cred,
-                tenant_id=tenant_id,
-                agent_id=agent_id,
-                principal_id=(
-                    str(asserted_principal) if asserted_principal else checkout_cart.principal_id
-                ),
-                request_id=request_id,
-                context="cart checkout",
-            )
-            if identity_err is not None:
-                return identity_err
-
             if asserted_principal is not None and str(asserted_principal) != (
                 checkout_cart.principal_id
             ):
@@ -2563,6 +2848,17 @@ class AgentPayApiApp:
                     f"'{checkout_cart.principal_id}'",
                     request_id,
                 )
+
+            identity_err = self._check_actor_identity(
+                cred,
+                tenant_id=tenant_id,
+                agent_id=agent_id,
+                principal_id=checkout_cart.principal_id,
+                request_id=request_id,
+                context="cart checkout",
+            )
+            if identity_err is not None:
+                return identity_err
 
             amt_raw = req.get("amount_minor")
             if amt_raw is None:
@@ -3493,6 +3789,17 @@ class AgentPayApiApp:
                         "headers": [
                             [b"content-type", b"application/json"],
                             [b"content-length", str(len(resp_bytes)).encode("latin1")],
+                            [
+                                b"content-security-policy",
+                                b"default-src 'none'; frame-ancestors 'none'",
+                            ],
+                            [
+                                b"strict-transport-security",
+                                b"max-age=63072000; includeSubDomains; preload",
+                            ],
+                            [b"x-content-type-options", b"nosniff"],
+                            [b"x-frame-options", b"DENY"],
+                            [b"referrer-policy", b"strict-origin-when-cross-origin"],
                         ],
                     }
                 )
@@ -3500,6 +3807,41 @@ class AgentPayApiApp:
                 return
             body_bytes += chunk
             more_body = message.get("more_body", False)
+
+        if method in ("POST", "PUT", "PATCH") and body_bytes:
+            ct = headers.get("content-type", "").strip().lower()
+            if not ct.startswith("application/json"):
+                req_id = headers.get("x-request-id", f"req_{uuid.uuid4().hex[:12]}")
+                status_code, resp_data = self._error_response(
+                    415,
+                    "UNSUPPORTED_MEDIA_TYPE",
+                    "Content-Type must be application/json for mutating requests",
+                    req_id,
+                )
+                resp_bytes = json.dumps(resp_data).encode("utf-8")
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": status_code,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                            [b"content-length", str(len(resp_bytes)).encode("latin1")],
+                            [
+                                b"content-security-policy",
+                                b"default-src 'none'; frame-ancestors 'none'",
+                            ],
+                            [
+                                b"strict-transport-security",
+                                b"max-age=63072000; includeSubDomains; preload",
+                            ],
+                            [b"x-content-type-options", b"nosniff"],
+                            [b"x-frame-options", b"DENY"],
+                            [b"referrer-policy", b"strict-origin-when-cross-origin"],
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": resp_bytes})
+                return
 
         body_json = None
         if body_bytes:
@@ -3521,6 +3863,17 @@ class AgentPayApiApp:
                         "headers": [
                             [b"content-type", b"application/json"],
                             [b"content-length", str(len(resp_bytes)).encode("latin1")],
+                            [
+                                b"content-security-policy",
+                                b"default-src 'none'; frame-ancestors 'none'",
+                            ],
+                            [
+                                b"strict-transport-security",
+                                b"max-age=63072000; includeSubDomains; preload",
+                            ],
+                            [b"x-content-type-options", b"nosniff"],
+                            [b"x-frame-options", b"DENY"],
+                            [b"referrer-policy", b"strict-origin-when-cross-origin"],
                         ],
                     }
                 )
@@ -3573,6 +3926,7 @@ class ApiTestClient:
         self._auth_mode: str = auth_mode
         self._active_principal: str | None = None
         self._active_role: UserRole | None = default_role
+        self._active_scopes: tuple[str, ...] | None = None
 
     def _clone(self) -> ApiTestClient:
         """Create an immutable context clone sharing app and token caches."""
@@ -3586,17 +3940,32 @@ class ApiTestClient:
         clone._api_keys_by_tenant = self._api_keys_by_tenant
         clone._active_principal = self._active_principal
         clone._active_role = self._active_role
+        clone._active_scopes = self._active_scopes
         return clone
 
-    def as_admin(self, tenant_id: str | None = None) -> ApiTestClient:
+    def as_admin(
+        self,
+        tenant_id: str | None = None,
+        principal_id: str | None = None,
+        scopes: tuple[str, ...] | None = None,
+    ) -> ApiTestClient:
         """Return a client context configured with valid administrator credentials (§14, §67)."""
         clone = self._clone()
         clone.default_tenant = tenant_id or self.default_tenant
         clone._auth_mode = "admin"
         clone.default_role = UserRole.ADMIN
-        clone._active_principal = "usr_test_admin"
+        clone._active_principal = principal_id or "usr_test_admin"
         clone._active_role = UserRole.ADMIN
+        clone._active_scopes = scopes
         return clone
+
+    def as_system_admin(
+        self,
+        principal_id: str = "sys_admin",
+        scopes: tuple[str, ...] = ("*", "platform:admin"),
+    ) -> ApiTestClient:
+        """Return a client context configured with platform-level system authority (§14, §67)."""
+        return self.as_admin(tenant_id="SYSTEM", principal_id=principal_id, scopes=scopes)
 
     def as_agent(
         self,
@@ -3820,11 +4189,16 @@ class ApiTestClient:
                         or self.app._extract_protocol_tenant(path, json_body)
                         or self.default_tenant
                     )
+                    eff_scopes = (
+                        self._active_scopes
+                        if self._active_scopes is not None
+                        else ("admin", "operator", "commerce:read", "commerce:write")
+                    )
                     token = self.get_or_create_token(
                         tenant_id=target_tenant,
                         role=UserRole.ADMIN,
                         principal_id=self._active_principal or "usr_test_admin",
-                        scopes=("admin", "operator", "commerce:read", "commerce:write"),
+                        scopes=eff_scopes,
                     )
                     hdrs["authorization"] = f"Bearer {token}"
                 elif self._auth_mode == "agent":
@@ -3859,6 +4233,14 @@ class ApiTestClient:
                         "Use .as_buyer(), .as_admin(), .as_agent(), or .as_unauthenticated(), "
                         "or supply an explicit Authorization or X-API-Key header (§14)."
                     )
+
+        # Strict Content-Type enforcement (§17, Feature 17): Auto-inject Content-Type for mutating requests with body
+        # unless test deliberately specified or omitted it via "__OMIT__".
+        if method.upper() in ("POST", "PUT", "PATCH") and (json_body is not None or raw_body):
+            if "content-type" not in hdrs:
+                hdrs["content-type"] = "application/json"
+            elif hdrs["content-type"] == "__OMIT__":
+                del hdrs["content-type"]
 
         return self.app.handle_request(method, path, hdrs, json_body, raw_body=raw_body)
 

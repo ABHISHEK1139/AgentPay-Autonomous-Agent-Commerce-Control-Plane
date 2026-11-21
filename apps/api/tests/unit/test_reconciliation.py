@@ -141,6 +141,11 @@ def test_cross_tenant_attempt_is_rejected() -> None:
         def save(self, tenant_id: str, attempt: PaymentAttempt) -> None:
             raise AssertionError("must fail before any write")
 
+        def list_by_status(
+            self, status: PaymentStatus, tenant_id: str | None = None
+        ) -> list[PaymentAttempt]:
+            return []
+
     provider = CountingProvider(make_attempt())
     reconciler = PaymentReconciler(provider, LeakingRepository())
     with pytest.raises(CrossTenantAccessError):

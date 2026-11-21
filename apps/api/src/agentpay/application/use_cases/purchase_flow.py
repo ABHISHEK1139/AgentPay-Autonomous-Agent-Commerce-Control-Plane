@@ -16,6 +16,7 @@ Coordinates the canonical 12-step vertical slice flow:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import uuid
@@ -86,6 +87,7 @@ from agentpay.domain.payments import (
 )
 from agentpay.domain.policy import (
     PolicyDecision,
+    PolicyEvaluationResult,
     SpendingLimits,
     SpendingPolicyEngine,
     SpendingPolicyRequest,
@@ -222,6 +224,45 @@ class PurchaseOrchestrator:
         with self._daily_spend_lock:
             key = (tenant_id, agent_id, day)
             self._daily_spend[key] = self._daily_spend.get(key, 0) + amount_minor
+
+    def _allocate_daily_spend(self, tenant_id: str, agent_id: str, amount_minor: int) -> None:
+        """Atomically pre-allocate spend against today's ledger before payment capture (§18, §19, VULN-04)."""
+        day = datetime.now(UTC).date().isoformat()
+        with self._daily_spend_lock:
+            key = (tenant_id, agent_id, day)
+            self._daily_spend[key] = self._daily_spend.get(key, 0) + amount_minor
+
+    def _release_daily_spend(self, tenant_id: str, agent_id: str, amount_minor: int) -> None:
+        """Release pre-allocated spend on payment decline, failure, or downstream exception (§18, §19, VULN-04)."""
+        day = datetime.now(UTC).date().isoformat()
+        with self._daily_spend_lock:
+            key = (tenant_id, agent_id, day)
+            current = self._daily_spend.get(key, 0)
+            self._daily_spend[key] = max(0, current - amount_minor)
+
+    def _check_and_allocate_daily_spend(
+        self,
+        tenant_id: str,
+        agent_id: str,
+        amount: Money,
+        limits: SpendingLimits,
+    ) -> PolicyEvaluationResult:
+        """Atomically evaluate policy against current cumulative spend and pre-allocate if allowed (§18, §19, VULN-04)."""
+        day = datetime.now(UTC).date().isoformat()
+        with self._daily_spend_lock:
+            key = (tenant_id, agent_id, day)
+            spent_today = self._daily_spend.get(key, 0)
+            policy_result = self._policy_engine.evaluate(
+                request=SpendingPolicyRequest(
+                    amount=amount,
+                    spent_today_minor=spent_today,
+                ),
+                limits=limits,
+                policy_version="spending-policy-v1",
+            )
+            if policy_result.decision is PolicyDecision.ALLOW:
+                self._daily_spend[key] = spent_today + amount.minor_units
+            return policy_result
 
     def _resolve_action_merchant_id(
         self, tenant_id: str, action: ActionRequest, variant_id: str | None
@@ -972,13 +1013,11 @@ class PurchaseOrchestrator:
                 rejection_reason="Action has no amount specified",
             )
 
-        policy_result = self._policy_engine.evaluate(
-            request=SpendingPolicyRequest(
-                amount=action.amount,
-                spent_today_minor=self._get_spent_today_minor(tenant_id, action.agent_id),
-            ),
+        policy_result = self._check_and_allocate_daily_spend(
+            tenant_id=tenant_id,
+            agent_id=action.agent_id,
+            amount=action.amount,
             limits=limits,
-            policy_version="spending-policy-v1",
         )
         self._audit(
             AuditEventType.POLICY_EVALUATED,
@@ -1040,16 +1079,21 @@ class PurchaseOrchestrator:
         resolved_m_id = (
             merchant.merchant_id if merchant else (resolved_merchant_id or action.resource.id)
         )
-        return self._execute_order_and_payment_pipeline(
-            action=action,
-            tenant_id=tenant_id,
-            variant_id=variant_id,
-            quantity=quantity,
-            decision_summary=decision_summary,
-            merchant_id=resolved_m_id,
-            idempotency_key=idempotency_key or f"idem_{action.action_id}",
-            trace_id=trace_id,
-        )
+        try:
+            return self._execute_order_and_payment_pipeline(
+                action=action,
+                tenant_id=tenant_id,
+                variant_id=variant_id,
+                quantity=quantity,
+                decision_summary=decision_summary,
+                merchant_id=resolved_m_id,
+                idempotency_key=idempotency_key or f"idem_{action.action_id}",
+                trace_id=trace_id,
+            )
+        except Exception:
+            if action.amount is not None:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+            raise
 
     def _execute_order_and_payment_pipeline(
         self,
@@ -1079,6 +1123,7 @@ class PurchaseOrchestrator:
             try:
                 self._inventory_repo.reserve(tenant_id, variant_id, quantity)
             except InsufficientInventoryError as err:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
                 return PurchaseExecutionResult(
                     action_id=action.action_id,
                     tenant_id=tenant_id,
@@ -1103,6 +1148,7 @@ class PurchaseOrchestrator:
                             "variant_id": variant_id,
                         },
                     )
+            self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
             self._audit(
                 AuditEventType.ORDER_CANCELLED,
                 action,
@@ -1130,6 +1176,7 @@ class PurchaseOrchestrator:
                     idempotency_key=idem_key,
                 )
             except Exception as exc:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
                 # SAGA COMPENSATION: Release reserved inventory on payment creation failure (§44)
                 if self._inventory_repo is not None:
                     try:
@@ -1195,6 +1242,7 @@ class PurchaseOrchestrator:
 
             # Check payment success
             if payment_attempt.status in (PaymentStatus.DECLINED, PaymentStatus.FAILED):
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
                 # SAGA COMPENSATION: Release reserved inventory (§44)
                 if self._inventory_repo is not None:
                     self._inventory_repo.release(tenant_id, variant_id, quantity)
@@ -1324,6 +1372,7 @@ class PurchaseOrchestrator:
             try:
                 self._order_repo.save(tenant_id, order)
             except Exception as exc:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
                 # SAGA COMPENSATION: Trigger refund if payment was captured and release inventory (§44)
                 if payment_attempt.status is PaymentStatus.CAPTURED:
                     try:
@@ -1387,9 +1436,7 @@ class PurchaseOrchestrator:
                 ),
             )
 
-        # Record the completed purchase against the agent's daily spend ledger so the
-        # daily spending limit is enforced across requests (§18, §19).
-        self._record_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+        # Daily spend was already pre-allocated prior to payment dispatch (§18, §19, VULN-04).
 
         return PurchaseExecutionResult(
             action_id=action.action_id,
@@ -1775,16 +1822,23 @@ class PurchaseOrchestrator:
             trace_id=trace_id,
         )
 
-        return self._execute_order_and_payment_pipeline(
-            action=action,
-            tenant_id=tenant_id,
-            variant_id=variant_id,
-            quantity=quantity,
-            approval=consumed_approval,
-            merchant_id=consumed_approval.binding.merchant_id,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-        )
+        if action.amount is not None:
+            self._allocate_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+        try:
+            return self._execute_order_and_payment_pipeline(
+                action=action,
+                tenant_id=tenant_id,
+                variant_id=variant_id,
+                quantity=quantity,
+                approval=consumed_approval,
+                merchant_id=consumed_approval.binding.merchant_id,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+            )
+        except Exception:
+            if action.amount is not None:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+            raise
 
     # ------------------------------------------------------------------
     # Multi-item cart (§38, ADR-0006)
@@ -2279,7 +2333,21 @@ class PurchaseOrchestrator:
                 cart=cart,
                 rejection_reason=f"Cart is in status '{cart.status.value}', not ACTIVE",
             )
+        if self._cart_repo is not None and not self._cart_repo.mark_processing(tenant_id, cart_id):
+            current_cart = self._cart_repo.get(tenant_id, cart_id)
+            status_str = current_cart.status.value if current_cart else "UNKNOWN"
+            return CartCheckoutResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                cart=current_cart,
+                rejection_reason=f"Cart '{cart_id}' is already being processed or checked out (status: {status_str})",
+            )
+
         if not cart.items:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2291,6 +2359,8 @@ class PurchaseOrchestrator:
 
         lines, rejection = self._resolve_cart_lines(tenant_id, cart)
         if rejection is not None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             self._audit(
                 AuditEventType.POLICY_EVALUATED,
                 action,
@@ -2310,6 +2380,8 @@ class PurchaseOrchestrator:
 
         merchant_id = cart.merchant_id or lines[0][2].merchant_id
         if any(line_product.merchant_id != merchant_id for _i, _v, line_product, _inv in lines):
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2324,6 +2396,8 @@ class PurchaseOrchestrator:
             if perms is not None:
                 for _item, _variant, line_product, _inv in lines:
                     if not perms.allows_category(line_product.category):
+                        if self._cart_repo is not None:
+                            self._cart_repo.mark_active(tenant_id, cart_id)
                         self._audit(
                             AuditEventType.POLICY_EVALUATED,
                             action,
@@ -2346,6 +2420,8 @@ class PurchaseOrchestrator:
 
         total, total_rejection = self._cart_total_or_none(lines)
         if total_rejection is not None or total is None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2359,6 +2435,8 @@ class PurchaseOrchestrator:
             tenant_id, action, merchant_id, total, trace_id
         )
         if merchant_verification is not None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             merchant_verification = replace(merchant_verification, cart=cart)
             return merchant_verification
 
@@ -2373,6 +2451,8 @@ class PurchaseOrchestrator:
 
         conflicts = self._detect_cart_conflicts(tenant_id, action, cart, lines, total)
         if conflicts:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             self._audit(
                 AuditEventType.CONFLICT_DETECTED,
                 action,
@@ -2397,6 +2477,8 @@ class PurchaseOrchestrator:
         decision_summary = self._evaluate_cart_decision(action, tenant_id, total, trace_id)
 
         if action.amount is None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2416,13 +2498,11 @@ class PurchaseOrchestrator:
             if perms is not None:
                 limits = perms.limits
 
-        policy_result = self._policy_engine.evaluate(
-            request=SpendingPolicyRequest(
-                amount=action.amount,
-                spent_today_minor=self._get_spent_today_minor(tenant_id, action.agent_id),
-            ),
+        policy_result = self._check_and_allocate_daily_spend(
+            tenant_id=tenant_id,
+            agent_id=action.agent_id,
+            amount=action.amount,
             limits=limits,
-            policy_version="spending-policy-v1",
         )
         self._audit(
             AuditEventType.POLICY_EVALUATED,
@@ -2438,6 +2518,8 @@ class PurchaseOrchestrator:
         )
 
         if policy_result.decision is PolicyDecision.DENY:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             reason_msg = (
                 policy_result.reasons[0].message
                 if policy_result.reasons
@@ -2454,6 +2536,8 @@ class PurchaseOrchestrator:
             )
 
         if policy_result.decision is PolicyDecision.REVIEW:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             approval = self._approval_service.create_approval(
                 action=action,
                 tenant_id=tenant_id,
@@ -2482,16 +2566,23 @@ class PurchaseOrchestrator:
                 decision_summary=decision_summary,
             )
 
-        return self._execute_cart_order_and_payment_pipeline(
-            action=action,
-            tenant_id=tenant_id,
-            cart=cart,
-            lines=lines,
-            merchant_id=merchant_id,
-            decision_summary=decision_summary,
-            idempotency_key=idempotency_key or f"idem_{action.action_id}",
-            trace_id=trace_id,
-        )
+        try:
+            return self._execute_cart_order_and_payment_pipeline(
+                action=action,
+                tenant_id=tenant_id,
+                cart=cart,
+                lines=lines,
+                merchant_id=merchant_id,
+                decision_summary=decision_summary,
+                idempotency_key=idempotency_key or f"idem_{action.action_id}",
+                trace_id=trace_id,
+            )
+        except Exception:
+            if action.amount is not None:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
+            raise
 
     def _verify_cart_merchant(
         self,
@@ -2720,7 +2811,20 @@ class PurchaseOrchestrator:
                 cart=cart,
                 rejection_reason=f"Cart is in status '{cart.status.value}', not ACTIVE",
             )
+        if self._cart_repo is not None and not self._cart_repo.mark_processing(tenant_id, cart_id):
+            current_cart = self._cart_repo.get(tenant_id, cart_id)
+            status_str = current_cart.status.value if current_cart else "UNKNOWN"
+            return CartCheckoutResult(
+                action_id=action.action_id,
+                tenant_id=tenant_id,
+                status=ActionStatus.FAILED,
+                decision=PolicyDecision.DENY,
+                cart=current_cart,
+                rejection_reason=f"Cart '{cart_id}' is already being processed or checked out (status: {status_str})",
+            )
         if not cart.items:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2732,6 +2836,8 @@ class PurchaseOrchestrator:
 
         lines, rejection = self._resolve_cart_lines(tenant_id, cart)
         if rejection is not None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2744,6 +2850,8 @@ class PurchaseOrchestrator:
         merchant_id = cart.merchant_id or lines[0][2].merchant_id
         total, total_rejection = self._cart_total_or_none(lines)
         if total_rejection is not None or total is None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2755,6 +2863,8 @@ class PurchaseOrchestrator:
 
         conflicts = self._detect_cart_conflicts(tenant_id, action, cart, lines, total)
         if conflicts:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2769,6 +2879,8 @@ class PurchaseOrchestrator:
             tenant_id, action, merchant_id, total, trace_id
         )
         if merchant_verification is not None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
             merchant_verification = replace(merchant_verification, cart=cart)
             return merchant_verification
 
@@ -2779,14 +2891,20 @@ class PurchaseOrchestrator:
             else:
                 approval = self._approval_repo.get(tenant_id, approval_id)
                 if approval is None:
+                    if self._cart_repo is not None:
+                        self._cart_repo.mark_active(tenant_id, cart_id)
                     raise InvalidCommerceError(
                         f"Approval '{approval_id}' not found in tenant '{tenant_id}'"
                     )
                 if approval.status == ApprovalStatus.CONSUMED:
+                    if self._cart_repo is not None:
+                        self._cart_repo.mark_active(tenant_id, cart_id)
                     raise ApprovalAlreadyConsumedError(
                         f"Approval '{approval_id}' has already been consumed"
                     )
                 if not approval.is_approved:
+                    if self._cart_repo is not None:
+                        self._cart_repo.mark_active(tenant_id, cart_id)
                     raise ApprovalBindingMismatchError(
                         f"Approval is in status '{approval.status.value}', not APPROVED"
                     )
@@ -2815,16 +2933,25 @@ class PurchaseOrchestrator:
             trace_id=trace_id,
         )
 
-        return self._execute_cart_order_and_payment_pipeline(
-            action=action,
-            tenant_id=tenant_id,
-            cart=cart,
-            lines=lines,
-            merchant_id=merchant_id,
-            approval=consumed_approval,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-        )
+        if action.amount is not None:
+            self._allocate_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+        try:
+            return self._execute_cart_order_and_payment_pipeline(
+                action=action,
+                tenant_id=tenant_id,
+                cart=cart,
+                lines=lines,
+                merchant_id=merchant_id,
+                approval=consumed_approval,
+                idempotency_key=idempotency_key,
+                trace_id=trace_id,
+            )
+        except Exception:
+            if action.amount is not None:
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart_id)
+            raise
 
     def _release_cart_reservations(
         self,
@@ -2916,6 +3043,8 @@ class PurchaseOrchestrator:
     ) -> CartCheckoutResult:
         """Reserve-all → pay-once → confirm-all saga with full compensation (ADR-0006)."""
         if action.amount is None:
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart.cart_id)
             return CartCheckoutResult(
                 action_id=action.action_id,
                 tenant_id=tenant_id,
@@ -2934,6 +3063,9 @@ class PurchaseOrchestrator:
                     reserved_count += 1
                 except InsufficientInventoryError as err:
                     self._release_cart_reservations(tenant_id, lines[:reserved_count], action)
+                    self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+                    if self._cart_repo is not None:
+                        self._cart_repo.mark_active(tenant_id, cart.cart_id)
                     self._audit(
                         AuditEventType.ORDER_CANCELLED,
                         action,
@@ -2952,6 +3084,9 @@ class PurchaseOrchestrator:
                     )
                 except Exception as exc:
                     self._release_cart_reservations(tenant_id, lines[:reserved_count], action)
+                    self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+                    if self._cart_repo is not None:
+                        self._cart_repo.mark_active(tenant_id, cart.cart_id)
                     self._audit(
                         AuditEventType.ORDER_CANCELLED,
                         action,
@@ -2970,6 +3105,9 @@ class PurchaseOrchestrator:
         # CONFIRMED without a PaymentAttempt (§2.4, §41).
         if self._payment_provider is None:
             self._release_cart_reservations(tenant_id, lines, action)
+            self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+            if self._cart_repo is not None:
+                self._cart_repo.mark_active(tenant_id, cart.cart_id)
             self._audit(
                 AuditEventType.ORDER_CANCELLED,
                 action,
@@ -2999,6 +3137,9 @@ class PurchaseOrchestrator:
                 )
             except Exception as exc:
                 self._release_cart_reservations(tenant_id, lines, action)
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+                if self._cart_repo is not None:
+                    self._cart_repo.mark_active(tenant_id, cart.cart_id)
                 self._audit(
                     AuditEventType.ORDER_CANCELLED,
                     action,
@@ -3051,6 +3192,9 @@ class PurchaseOrchestrator:
 
             if payment_attempt.status in (PaymentStatus.DECLINED, PaymentStatus.FAILED):
                 self._release_cart_reservations(tenant_id, lines, action)
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+                if self._cart_repo is not None:
+                    self._cart_repo.mark_active(tenant_id, cart.cart_id)
                 self._audit(
                     AuditEventType.PAYMENT_FAILED,
                     action,
@@ -3153,6 +3297,9 @@ class PurchaseOrchestrator:
                 try:
                     self._order_repo.save(tenant_id, order)
                 except Exception as exc:
+                    self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+                    if self._cart_repo is not None:
+                        self._cart_repo.mark_active(tenant_id, cart.cart_id)
                     if payment_attempt.status is PaymentStatus.CAPTURED:
                         try:
                             self._payment_provider.refund(
@@ -3216,6 +3363,10 @@ class PurchaseOrchestrator:
                                 "attempt_id": payment_attempt.attempt_id,
                             },
                         )
+                self._release_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+                if self._cart_repo is not None:
+                    with contextlib.suppress(Exception):
+                        self._cart_repo.mark_active(tenant_id, cart.cart_id)
                 self._rollback_persisted_cart_orders(
                     tenant_id,
                     orders,
@@ -3269,7 +3420,7 @@ class PurchaseOrchestrator:
                 ),
             )
 
-        self._record_daily_spend(tenant_id, action.agent_id, action.amount.minor_units)
+        # Daily spend was already pre-allocated before payment execution
 
         return CartCheckoutResult(
             action_id=action.action_id,

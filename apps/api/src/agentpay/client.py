@@ -138,15 +138,19 @@ class EmergencyClient:
         self,
         operator_id: str,
         reason: str,
-        scope: str = "ALL_AUTONOMOUS_PAYMENTS",
+        scope: str | None = None,
     ) -> dict[str, Any]:
-        """Trigger cluster-wide emergency pause on autonomous payments."""
-        payload = {"operator_id": operator_id, "reason": reason, "scope": scope}
+        """Trigger emergency pause on autonomous payments."""
+        payload: dict[str, Any] = {"operator_id": operator_id, "reason": reason}
+        if scope is not None:
+            payload["scope"] = scope
         return self._client._post("/api/v1/emergency/pause", payload)
 
-    def resume(self, operator_id: str) -> dict[str, Any]:
+    def resume(self, operator_id: str, scope: str | None = None) -> dict[str, Any]:
         """Resume normal autonomous operations."""
-        payload = {"operator_id": operator_id}
+        payload: dict[str, Any] = {"operator_id": operator_id}
+        if scope is not None:
+            payload["scope"] = scope
         return self._client._post("/api/v1/emergency/resume", payload)
 
 

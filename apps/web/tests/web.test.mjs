@@ -476,3 +476,76 @@ test("Approval resolution grants then executes on live API and never fabricates 
   }
 });
 
+test("Frontend index.html has strict CSP and pinned SRI scripts per §54 and M10 Feature 44", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const url = await import("node:url");
+
+  const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
+  const indexPath = path.resolve(__dirname, "../index.html");
+  const indexHtml = fs.readFileSync(indexPath, "utf-8");
+
+  // 1. Assert Content-Security-Policy meta tag exists
+  assert.ok(
+    indexHtml.includes('http-equiv="Content-Security-Policy"'),
+    "index.html must define Content-Security-Policy meta tag"
+  );
+  assert.ok(
+    indexHtml.includes("default-src 'self'"),
+    "CSP must define default-src 'self'"
+  );
+  assert.ok(
+    indexHtml.includes("object-src 'none'"),
+    "CSP must disallow plugins via object-src 'none'"
+  );
+
+  // 2. Extract all <script> tags with src attribute
+  const scriptSrcRegex = /<script\s+[^>]*src=["']([^"']+)["'][^>]*>/gi;
+  let match;
+  const externalScripts = [];
+  while ((match = scriptSrcRegex.exec(indexHtml)) !== null) {
+    const fullTag = match[0];
+    const src = match[1];
+    if (src.startsWith("http://") || src.startsWith("https://")) {
+      externalScripts.push({ tag: fullTag, src });
+    }
+  }
+
+  // 3. Ensure any external scripts are pinned and have valid Subresource Integrity (SRI)
+  assert.ok(externalScripts.length > 0, "Expected at least one external script (Tailwind CDN)");
+  for (const item of externalScripts) {
+    assert.match(
+      item.src,
+      /\/\d+\.\d+\.\d+/,
+      `External script ${item.src} must be version-pinned`
+    );
+    assert.match(
+      item.tag,
+      /integrity=["']sha(256|384|512)-[A-Za-z0-9+/=]+["']/,
+      `External script ${item.src} must have valid Subresource Integrity (SRI)`
+    );
+    assert.match(
+      item.tag,
+      /crossorigin=["']anonymous["']/,
+      `External script ${item.src} must have crossorigin="anonymous"`
+    );
+  }
+
+  // 4. Verify vite.config.ts has security headers configured
+  const viteConfigPath = path.resolve(__dirname, "../vite.config.ts");
+  const viteConfig = fs.readFileSync(viteConfigPath, "utf-8");
+  assert.ok(
+    viteConfig.includes("X-Content-Type-Options"),
+    "vite.config.ts must configure X-Content-Type-Options"
+  );
+  assert.ok(
+    viteConfig.includes("X-Frame-Options"),
+    "vite.config.ts must configure X-Frame-Options"
+  );
+  assert.ok(
+    viteConfig.includes("Content-Security-Policy"),
+    "vite.config.ts must configure Content-Security-Policy"
+  );
+});
+
+

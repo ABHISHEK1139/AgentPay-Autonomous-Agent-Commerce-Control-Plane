@@ -48,6 +48,7 @@ class InMemoryAuditLedger(AuditLedger):
         if not isinstance(actor_val, str) or not actor_val.strip():
             raise InvalidAuditEventError("actor must be a non-empty string")
 
+        trace_id = trace_id.strip() if (trace_id and trace_id.strip()) else None
         resolved_type = AuditEventType(event_type)
 
         redacted_data = SensitiveFieldRedactor.redact(data)

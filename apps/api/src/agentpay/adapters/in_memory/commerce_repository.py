@@ -17,7 +17,7 @@ from agentpay.application.ports.commerce_port import (
     ProductRepository,
     VariantRepository,
 )
-from agentpay.domain.cart import Cart
+from agentpay.domain.cart import Cart, CartStatus
 from agentpay.domain.commerce import (
     Inventory,
     Merchant,
@@ -218,3 +218,19 @@ class InMemoryCartRepository(CartRepository):
         with self._lock:
             tenant_store = self._carts.get(tenant_id, {})
             return [c for c in tenant_store.values() if c.principal_id == principal_id]
+
+    def mark_processing(self, tenant_id: str, cart_id: str) -> bool:
+        with self._lock:
+            cart = self._carts.get(tenant_id, {}).get(cart_id)
+            if cart is None or cart.status is not CartStatus.ACTIVE:
+                return False
+            self._carts[tenant_id][cart_id] = cart.mark_processing()
+            return True
+
+    def mark_active(self, tenant_id: str, cart_id: str) -> bool:
+        with self._lock:
+            cart = self._carts.get(tenant_id, {}).get(cart_id)
+            if cart is None or cart.status is not CartStatus.PROCESSING:
+                return False
+            self._carts[tenant_id][cart_id] = cart.mark_active()
+            return True

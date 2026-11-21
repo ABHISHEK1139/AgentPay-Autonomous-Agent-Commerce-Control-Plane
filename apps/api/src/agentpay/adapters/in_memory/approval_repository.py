@@ -64,12 +64,15 @@ class InMemoryApprovalRepository(ApprovalRepository):
             tenant_store = self._approvals.get(tenant_id, {})
             return [appr for appr in tenant_store.values() if appr.binding.action_id == action_id]
 
-    def list_pending(self, tenant_id: str | None = None) -> list[Approval]:
-        """List all pending approval requests within a tenant partition (or all tenants if None)."""
+    def list_pending(self, tenant_id: str) -> list[Approval]:
+        """List all pending approval requests strictly within a tenant partition (§49, §50)."""
         with self._lock:
-            if tenant_id is not None:
-                tenant_store = self._approvals.get(tenant_id, {})
-                return [appr for appr in tenant_store.values() if appr.is_pending]
+            tenant_store = self._approvals.get(tenant_id, {})
+            return [appr for appr in tenant_store.values() if appr.is_pending]
+
+    def list_all_pending_for_maintenance(self) -> list[Approval]:
+        """List pending approvals across all partitions strictly for background maintenance (§49)."""
+        with self._lock:
             return [
                 appr
                 for tenant_store in self._approvals.values()

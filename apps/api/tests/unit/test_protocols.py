@@ -6,7 +6,8 @@ schema conformance, and fail-closed behavior across UAP, x402, ACP, and AP2.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -99,7 +100,7 @@ def test_uap_strict_integer_price(uap_adapter: UAPAdapter) -> None:
     }
 
     # Valid integer prices
-    for valid_price in (0, 100, 129900):
+    for valid_price in (100, 129900):
         base_payload["payload"]["parameters"]["price_minor"] = valid_price
         msg = uap_adapter.parse_payload(base_payload)
         action, _ = uap_adapter.to_action_request(msg)
@@ -118,10 +119,10 @@ def test_uap_strict_integer_price(uap_adapter: UAPAdapter) -> None:
         with pytest.raises(MalformedPayloadError, match="price_minor must be an integer"):
             uap_adapter.parse_payload(base_payload)
 
-    # Negative price must raise MalformedPayloadError
-    for neg in (-1, -500):
+    # Zero and negative price must raise MalformedPayloadError
+    for neg in (0, -1, -500):
         base_payload["payload"]["parameters"]["price_minor"] = neg
-        with pytest.raises(MalformedPayloadError, match="price_minor cannot be negative"):
+        with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
             uap_adapter.parse_payload(base_payload)
 
     # Fallback keys: amount_minor and amount
@@ -138,7 +139,11 @@ def test_uap_strict_integer_price(uap_adapter: UAPAdapter) -> None:
     del base_payload["payload"]["parameters"]["amount_minor"]
 
     base_payload["payload"]["parameters"]["amount"] = -50
-    with pytest.raises(MalformedPayloadError, match="amount cannot be negative"):
+    with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
+        uap_adapter.parse_payload(base_payload)
+
+    base_payload["payload"]["parameters"]["amount"] = 0
+    with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
         uap_adapter.parse_payload(base_payload)
 
     base_payload["payload"]["parameters"]["amount"] = 3.14
@@ -247,7 +252,7 @@ def test_x402_strict_integer_amount(x402_adapter: X402Adapter) -> None:
     }
 
     # Valid integer amounts
-    for valid_amt in (0, 100, 2500):
+    for valid_amt in (100, 2500):
         base_payload["amount_minor"] = valid_amt
         req = x402_adapter.parse_payload(base_payload)
         assert req.amount_minor == valid_amt
@@ -267,10 +272,10 @@ def test_x402_strict_integer_amount(x402_adapter: X402Adapter) -> None:
         with pytest.raises(MalformedPayloadError, match="amount_minor must be an integer"):
             x402_adapter.parse_payload(base_payload)
 
-    # Negative amount must raise MalformedPayloadError
-    for neg in (-1, -250):
+    # Zero and negative amount must raise MalformedPayloadError
+    for neg in (0, -1, -250):
         base_payload["amount_minor"] = neg
-        with pytest.raises(MalformedPayloadError, match="amount_minor cannot be negative"):
+        with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
             x402_adapter.parse_payload(base_payload)
 
     # String amount must raise MalformedPayloadError
@@ -311,7 +316,7 @@ def test_x402_to_action_request_integer_guard(x402_adapter: X402Adapter) -> None
         purpose="Bypass attempt",
         timestamp=now,
     )
-    with pytest.raises(MalformedPayloadError, match="amount_minor cannot be negative"):
+    with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
         x402_adapter.to_action_request(neg_req)
 
 
@@ -462,3 +467,118 @@ def test_x402_http_api_fail_closed(api_client: ApiTestClient) -> None:
     )
     assert neg_status == 422
     assert neg_body["error"]["code"] == "MALFORMED_PAYLOAD"
+
+    # Zero amount rejected with 422
+    zero_status, zero_body = api_client.post(
+        "/api/v1/protocols/x402/pay",
+        json_body={
+            "x402_version": "1.0",
+            "challenge_id": "api_zero_x402",
+            "resource_uri": "https://api.example.com/data",
+            "principal_id": "user_01",
+            "agent_id": "agent_01",
+            "tenant_id": "tenant_01",
+            "amount_minor": 0,
+            "currency": "INR",
+        },
+        headers=headers,
+    )
+    assert zero_status == 422
+    assert zero_body["error"]["code"] == "MALFORMED_PAYLOAD"
+
+
+def test_x402_cryptographic_token_signing_and_verification() -> None:
+    """Feature 16: x402 settlement proof token cryptographic signing and verification."""
+    from agentpay.adapters.protocols.x402 import X402Adapter
+    from agentpay.application.use_cases.purchase_flow import PurchaseExecutionResult
+    from agentpay.domain.action_request import ActionStatus
+    from agentpay.domain.money import Money
+    from agentpay.domain.payments import PaymentAttempt, PaymentStatus
+    from agentpay.domain.policy import PolicyDecision
+
+    secret = "custom_test_signing_secret_key_12345"
+    adapter = X402Adapter(signing_secret=secret)
+
+    req = adapter.parse_payload(
+        {
+            "x402_version": "1.0",
+            "challenge_id": "chal_sign_test",
+            "resource_uri": "https://api.example.com/premium-content",
+            "principal_id": "user_402",
+            "agent_id": "agent_402",
+            "tenant_id": "tenant_402",
+            "amount_minor": 5000,
+            "currency": "INR",
+        }
+    )
+
+    now = datetime.now(UTC)
+    result = PurchaseExecutionResult(
+        action_id="x402_chal_sign_test",
+        tenant_id="tenant_402",
+        status=ActionStatus.COMPLETED,
+        decision=PolicyDecision.ALLOW,
+        payment=PaymentAttempt(
+            attempt_id="pay_att_x402_sign",
+            intent_id="intent_402_sign",
+            tenant_id="tenant_402",
+            amount=Money(minor_units=5000, currency="INR"),
+            status=PaymentStatus.CAPTURED,
+            idempotency_key="idem_sign_402",
+            provider="mock",
+        ),
+    )
+
+    resp = adapter.from_execution_result(req, result)
+    assert resp.status == "PAID"
+    token = resp.authorization_token
+    assert token is not None
+    assert token.startswith("x402_")
+    assert "." in token
+
+    # 1. Valid token verifies with matching secret
+    assert adapter.verify_settlement_token(token) is True
+    assert adapter.verify_settlement_token(token, secret=secret) is True
+
+    # 2. Fails verification with wrong secret
+    assert adapter.verify_settlement_token(token, secret="wrong_secret_key") is False
+
+    # 3. Fails verification if signature part is tampered
+    prefix, sig = token.rsplit(".", 1)
+    tampered_sig = ("0" if sig[0] != "0" else "1") + sig[1:]
+    assert adapter.verify_settlement_token(f"{prefix}.{tampered_sig}") is False
+
+    # 4. Fails verification if payload part is tampered
+    tampered_prefix = prefix[:-1] + ("A" if prefix[-1] != "A" else "B")
+    assert adapter.verify_settlement_token(f"{tampered_prefix}.{sig}") is False
+
+    # 5. Fails verification if format is invalid
+    assert adapter.verify_settlement_token("not_a_valid_token") is False
+    assert adapter.verify_settlement_token("x402_nosignature") is False
+    assert adapter.verify_settlement_token("") is False
+    assert adapter.verify_settlement_token(None) is False  # type: ignore[arg-type]
+
+    # 6. Fails verification if token is expired
+    import base64
+    import hashlib
+    import hmac
+
+    expired_claims = {
+        "sub": "agent_402",
+        "aud": "https://api.example.com/premium-content",
+        "amount": 5000,
+        "currency": "INR",
+        "tx": "pay_att_x402_sign",
+        "exp": int((now - timedelta(seconds=10)).timestamp()),  # expired
+    }
+    b64_exp = (
+        base64.urlsafe_b64encode(json.dumps(expired_claims).encode("utf-8"))
+        .decode("utf-8")
+        .rstrip("=")
+    )
+    exp_prefix = f"x402_{b64_exp}"
+    exp_sig = hmac.new(
+        secret.encode("utf-8"), exp_prefix.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    expired_token = f"{exp_prefix}.{exp_sig}"
+    assert adapter.verify_settlement_token(expired_token, secret=secret) is False

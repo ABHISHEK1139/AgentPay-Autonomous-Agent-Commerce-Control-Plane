@@ -177,10 +177,8 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
                         f"Cart item #{idx} unit_price_minor must be an integer, got {type(raw_price).__name__}"
                     )
                 price = raw_price
-                if price < 0:
-                    raise MalformedPayloadError(
-                        f"Cart item #{idx} unit_price_minor cannot be negative"
-                    )
+                if price <= 0:
+                    raise MalformedPayloadError("Amount must be greater than zero")
 
                 curr = str(item.get("currency", "INR")).upper()
                 if not curr:
@@ -279,6 +277,8 @@ class AcpAdapter(BaseProtocolAdapter[AcpPurchaseRequest, AcpPurchaseResponse]):
 
         if not request.items:
             raise MalformedPayloadError("ACP request must contain at least one cart item")
+        if any(it.unit_price_minor <= 0 for it in request.items):
+            raise MalformedPayloadError("Amount must be greater than zero")
 
         first_item = request.items[0]
         currency = first_item.currency

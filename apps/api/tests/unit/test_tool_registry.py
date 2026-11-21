@@ -795,6 +795,7 @@ def test_api_product_evidence_endpoint_and_fail_closed_tool() -> None:
     auth_headers = {
         "Authorization": f"Bearer {valid_token}",
         "X-Tenant-ID": tenant_id,
+        "Content-Type": "application/json",
     }
 
     # Evidence available for the product (gathered across its variants)
@@ -861,7 +862,7 @@ def test_api_tool_execution_endpoint_success_and_errors() -> None:
     status, body = app.handle_request(
         "POST",
         "/api/v1/tools/search_products/invoke",
-        {"X-Tenant-ID": tenant_id},
+        {"X-Tenant-ID": tenant_id, "Content-Type": "application/json"},
         {"agent_id": "agent_01"},
     )
     assert status == 401
@@ -872,13 +873,18 @@ def test_api_tool_execution_endpoint_success_and_errors() -> None:
     auth_headers = {
         "Authorization": f"Bearer {valid_token}",
         "X-Tenant-ID": tenant_id,
+        "Content-Type": "application/json",
     }
 
     # 2. Cross-tenant request rejected with HTTP 403 CROSS_TENANT_ACCESS_DENIED
     status, body = app.handle_request(
         "POST",
         "/api/v1/tools/search_products/invoke",
-        {"Authorization": f"Bearer {valid_token}", "X-Tenant-ID": "tenant_other"},
+        {
+            "Authorization": f"Bearer {valid_token}",
+            "X-Tenant-ID": "tenant_other",
+            "Content-Type": "application/json",
+        },
         {"agent_id": "agent_01"},
     )
     assert status == 403

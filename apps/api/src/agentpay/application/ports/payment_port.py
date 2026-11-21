@@ -13,6 +13,7 @@ from agentpay.domain.payments import (
     IdempotencyRecord,
     Order,
     PaymentAttempt,
+    PaymentStatus,
     ProviderTransactionMapping,
     ProviderWebhookEvent,
     Refund,
@@ -64,6 +65,12 @@ class PaymentRepository(Protocol):
         """Persist or update a payment attempt."""
         ...
 
+    def list_by_status(
+        self, status: PaymentStatus, tenant_id: str | None = None
+    ) -> list[PaymentAttempt]:
+        """Retrieve payment attempts filtered by status and optional tenant_id."""
+        ...
+
 
 @runtime_checkable
 class RefundRepository(Protocol):
@@ -92,6 +99,10 @@ class OrderRepository(Protocol):
 
     def find_by_payment_attempt(self, tenant_id: str, attempt_id: str) -> Order | None:
         """Retrieve an order associated with a specific payment attempt ID (§41, B-REC-01)."""
+        ...
+
+    def find_all_by_payment_attempt(self, tenant_id: str, attempt_id: str) -> list[Order]:
+        """Retrieve all orders associated with a specific payment attempt ID (§44, ADR-0006)."""
         ...
 
     def save(self, tenant_id: str, order: Order) -> None:

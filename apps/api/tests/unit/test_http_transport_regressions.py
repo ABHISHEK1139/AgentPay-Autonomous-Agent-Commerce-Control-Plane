@@ -27,7 +27,12 @@ def test_http_transport_preserves_request_contract(
         return response
 
     monkeypatch.setattr(app, "handle_request", dispatch)
-    server = create_server(host="127.0.0.1", port=0, app=app)
+    server = create_server(
+        host="127.0.0.1",
+        port=0,
+        app=app,
+        allowed_origins=("https://buyer.example",),
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)

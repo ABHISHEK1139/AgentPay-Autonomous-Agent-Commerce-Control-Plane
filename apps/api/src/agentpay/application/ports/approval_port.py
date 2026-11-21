@@ -39,8 +39,12 @@ class ApprovalRepository(Protocol):
         """List all approvals associated with an action within a tenant partition."""
         ...
 
-    def list_pending(self, tenant_id: str | None = None) -> list[Approval]:
-        """List all pending approval requests within a tenant partition (or all tenants if None)."""
+    def list_pending(self, tenant_id: str) -> list[Approval]:
+        """List all pending approval requests strictly within a tenant partition (§49, §50)."""
+        ...
+
+    def list_all_pending_for_maintenance(self) -> list[Approval]:
+        """List pending approvals across all partitions strictly for background maintenance (§49)."""
         ...
 
     def atomic_consume(self, tenant_id: str, approval_id: str) -> Approval:

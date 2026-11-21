@@ -122,3 +122,14 @@ class CartRepository(Protocol):
     def list_for_principal(self, tenant_id: str, principal_id: str) -> list[Cart]:
         """List carts owned by a principal within a tenant partition."""
         ...
+
+    def mark_processing(self, tenant_id: str, cart_id: str) -> bool:
+        """Conditionally transition cart status from ACTIVE to PROCESSING.
+
+        Returns True if transition succeeded, False if cart is missing or not ACTIVE.
+        """
+        ...
+
+    def mark_active(self, tenant_id: str, cart_id: str) -> bool:
+        """Conditionally transition cart status from PROCESSING back to ACTIVE on rollback."""
+        ...

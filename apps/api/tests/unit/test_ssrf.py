@@ -264,3 +264,51 @@ def test_is_ip_blocked_direct_utility() -> None:
     assert validator.is_ip_blocked(ipaddress.ip_address("169.254.169.254")) is True
     assert validator.is_ip_blocked(ipaddress.ip_address("::1")) is True
     assert validator.is_ip_blocked(ipaddress.ip_address("2606:4700:4700::1111")) is False
+
+
+def test_validated_target_pinned_ip_and_connection_helpers() -> None:
+    """Feature 23: ValidatedTarget pinned IP and connection helpers prevent DNS rebinding TOCTOU."""
+    from agentpay.security.ssrf import (
+        PinnedHTTPSConnection,
+        ValidatedTarget,
+        open_pinned_connection,
+    )
+
+    # 1. Pinned IP property
+    target_https = ValidatedTarget(
+        original_url="https://api.example.com:8443/v1/chat?q=test",
+        scheme="https",
+        host="api.example.com",
+        port=8443,
+        path="/v1/chat",
+        query="q=test",
+        resolved_ips=("93.184.216.34", "93.184.216.35"),
+    )
+    assert target_https.pinned_ip == "93.184.216.34"
+    assert target_https.path_with_query == "/v1/chat?q=test"
+
+    # 2. HTTPS pinned connection creation
+    conn_https = open_pinned_connection(target_https, timeout=5.0)
+    assert isinstance(conn_https, PinnedHTTPSConnection)
+    assert conn_https.host == "93.184.216.34"
+    assert conn_https.port == 8443
+    assert conn_https._pinned_server_hostname == "api.example.com"
+    conn_https.close()
+
+    # 3. HTTP pinned connection creation
+    target_http = ValidatedTarget(
+        original_url="http://198.51.100.10:8080/data",
+        scheme="http",
+        host="198.51.100.10",
+        port=8080,
+        path="/data",
+        query="",
+        resolved_ips=("198.51.100.10",),
+    )
+    assert target_http.pinned_ip == "198.51.100.10"
+    assert target_http.path_with_query == "/data"
+
+    conn_http = open_pinned_connection(target_http, timeout=5.0)
+    assert conn_http.host == "198.51.100.10"
+    assert conn_http.port == 8080
+    conn_http.close()

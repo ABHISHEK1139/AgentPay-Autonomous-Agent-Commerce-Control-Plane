@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -18,6 +19,7 @@ class SqlAlchemyOutboxRepository(BaseSqlAlchemyRepository):
 
     def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
         super().__init__(session_or_factory)
+        self._claim_lock = threading.Lock()
 
     def get(self, tenant_id: str, event_id: str) -> OutboxEvent | None:
         """Retrieves an outbox event scoped by tenant_id."""
@@ -69,7 +71,7 @@ class SqlAlchemyOutboxRepository(BaseSqlAlchemyRepository):
     ) -> list[OutboxEvent]:
         """Atomically claims eligible pending/stale outbox events under a worker lease (§106, B-OUT-01)."""
         now = at or datetime.now(UTC)
-        with self._session() as session:
+        with self._claim_lock, self._session() as session:
             cond_pending = (OutboxEventModel.status == OutboxStatus.PENDING.value) & (
                 (OutboxEventModel.next_retry_at.is_(None)) | (OutboxEventModel.next_retry_at <= now)
             )
@@ -83,6 +85,13 @@ class SqlAlchemyOutboxRepository(BaseSqlAlchemyRepository):
             if tenant_id is not None:
                 stmt = stmt.where(OutboxEventModel.tenant_id == tenant_id)
             stmt = stmt.order_by(OutboxEventModel.created_at).limit(limit)
+
+            dialect_name = ""
+            bind = session.get_bind()
+            if hasattr(bind, "dialect"):
+                dialect_name = getattr(bind.dialect, "name", "")
+            if dialect_name in ("postgresql", "mysql", "oracle"):
+                stmt = stmt.with_for_update(skip_locked=True)
 
             models = session.scalars(stmt).all()
             claimed_events: list[OutboxEvent] = []

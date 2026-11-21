@@ -12,7 +12,7 @@ services:
       POSTGRES_USER: agentpay
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentpay_local_only}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - agentpay-postgres:/var/lib/postgresql/data
     healthcheck:
@@ -23,10 +23,11 @@ services:
 
   redis:
     image: redis:8-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-agentpay_local_only}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD:-agentpay_local_only}\" ping"]
       interval: 5s
       timeout: 5s
       retries: 10

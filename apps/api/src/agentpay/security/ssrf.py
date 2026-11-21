@@ -8,11 +8,13 @@ DNS resolution pre-flight validation to prevent DNS rebinding TOCTOU attacks.
 from __future__ import annotations
 
 import fnmatch
+import http.client
 import ipaddress
 import socket
+import ssl
 import urllib.parse
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 from agentpay.domain.errors import DomainError
 
@@ -91,6 +93,16 @@ class ValidatedTarget:
     path: str
     query: str
     resolved_ips: tuple[str, ...]
+
+    @property
+    def pinned_ip(self) -> str | None:
+        """Return the first pre-validated IP address for connection pinning (§60)."""
+        return self.resolved_ips[0] if self.resolved_ips else None
+
+    @property
+    def path_with_query(self) -> str:
+        """Return path with query string if present."""
+        return f"{self.path}?{self.query}" if self.query else self.path
 
 
 class OutboundUrlValidator:
@@ -305,3 +317,50 @@ def validate_outbound_url(url: str, config: SSRFConfig | None = None) -> Validat
     """Convenience function to validate an outbound URL using OutboundUrlValidator (§60)."""
     validator = OutboundUrlValidator(config)
     return validator.validate_url(url)
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that connects directly to a validated IP while validating TLS against the original hostname."""
+
+    def __init__(
+        self,
+        pinned_ip: str,
+        server_hostname: str,
+        port: int = 443,
+        timeout: float = 10.0,
+        context: ssl.SSLContext | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(pinned_ip, port=port, timeout=timeout, context=context, **kwargs)
+        self._pinned_server_hostname = server_hostname
+        self._ssl_context = context if context is not None else ssl.create_default_context()
+
+    def connect(self) -> None:
+        super(http.client.HTTPSConnection, self).connect()
+        self.sock = self._ssl_context.wrap_socket(
+            self.sock,
+            server_hostname=self._pinned_server_hostname,
+        )
+
+
+def open_pinned_connection(
+    target: ValidatedTarget,
+    timeout: float = 10.0,
+    ssl_context: ssl.SSLContext | None = None,
+) -> http.client.HTTPConnection | http.client.HTTPSConnection:
+    """Create an HTTP or HTTPS connection pinned to pre-validated IP to eliminate DNS rebinding TOCTOU."""
+    pinned_ip = target.pinned_ip or target.host
+    if target.scheme == "https":
+        ctx = ssl_context or ssl.create_default_context()
+        return PinnedHTTPSConnection(
+            pinned_ip=pinned_ip,
+            server_hostname=target.host,
+            port=target.port,
+            timeout=timeout,
+            context=ctx,
+        )
+    return http.client.HTTPConnection(
+        host=pinned_ip,
+        port=target.port,
+        timeout=timeout,
+    )

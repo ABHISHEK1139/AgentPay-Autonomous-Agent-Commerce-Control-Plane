@@ -228,6 +228,7 @@ def test_webhook_handler_fails_closed_without_secret() -> None:
         "POST",
         "/api/v1/webhooks/payments",
         headers={
+            "content-type": "application/json",
             "x-webhook-signature": "deadbeef",
             "x-webhook-timestamp": str(int(time.time())),
         },

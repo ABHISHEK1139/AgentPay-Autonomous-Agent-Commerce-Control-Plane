@@ -181,18 +181,21 @@ def test_acp_adapter_validation_errors() -> None:
     with pytest.raises(MalformedPayloadError, match="buyer"):
         adapter.parse_payload({"acp_version": "1.0", "request_id": "r1"})
 
-    # Negative price
-    with pytest.raises(MalformedPayloadError, match="unit_price_minor"):
-        adapter.parse_payload(
-            {
-                "acp_version": "1.0",
-                "request_id": "r1",
-                "buyer": {"principal_id": "u", "agent_id": "a", "tenant_id": "t"},
-                "cart": {
-                    "items": [{"product_id": "p1", "unit_price_minor": -100, "currency": "INR"}]
-                },
-            }
-        )
+    # Zero and negative price
+    for invalid_p in (0, -100):
+        with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
+            adapter.parse_payload(
+                {
+                    "acp_version": "1.0",
+                    "request_id": "r1",
+                    "buyer": {"principal_id": "u", "agent_id": "a", "tenant_id": "t"},
+                    "cart": {
+                        "items": [
+                            {"product_id": "p1", "unit_price_minor": invalid_p, "currency": "INR"}
+                        ]
+                    },
+                }
+            )
 
     # Budget cap exceeded in domain model constructor
     req_over_budget = adapter.parse_payload(
@@ -463,19 +466,20 @@ def test_x402_adapter_validation_errors() -> None:
     with pytest.raises(UnsupportedProtocolVersionError):
         adapter.parse_payload({"x402_version": "0.5", "challenge_id": "c1"})
 
-    # Negative amount
-    with pytest.raises(MalformedPayloadError, match="negative"):
-        adapter.parse_payload(
-            {
-                "x402_version": "1.0",
-                "challenge_id": "c1",
-                "resource_uri": "https://foo.com",
-                "amount_minor": -10,
-                "agent_id": "a",
-                "principal_id": "p",
-                "tenant_id": "t",
-            }
-        )
+    # Zero and negative amount
+    for bad_amt in (0, -10):
+        with pytest.raises(MalformedPayloadError, match="Amount must be greater than zero"):
+            adapter.parse_payload(
+                {
+                    "x402_version": "1.0",
+                    "challenge_id": "c1",
+                    "resource_uri": "https://foo.com",
+                    "amount_minor": bad_amt,
+                    "agent_id": "a",
+                    "principal_id": "p",
+                    "tenant_id": "t",
+                }
+            )
 
 
 # ---------------------------------------------------------------------------

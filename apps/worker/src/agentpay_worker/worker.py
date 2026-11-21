@@ -11,6 +11,7 @@ from typing import Any
 
 from agentpay.application.services.event_bus import EventBus
 from agentpay.domain.approval import ApprovalStatus
+from agentpay.domain.errors import ApprovalConcurrencyError
 from agentpay.domain.payments import PaymentStatus
 from agentpay_worker.dispatcher import OutboxDispatcher
 
@@ -31,6 +32,9 @@ class BackgroundWorker:
         payment_timeout_seconds: int = 300,
         worker_id: str | None = None,
         outbox_lease_seconds: int = 30,
+        max_reconciliation_retries: int = 5,
+        reconciliation_initial_backoff_seconds: float = 2.0,
+        reconciliation_max_backoff_seconds: float = 60.0,
     ) -> None:
         self.outbox_repo = outbox_repo
         self.event_bus = event_bus or EventBus()
@@ -41,6 +45,11 @@ class BackgroundWorker:
         self.payment_timeout_seconds = payment_timeout_seconds
         self.worker_id = worker_id or f"wrk_{uuid.uuid4().hex[:12]}"
         self.outbox_lease_seconds = outbox_lease_seconds
+        self.max_reconciliation_retries = max_reconciliation_retries
+        self.reconciliation_initial_backoff_seconds = reconciliation_initial_backoff_seconds
+        self.reconciliation_max_backoff_seconds = reconciliation_max_backoff_seconds
+        self._reconciliation_retries: dict[str, int] = {}
+        self._reconciliation_next_retry: dict[str, datetime] = {}
 
         self.dispatcher = (
             OutboxDispatcher(
@@ -118,15 +127,45 @@ class BackgroundWorker:
         for attempt in attempts:
             attempt_time = getattr(attempt, "created_at", now)
             if attempt_time <= cutoff:
+                attempt_id = getattr(attempt, "attempt_id", "")
+                next_retry = self._reconciliation_next_retry.get(attempt_id)
+                if next_retry is not None and now < next_retry:
+                    continue
+
+                retries = self._reconciliation_retries.get(attempt_id, 0)
+                if retries >= self.max_reconciliation_retries:
+                    continue
+
                 try:
-                    self.payment_reconciler.reconcile_timeout(attempt)
-                    reconciled += 1
+                    result = self.payment_reconciler.reconcile_timeout(attempt)
+                    if getattr(result, "status", None) != PaymentStatus.UNKNOWN:
+                        reconciled += 1
+                        self._reconciliation_retries.pop(attempt_id, None)
+                        self._reconciliation_next_retry.pop(attempt_id, None)
+                    else:
+                        self._record_reconciliation_failure(attempt_id, now)
                 except Exception as exc:
+                    self._record_reconciliation_failure(attempt_id, now)
                     logger.warning(
-                        "Reconciliation failed for payment %s: %s", attempt.attempt_id, exc
+                        "Reconciliation failed for payment %s (attempt %d/%d): %s",
+                        attempt_id,
+                        self._reconciliation_retries.get(attempt_id, 1),
+                        self.max_reconciliation_retries,
+                        exc,
                     )
 
         return reconciled
+
+    def _record_reconciliation_failure(self, attempt_id: str, now: datetime) -> None:
+        if not attempt_id:
+            return
+        retries = self._reconciliation_retries.get(attempt_id, 0) + 1
+        self._reconciliation_retries[attempt_id] = retries
+        backoff_seconds = min(
+            self.reconciliation_initial_backoff_seconds * (2 ** (retries - 1)),
+            self.reconciliation_max_backoff_seconds,
+        )
+        self._reconciliation_next_retry[attempt_id] = now + timedelta(seconds=backoff_seconds)
 
     def _expire_stale_approvals(self) -> int:
         if self.approval_repo is None:
@@ -137,8 +176,13 @@ class BackgroundWorker:
         cutoff = now - timedelta(seconds=self.approval_ttl_seconds)
 
         approvals: list[Any] = []
-        if hasattr(self.approval_repo, "list_pending"):
-            approvals = self.approval_repo.list_pending()
+        if hasattr(self.approval_repo, "list_all_pending_for_maintenance"):
+            approvals = self.approval_repo.list_all_pending_for_maintenance()
+        elif hasattr(self.approval_repo, "list_pending"):
+            try:
+                approvals = self.approval_repo.list_pending()
+            except TypeError:
+                approvals = []
         elif hasattr(self.approval_repo, "_approvals"):
             with getattr(self.approval_repo, "_lock", threading.Lock()):
                 raw_values = list(self.approval_repo._approvals.values())
@@ -162,8 +206,22 @@ class BackgroundWorker:
                 try:
                     expired_app = app.expire(decided_at=now)
                     if hasattr(self.approval_repo, "save"):
-                        self.approval_repo.save(app.tenant_id, expired_app)
-                    expired_count += 1
+                        try:
+                            self.approval_repo.save(
+                                app.tenant_id,
+                                expired_app,
+                                expected_status=ApprovalStatus.PENDING,
+                            )
+                            expired_count += 1
+                        except TypeError:
+                            self.approval_repo.save(app.tenant_id, expired_app)
+                            expired_count += 1
+                except ApprovalConcurrencyError as exc:
+                    logger.debug(
+                        "Approval %s resolved concurrently before expiration: %s",
+                        getattr(app, "approval_id", "unknown"),
+                        exc,
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Failed to expire approval %s: %s",

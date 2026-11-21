@@ -109,7 +109,7 @@ jobs:
         run: >
           docker run --rm
           -v "${{ github.workspace }}:/repo"
-          zricethezav/gitleaks:latest
+          zricethezav/gitleaks:v8.21.2
           dir /repo --config /repo/.gitleaks.toml --no-banner
 
       - name: Dependency vulnerability audit (pip-audit against uv.lock)

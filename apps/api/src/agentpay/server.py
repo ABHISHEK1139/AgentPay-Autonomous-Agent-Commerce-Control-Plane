@@ -23,6 +23,14 @@ logger = logging.getLogger("agentpay.server")
 MAX_REQUEST_BODY_BYTES: int = 1024 * 1024  # 1 MiB payload limit (§62, B-SRV-01)
 
 
+DEFAULT_CORS_ALLOWED_ORIGINS: tuple[str, ...] = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
+
 def create_request_handler(
     app: AgentPayApiApp,
     static_dir: Path | None = None,
@@ -30,10 +38,13 @@ def create_request_handler(
 ) -> type[BaseHTTPRequestHandler]:
     """Factory creating an HTTP request handler bound to the specified application and static directory."""
 
-    origins = tuple(allowed_origins) if allowed_origins is not None else ("*",)
+    origins = (
+        tuple(allowed_origins) if allowed_origins is not None else DEFAULT_CORS_ALLOWED_ORIGINS
+    )
 
     class AgentPayHttpHandler(BaseHTTPRequestHandler):
         server_version = "AgentPay/0.1.0"
+        timeout = 10.0
 
         def log_message(self, format_str: str, *args: Any) -> None:
             logger.info(
@@ -43,13 +54,24 @@ def create_request_handler(
                 *args,
             )
 
+        def _send_security_headers(self) -> None:
+            self.send_header(
+                "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"
+            )
+            self.send_header(
+                "Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"
+            )
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+
         def _send_cors_headers(self) -> None:
             incoming_origin = self.headers.get("Origin", "").strip()
-            if "*" in origins:
-                self.send_header("Access-Control-Allow-Origin", "*")
-            elif incoming_origin and incoming_origin in origins:
+            if incoming_origin and incoming_origin in origins:
                 self.send_header("Access-Control-Allow-Origin", incoming_origin)
                 self.send_header("Vary", "Origin")
+            elif "*" in origins:
+                self.send_header("Access-Control-Allow-Origin", "*")
 
             self.send_header(
                 "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD"
@@ -60,18 +82,18 @@ def create_request_handler(
                 "X-Webhook-Signature, X-Webhook-Timestamp, X-Razorpay-Signature, "
                 "Stripe-Signature, Accept, Idempotency-Key",
             )
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
 
         def do_OPTIONS(self) -> None:
             incoming_origin = self.headers.get("Origin", "").strip()
             if "*" not in origins and incoming_origin not in origins:
                 self.send_response(403)
+                self._send_security_headers()
                 self.end_headers()
                 return
 
             self.send_response(204)
             self._send_cors_headers()
+            self._send_security_headers()
             self.end_headers()
 
         def do_GET(self) -> None:
@@ -137,6 +159,7 @@ def create_request_handler(
                 resp_bytes = json.dumps(err_resp).encode("utf-8")
                 self.send_response(400)
                 self._send_cors_headers()
+                self._send_security_headers()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(resp_bytes)))
                 self.send_header("Connection", "close")
@@ -157,6 +180,7 @@ def create_request_handler(
                 resp_bytes = json.dumps(err_resp).encode("utf-8")
                 self.send_response(413)
                 self._send_cors_headers()
+                self._send_security_headers()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(resp_bytes)))
                 self.send_header("Connection", "close")
@@ -166,10 +190,59 @@ def create_request_handler(
                 self._drain_and_close()
                 return
 
+            # Strict Content-Type validation on mutating requests with non-empty body (§12, Feature 17)
+            if method in ("POST", "PUT", "PATCH") and content_length > 0:
+                ct = self.headers.get("Content-Type", "").strip().lower()
+                if not ct.startswith("application/json"):
+                    err_resp = {
+                        "error": {
+                            "code": "UNSUPPORTED_MEDIA_TYPE",
+                            "message": "Content-Type must be application/json for mutating requests",
+                            "request_id": self.headers.get(
+                                "x-request-id", "req_unsupported_media_type"
+                            ),
+                        }
+                    }
+                    resp_bytes = json.dumps(err_resp).encode("utf-8")
+                    self.send_response(415)
+                    self._send_cors_headers()
+                    self._send_security_headers()
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp_bytes)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(resp_bytes)
+                    self.wfile.flush()
+                    self._drain_and_close()
+                    return
+
             json_body: dict[str, Any] | None = None
             raw_bytes: bytes | None = None
             if content_length > 0:
-                raw_bytes = self.rfile.read(content_length)
+                try:
+                    raw_bytes = self.rfile.read(content_length)
+                except TimeoutError:
+                    err_resp = {
+                        "error": {
+                            "code": "REQUEST_TIMEOUT",
+                            "message": "Request read timed out",
+                            "request_id": self.headers.get("x-request-id", "req_timeout"),
+                        }
+                    }
+                    resp_bytes = json.dumps(err_resp).encode("utf-8")
+                    self.send_response(408)
+                    self._send_cors_headers()
+                    self._send_security_headers()
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(resp_bytes)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(resp_bytes)
+                    self.wfile.flush()
+                    self.close_connection = True
+                    self._drain_and_close()
+                    return
+
                 try:
                     json_body = json.loads(raw_bytes.decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
@@ -183,6 +256,7 @@ def create_request_handler(
                     resp_bytes = json.dumps(err_resp).encode("utf-8")
                     self.send_response(422)
                     self._send_cors_headers()
+                    self._send_security_headers()
                     self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(resp_bytes)))
                     self.send_header("Connection", "close")
@@ -206,11 +280,26 @@ def create_request_handler(
             resp_bytes = json.dumps(response_body).encode("utf-8")
             self.send_response(status_code)
             self._send_cors_headers()
+            self._send_security_headers()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp_bytes)))
 
+            existing_lower = {
+                "content-type",
+                "content-length",
+                "access-control-allow-origin",
+                "access-control-allow-methods",
+                "access-control-allow-headers",
+                "vary",
+                "content-security-policy",
+                "strict-transport-security",
+                "x-content-type-options",
+                "x-frame-options",
+                "referrer-policy",
+            }
             for hk, hv in response.headers.items():
-                self.send_header(hk, hv)
+                if hk.lower() not in existing_lower:
+                    self.send_header(hk, hv)
 
             self.end_headers()
             self.wfile.write(resp_bytes)

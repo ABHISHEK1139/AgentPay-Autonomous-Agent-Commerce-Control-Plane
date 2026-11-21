@@ -52,6 +52,7 @@ from agentpay.adapters.stripe_payment_provider import InMemoryStripeSimulator
 from agentpay.api.app import AgentPayApiApp
 from agentpay.application.ports.approval_port import DecisionEngine
 from agentpay.application.ports.payment_port import PaymentProvider
+from agentpay.application.services.abuse_detector import AbuseDetector
 from agentpay.application.services.approval_service import ApprovalService
 from agentpay.application.services.identity_service import AgentAuthorizationService
 from agentpay.application.use_cases.purchase_flow import PurchaseOrchestrator
@@ -361,6 +362,7 @@ def create_app(
     require_observability_auth: bool | None = None,
     payment_provider: PaymentProvider | None = None,
     decision_engine: DecisionEngine | None = None,
+    abuse_detector: AbuseDetector | None = None,
 ) -> AgentPayApiApp:
     """Instantiate and wire a complete AgentPay application instance (§8, §13, §49, AP-005).
 
@@ -435,6 +437,7 @@ def create_app(
     audit_ledger: Any
     webhook_event_repo: Any
     emergency_pause_store: Any
+    session_factory: Any | None = None
 
     if cfg.database_url:
         engine = create_database_engine(cfg.database_url)
@@ -613,6 +616,12 @@ def create_app(
             credential_repo=credential_repo,
         )
 
+    if abuse_detector is None:
+        abuse_detector = AbuseDetector(
+            audit_ledger=audit_ledger,
+            agent_repo=agent_repo,
+        )
+
     app = AgentPayApiApp(
         orchestrator=orchestrator,
         credential_repo=credential_repo,
@@ -623,5 +632,7 @@ def create_app(
         webhook_secret=cfg.razorpay_webhook_secret,
         require_observability_auth=cfg.require_observability_auth,
         config=cfg,
+        abuse_detector=abuse_detector,
+        session_factory=session_factory,
     )
     return app

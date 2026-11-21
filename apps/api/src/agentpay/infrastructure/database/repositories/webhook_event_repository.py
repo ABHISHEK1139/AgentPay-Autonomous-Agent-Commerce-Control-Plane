@@ -9,7 +9,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpay.application.ports.payment_port import ProviderWebhookEventRepository
-from agentpay.domain.payments import ProviderWebhookEvent, WebhookEventStatus
+from agentpay.domain.payments import (
+    TRANSIENT_WEBHOOK_ERROR_CODES,
+    ProviderWebhookEvent,
+    WebhookEventStatus,
+)
 from agentpay.infrastructure.database.models.provider_webhook_event import (
     ProviderWebhookEventModel,
 )
@@ -129,9 +133,9 @@ class SqlAlchemyProviderWebhookEventRepository(
                 existing = session.scalar(stmt)
                 if existing is not None:
                     event = existing.to_domain()
-                    if (
-                        event.status == WebhookEventStatus.FAILED
-                        and event.last_error_code == "TEMPORARY_FAILURE"
+                    if event.status == WebhookEventStatus.FAILED and (
+                        event.last_error_code in TRANSIENT_WEBHOOK_ERROR_CODES
+                        or event.last_error_code == "TEMPORARY_FAILURE"
                     ):
                         retried = event.mark_processing()
                         result = session.execute(
@@ -163,9 +167,9 @@ class SqlAlchemyProviderWebhookEventRepository(
                 )
                 if existing_any is not None:
                     event = existing_any.to_domain()
-                    if (
-                        event.status == WebhookEventStatus.FAILED
-                        and event.last_error_code == "TEMPORARY_FAILURE"
+                    if event.status == WebhookEventStatus.FAILED and (
+                        event.last_error_code in TRANSIENT_WEBHOOK_ERROR_CODES
+                        or event.last_error_code == "TEMPORARY_FAILURE"
                     ):
                         retried = event.mark_processing()
                         existing_any.status = retried.status.value
@@ -179,9 +183,9 @@ class SqlAlchemyProviderWebhookEventRepository(
                 existing_pk = session.get(ProviderWebhookEventModel, event.id)
                 if existing_pk is not None:
                     event = existing_pk.to_domain()
-                    if (
-                        event.status == WebhookEventStatus.FAILED
-                        and event.last_error_code == "TEMPORARY_FAILURE"
+                    if event.status == WebhookEventStatus.FAILED and (
+                        event.last_error_code in TRANSIENT_WEBHOOK_ERROR_CODES
+                        or event.last_error_code == "TEMPORARY_FAILURE"
                     ):
                         retried = event.mark_processing()
                         existing_pk.status = retried.status.value

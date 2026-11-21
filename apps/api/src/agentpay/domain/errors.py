@@ -214,6 +214,12 @@ class InvalidCommerceError(DomainError):
     code = "INVALID_COMMERCE"
 
 
+class CartAlreadyCheckedOutError(InvalidCommerceError):
+    """Raised when an operation attempts to check out a cart that is already processing, checked out, or abandoned."""
+
+    code = "CART_ALREADY_CHECKED_OUT"
+
+
 class InsufficientInventoryError(InvalidCommerceError):
     code = "INSUFFICIENT_INVENTORY"
 

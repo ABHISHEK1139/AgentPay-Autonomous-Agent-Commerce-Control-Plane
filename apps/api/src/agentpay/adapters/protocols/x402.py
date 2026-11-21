@@ -9,6 +9,8 @@ Provides:
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -104,6 +106,9 @@ X402SettlementProof = X402PaymentResponse
 class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]):
     """Adapter translating HTTP 402 micro-payment challenges to and from AgentPay."""
 
+    def __init__(self, signing_secret: str = "default_x402_signing_secret_dev") -> None:
+        self.signing_secret = signing_secret
+
     def parse_payload(self, raw_data: Any) -> X402ChallengeRequest:
         """Parse raw x402 dictionary payload into validated X402ChallengeRequest."""
         if not isinstance(raw_data, dict) or not raw_data:
@@ -137,8 +142,8 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
             raise MalformedPayloadError(
                 f"amount_minor must be an integer, got {type(raw_amt).__name__}"
             )
-        if raw_amt < 0:
-            raise MalformedPayloadError("amount_minor cannot be negative")
+        if raw_amt <= 0:
+            raise MalformedPayloadError("Amount must be greater than zero (amount_minor)")
         amt = raw_amt
 
         raw_curr = raw_data.get("currency", "INR")
@@ -178,8 +183,8 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
             raise MalformedPayloadError(
                 f"amount_minor must be an integer, got {type(request.amount_minor).__name__}"
             )
-        if request.amount_minor < 0:
-            raise MalformedPayloadError("amount_minor cannot be negative")
+        if request.amount_minor <= 0:
+            raise MalformedPayloadError("Amount must be greater than zero (amount_minor)")
 
         effective_tenant = request.tenant_id or (tenant_id or "")
         if (
@@ -239,9 +244,18 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
                 "tx": result.payment.attempt_id if result.payment else "",
                 "exp": int(exp_time.timestamp()),
             }
-            tok = "x402_" + base64.urlsafe_b64encode(json.dumps(claims).encode("utf-8")).decode(
-                "utf-8"
-            ).rstrip("=")
+            b64_claims = (
+                base64.urlsafe_b64encode(json.dumps(claims).encode("utf-8"))
+                .decode("utf-8")
+                .rstrip("=")
+            )
+            payload_prefix = f"x402_{b64_claims}"
+            sig = hmac.new(
+                self.signing_secret.encode("utf-8"),
+                payload_prefix.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            tok = f"{payload_prefix}.{sig}"
 
         return X402PaymentResponse(
             x402_version=request.x402_version,
@@ -252,3 +266,45 @@ class X402Adapter(BaseProtocolAdapter[X402ChallengeRequest, X402PaymentResponse]
             expires_at=expires_str,
             rejection_reason=result.rejection_reason,
         )
+
+    def verify_settlement_token(self, token: str, secret: str | None = None) -> bool:
+        """Validate token format, verify HMAC-SHA256 signature in constant time, and check exp timestamp."""
+        if not token or "." not in token:
+            return False
+        parts = token.rsplit(".", 1)
+        if len(parts) != 2:
+            return False
+        payload_prefix, sig = parts[0], parts[1]
+        if not payload_prefix.startswith("x402_"):
+            return False
+
+        effective_secret = secret if secret is not None else self.signing_secret
+        expected_sig = hmac.new(
+            effective_secret.encode("utf-8"),
+            payload_prefix.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+        if not hmac.compare_digest(sig, expected_sig):
+            return False
+
+        b64_claims = payload_prefix[5:]
+        padding = 4 - (len(b64_claims) % 4)
+        if padding != 4:
+            b64_claims += "=" * padding
+
+        try:
+            raw_claims = base64.urlsafe_b64decode(b64_claims.encode("utf-8"))
+            claims = json.loads(raw_claims.decode("utf-8"))
+            if not isinstance(claims, dict):
+                return False
+            exp = claims.get("exp")
+            if not isinstance(exp, (int, float)):
+                return False
+            now_ts = datetime.now(UTC).timestamp()
+            if now_ts >= exp:
+                return False
+        except Exception:
+            return False
+
+        return True

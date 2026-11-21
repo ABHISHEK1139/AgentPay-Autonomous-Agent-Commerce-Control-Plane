@@ -3,9 +3,17 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:8000 http://127.0.0.1:8000 ws://localhost:3000 ws://127.0.0.1:3000; img-src 'self' data:; font-src 'self' data:; object-src 'none'; base-uri 'self';"
+    />
     <title>AgentPay Control Center — Autonomous Agent Commerce Control Plane</title>
-    <!-- Tailwind CSS CDN for instant styling in dev & standalone browser inspection -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Pinned Tailwind CSS CDN with Subresource Integrity (SRI) -->
+    <script
+      src="https://cdn.tailwindcss.com/3.4.16"
+      integrity="sha384-mS5Uq7sE90lgbBDN8xgf34ibEgbZo4gB3tfLY40ZRle+M188BQw8onzNHg6GUZaA"
+      crossorigin="anonymous"
+    ></script>
     <script>
       tailwind.config = {
         theme: {

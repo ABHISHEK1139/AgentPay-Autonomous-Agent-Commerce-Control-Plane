@@ -554,7 +554,11 @@ def test_handle_request_with_headers_tuple_return() -> None:
     app = AgentPayApiApp(orchestrator=orch, mutating_agent_capacity=1)
     client = ApiTestClient(app).as_buyer(principal_id="user_01")
     token = client.get_or_create_token("tenant_01", principal_id="user_01")
-    headers = {"x-tenant-id": "tenant_01", "authorization": f"Bearer {token}"}
+    headers = {
+        "content-type": "application/json",
+        "x-tenant-id": "tenant_01",
+        "authorization": f"Bearer {token}",
+    }
 
     # 1st request succeeds
     status, _body, resp_hdrs = app.handle_request_with_headers(

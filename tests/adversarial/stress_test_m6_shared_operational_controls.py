@@ -41,7 +41,7 @@ def run_probe_1_multi_instance_shared_pause() -> bool:
 
     orch1, *_ = setup_orchestrator()
     app1 = AgentPayApiApp(orchestrator=orch1, emergency_pause_store=shared_store)
-    client1 = ApiTestClient(app1).as_admin()
+    client1 = ApiTestClient(app1).as_system_admin()
 
     orch2, *_ = setup_orchestrator()
     app2 = AgentPayApiApp(orchestrator=orch2, emergency_pause_store=shared_store)

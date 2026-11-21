@@ -60,17 +60,35 @@ class TokenBudgetTracker:
         self._cost_usage: dict[str, int] = {}
         self._limits: dict[str, BudgetLimits] = {}
 
-    def set_limits(self, entity_id: str, limits: BudgetLimits) -> None:
+    def set_limits(self, tenant_id: str, limits: BudgetLimits, agent_id: str | None = None) -> None:
+        """Set budget limits for a tenant or agent within a tenant partition (§23, §49)."""
         with self._lock:
-            self._limits[entity_id] = limits
+            if agent_id is not None:
+                key = f"agent:{tenant_id}:{agent_id}"
+            elif tenant_id.startswith("agent:") or tenant_id.startswith("tenant:"):
+                key = tenant_id
+            else:
+                key = f"tenant:{tenant_id}"
+            self._limits[key] = limits
 
-    def _get_limits(self, entity_id: str) -> BudgetLimits:
-        return self._limits.get(entity_id, self._default_limits)
+    def _get_limits(self, tenant_id: str, agent_id: str | None = None) -> BudgetLimits:
+        if agent_id is not None:
+            key = f"agent:{tenant_id}:{agent_id}"
+        elif tenant_id.startswith("agent:") or tenant_id.startswith("tenant:"):
+            key = tenant_id
+        else:
+            key = f"tenant:{tenant_id}"
+        return self._limits.get(key, self._default_limits)
 
-    def _get_entity_limits(self, namespaced_key: str, raw_id: str) -> BudgetLimits:
-        if namespaced_key in self._limits:
-            return self._limits[namespaced_key]
-        return self._limits.get(raw_id, self._default_limits)
+    def _get_entity_limits(self, tenant_id: str, agent_id: str | None = None) -> BudgetLimits:
+        """Retrieve partition-isolated limits strictly without un-namespaced fallback (§23, §49)."""
+        if agent_id is not None:
+            key = f"agent:{tenant_id}:{agent_id}"
+        elif tenant_id.startswith("agent:") or tenant_id.startswith("tenant:"):
+            key = tenant_id
+        else:
+            key = f"tenant:{tenant_id}"
+        return self._limits.get(key, self._default_limits)
 
     def has_budget(
         self,
@@ -83,8 +101,8 @@ class TokenBudgetTracker:
         with self._lock:
             tenant_key = f"tenant:{tenant_id}"
             agent_key = f"agent:{tenant_id}:{agent_id}"
-            t_limits = self._get_entity_limits(tenant_key, tenant_id)
-            a_limits = self._get_entity_limits(agent_key, agent_id)
+            t_limits = self._get_entity_limits(tenant_id)
+            a_limits = self._get_entity_limits(tenant_id, agent_id)
 
             t_tokens = self._token_usage.get(tenant_key, 0)
             t_cost = self._cost_usage.get(tenant_key, 0)
@@ -110,8 +128,8 @@ class TokenBudgetTracker:
         with self._lock:
             tenant_key = f"tenant:{tenant_id}"
             agent_key = f"agent:{tenant_id}:{agent_id}"
-            t_limits = self._get_entity_limits(tenant_key, tenant_id)
-            a_limits = self._get_entity_limits(agent_key, agent_id)
+            t_limits = self._get_entity_limits(tenant_id)
+            a_limits = self._get_entity_limits(tenant_id, agent_id)
 
             t_tokens = self._token_usage.get(tenant_key, 0)
             t_cost = self._cost_usage.get(tenant_key, 0)
@@ -180,31 +198,21 @@ class TokenBudgetTracker:
             self._token_usage[agent_key] = self._token_usage.get(agent_key, 0) + tokens
             self._cost_usage[agent_key] = self._cost_usage.get(agent_key, 0) + cost_minor_units
 
-    def get_usage(self, entity_id: str) -> tuple[int, int]:
-        """Returns (tokens_used, cost_minor_units_used) for an entity (§23).
+    def get_usage(self, tenant_id: str, agent_id: str | None = None) -> tuple[int, int]:
+        """Returns (tokens_used, cost_minor_units_used) for a tenant or agent within a tenant (§23).
 
-        Supports exact match, tenant keys ('tenant:{entity_id}'), and agent suffixes.
+        Eliminates suffix matching to guarantee multi-tenant key isolation (§49, §50).
         """
         with self._lock:
-            if entity_id in self._token_usage:
-                return (self._token_usage[entity_id], self._cost_usage.get(entity_id, 0))
+            if agent_id is not None:
+                key = f"agent:{tenant_id}:{agent_id}"
+                return (self._token_usage.get(key, 0), self._cost_usage.get(key, 0))
 
-            tenant_key = f"tenant:{entity_id}"
-            if tenant_key in self._token_usage:
-                return (self._token_usage[tenant_key], self._cost_usage.get(tenant_key, 0))
-
-            matching_agent_keys = [
-                k
-                for k in self._token_usage
-                if k.startswith("agent:")
-                and (k.endswith(f":{entity_id}") or k == f"agent:{entity_id}")
-            ]
-            if matching_agent_keys:
-                total_t = sum(self._token_usage.get(k, 0) for k in matching_agent_keys)
-                total_c = sum(self._cost_usage.get(k, 0) for k in matching_agent_keys)
-                return (total_t, total_c)
-
-            return (0, 0)
+            if tenant_id.startswith("agent:") or tenant_id.startswith("tenant:"):
+                key = tenant_id
+            else:
+                key = f"tenant:{tenant_id}"
+            return (self._token_usage.get(key, 0), self._cost_usage.get(key, 0))
 
     def reset(self) -> None:
         """Resets all usage counters under lock (§23)."""

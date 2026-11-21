@@ -76,8 +76,17 @@ def test_live_server_health_and_openapi(live_server: tuple[str, int]) -> None:
         assert body["openapi"] == "3.2.0"
         assert "/api/v1/actions" in body["paths"]
 
-    # 3. Metrics exposition
-    req_metrics = urllib.request.Request(f"{base_url}/api/v1/metrics")
+    # 3. Metrics exposition: unauthenticated access fails closed (401), authenticated admin succeeds
+    req_metrics_unauth = urllib.request.Request(f"{base_url}/api/v1/metrics")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req_metrics_unauth, timeout=5)
+    assert exc_info.value.code == 401
+    exc_info.value.close()
+
+    req_metrics = urllib.request.Request(
+        f"{base_url}/api/v1/metrics",
+        headers={"Authorization": "Bearer test_bearer_admin_token"},
+    )
     with urllib.request.urlopen(req_metrics, timeout=5) as resp:
         assert resp.status == 200
         metrics_body = json.loads(resp.read().decode("utf-8"))
@@ -99,7 +108,7 @@ def test_live_server_cors_preflight(live_server: tuple[str, int]) -> None:
     )
     with urllib.request.urlopen(req, timeout=5) as resp:
         assert resp.status == 204
-        assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+        assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
         assert "POST" in resp.headers.get("Access-Control-Allow-Methods", "")
         assert resp.headers.get("X-Content-Type-Options") == "nosniff"
 

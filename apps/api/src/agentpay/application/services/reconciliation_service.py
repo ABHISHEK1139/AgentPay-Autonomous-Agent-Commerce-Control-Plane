@@ -95,7 +95,7 @@ class PaymentReconciler:
         tenant_id: str,
         event_type: str,
         payload: dict[str, Any],
-        trace_id: str = "",
+        trace_id: str | None = None,
     ) -> dict[str, Any]:
         """Reconcile asynchronous payment events from external provider webhooks (§61).
 
@@ -104,6 +104,7 @@ class PaymentReconciler:
         - payment.failed: marks attempt failed, cancels order, compensation-releases inventory, logs audit.
         - payment.refunded: marks attempt refunded, creates Refund, compensation-restocks inventory, logs audit.
         """
+        effective_trace_id = trace_id.strip() if (trace_id and trace_id.strip()) else None
         raw_data = payload.get("data")
         data_dict: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
         provider = str(payload.get("provider") or "").strip().lower()
@@ -181,7 +182,7 @@ class PaymentReconciler:
                         "provider_payment_id": prov_tx_id or candidate_attempt_id,
                         "event_type": event_type,
                     },
-                    trace_id=trace_id,
+                    trace_id=effective_trace_id,
                 )
             return {
                 "status": "QUARANTINED",
@@ -213,27 +214,36 @@ class PaymentReconciler:
             or "Payment failed via webhook notification"
         )
 
-        # Locate associated Order if order_repo configured
-        order: Order | None = None
+        # Locate associated Orders if order_repo configured
+        orders: list[Order] = []
         if self._order_repo is not None:
-            order_id = str(
-                payload.get("order_id") or data_dict.get("order_id") or attempt.intent_id or ""
-            ).strip()
-            if order_id:
-                order = self._order_repo.get(effective_tenant, order_id)
-            if order is None:
+            if hasattr(self._order_repo, "find_all_by_payment_attempt"):
+                orders = self._order_repo.find_all_by_payment_attempt(
+                    effective_tenant, effective_attempt_id
+                )
+            if not orders:
+                order_id = str(
+                    payload.get("order_id") or data_dict.get("order_id") or attempt.intent_id or ""
+                ).strip()
+                if order_id:
+                    single = self._order_repo.get(effective_tenant, order_id)
+                    if single is not None:
+                        orders = [single]
+            if not orders:
                 if hasattr(self._order_repo, "find_by_payment_attempt"):
-                    order = self._order_repo.find_by_payment_attempt(
+                    single = self._order_repo.find_by_payment_attempt(
                         effective_tenant, effective_attempt_id
                     )
+                    if single is not None:
+                        orders = [single]
                 elif hasattr(self._order_repo, "_orders"):
                     for candidate in self._order_repo._orders.get(effective_tenant, {}).values():
                         if (
                             candidate.payment_attempt_id == effective_attempt_id
                             or candidate.order_id == effective_attempt_id
                         ):
-                            order = candidate
-                            break
+                            orders.append(candidate)
+        order: Order | None = orders[0] if orders else None
 
         refund: Refund | None = None
 
@@ -327,7 +337,7 @@ class PaymentReconciler:
                         "status": PaymentStatus.CAPTURED.value,
                     },
                     agent_id=order.agent_id if order else None,
-                    trace_id=trace_id,
+                    trace_id=effective_trace_id,
                 )
 
         elif event_type == "payment.failed":
@@ -341,18 +351,21 @@ class PaymentReconciler:
                 )
 
             if attempt.status in (PaymentStatus.FAILED, PaymentStatus.DECLINED):
-                if (
-                    order is not None
-                    and self._order_repo is not None
-                    and order.status is OrderStatus.PENDING_PAYMENT
-                ):
-                    cancelled_order = order.cancel(reason=failure_reason)
-                    self._order_repo.save(effective_tenant, cancelled_order)
-                    order = cancelled_order
-                    if self._inventory_repo is not None:
-                        self._inventory_repo.release(
-                            effective_tenant, order.variant_id, order.quantity
-                        )
+                if orders and self._order_repo is not None:
+                    updated_orders: list[Order] = []
+                    for ord_item in orders:
+                        if ord_item.status is OrderStatus.PENDING_PAYMENT:
+                            cancelled_ord = ord_item.cancel(reason=failure_reason)
+                            self._order_repo.save(effective_tenant, cancelled_ord)
+                            updated_orders.append(cancelled_ord)
+                            if self._inventory_repo is not None:
+                                self._inventory_repo.release(
+                                    effective_tenant, ord_item.variant_id, ord_item.quantity
+                                )
+                        else:
+                            updated_orders.append(ord_item)
+                    orders = updated_orders
+                    order = orders[0] if orders else None
                 return {
                     "status": "PROCESSED",
                     "event_type": event_type,
@@ -369,17 +382,36 @@ class PaymentReconciler:
             )
             self._repo.save(effective_tenant, updated_attempt)
 
-            if order is not None and self._order_repo is not None:
-                if order.status is OrderStatus.PENDING_PAYMENT:
-                    cancelled_order = order.cancel(reason=failure_reason)
-                    self._order_repo.save(effective_tenant, cancelled_order)
-                    order = cancelled_order
+            if orders and self._order_repo is not None:
+                updated_orders = []
+                for ord_item in orders:
+                    if ord_item.status is OrderStatus.PENDING_PAYMENT:
+                        cancelled_ord = ord_item.cancel(reason=failure_reason)
+                        self._order_repo.save(effective_tenant, cancelled_ord)
+                        updated_orders.append(cancelled_ord)
 
-                    # SAGA compensation: release reserved inventory
-                    if self._inventory_repo is not None:
-                        self._inventory_repo.release(
-                            effective_tenant, order.variant_id, order.quantity
-                        )
+                        # SAGA compensation: release reserved inventory
+                        if self._inventory_repo is not None:
+                            self._inventory_repo.release(
+                                effective_tenant, ord_item.variant_id, ord_item.quantity
+                            )
+                        if self._audit_ledger is not None:
+                            self._audit_ledger.record_event(
+                                event_type=AuditEventType.ORDER_CANCELLED,
+                                action_id=attempt.intent_id,
+                                tenant_id=effective_tenant,
+                                actor="provider_webhook",
+                                data={
+                                    "order_id": ord_item.order_id,
+                                    "reason": failure_reason,
+                                },
+                                agent_id=ord_item.agent_id,
+                                trace_id=effective_trace_id,
+                            )
+                    else:
+                        updated_orders.append(ord_item)
+                orders = updated_orders
+                order = orders[0] if orders else None
             elif self._inventory_repo is not None:
                 variant_id = str(payload.get("variant_id") or data_dict.get("variant_id") or "")
                 if variant_id:
@@ -399,21 +431,8 @@ class PaymentReconciler:
                         "status": PaymentStatus.FAILED.value,
                     },
                     agent_id=order.agent_id if order else None,
-                    trace_id=trace_id,
+                    trace_id=effective_trace_id,
                 )
-                if order is not None and order.status is OrderStatus.CANCELLED:
-                    self._audit_ledger.record_event(
-                        event_type=AuditEventType.ORDER_CANCELLED,
-                        action_id=attempt.intent_id,
-                        tenant_id=effective_tenant,
-                        actor="provider_webhook",
-                        data={
-                            "order_id": order.order_id,
-                            "reason": failure_reason,
-                        },
-                        agent_id=order.agent_id,
-                        trace_id=trace_id,
-                    )
 
         elif event_type == "payment.refunded":
             if attempt.status not in (
@@ -490,9 +509,10 @@ class PaymentReconciler:
                 refund_amount = _Money(
                     minor_units=refund_minor_raw, currency=attempt.amount.currency
                 )
+                cumulative_refunded_minor = prior_refunded_minor + refund_minor_raw
                 target_status = (
                     PaymentStatus.REFUNDED
-                    if refund_minor_raw == attempt.amount.minor_units
+                    if cumulative_refunded_minor == attempt.amount.minor_units
                     else PaymentStatus.PARTIALLY_REFUNDED
                 )
             else:
@@ -523,32 +543,34 @@ class PaymentReconciler:
 
             # SAGA restock if applicable. A partial payment refund does not
             # cancel the order or restock inventory; only a full REFUNDED does.
-            if (
-                order is not None
-                and self._order_repo is not None
-                and target_status is PaymentStatus.REFUNDED
-            ):
-                if order.status is OrderStatus.CONFIRMED:
-                    refunded_order = Order(
-                        order_id=order.order_id,
-                        tenant_id=order.tenant_id,
-                        merchant_id=order.merchant_id,
-                        buyer_id=order.buyer_id,
-                        agent_id=order.agent_id,
-                        variant_id=order.variant_id,
-                        quantity=order.quantity,
-                        total_amount=order.total_amount,
-                        status=OrderStatus.REFUNDED,
-                        payment_attempt_id=order.payment_attempt_id,
-                        created_at=order.created_at,
-                    )
-                    self._order_repo.save(effective_tenant, refunded_order)
-                    order = refunded_order
-
-                    if self._inventory_repo is not None:
-                        self._inventory_repo.release(
-                            effective_tenant, order.variant_id, order.quantity
+            if orders and self._order_repo is not None and target_status is PaymentStatus.REFUNDED:
+                updated_orders = []
+                for ord_item in orders:
+                    if ord_item.status is OrderStatus.CONFIRMED:
+                        refunded_order = Order(
+                            order_id=ord_item.order_id,
+                            tenant_id=ord_item.tenant_id,
+                            merchant_id=ord_item.merchant_id,
+                            buyer_id=ord_item.buyer_id,
+                            agent_id=ord_item.agent_id,
+                            variant_id=ord_item.variant_id,
+                            quantity=ord_item.quantity,
+                            total_amount=ord_item.total_amount,
+                            status=OrderStatus.REFUNDED,
+                            payment_attempt_id=ord_item.payment_attempt_id,
+                            created_at=ord_item.created_at,
                         )
+                        self._order_repo.save(effective_tenant, refunded_order)
+                        updated_orders.append(refunded_order)
+
+                        if self._inventory_repo is not None:
+                            self._inventory_repo.release(
+                                effective_tenant, ord_item.variant_id, ord_item.quantity
+                            )
+                    else:
+                        updated_orders.append(ord_item)
+                orders = updated_orders
+                order = orders[0] if orders else None
             elif self._inventory_repo is not None and target_status is PaymentStatus.REFUNDED:
                 variant_id = str(payload.get("variant_id") or data_dict.get("variant_id") or "")
                 if variant_id:
@@ -570,7 +592,7 @@ class PaymentReconciler:
                         "status": target_status.value,
                     },
                     agent_id=order.agent_id if order else None,
-                    trace_id=trace_id,
+                    trace_id=effective_trace_id,
                 )
 
         else:

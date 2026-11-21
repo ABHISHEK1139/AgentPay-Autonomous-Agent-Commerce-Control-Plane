@@ -128,9 +128,14 @@ class AppConfig:
     stripe_webhook_secret: str | None = None
 
     # Security & Observability
-    require_observability_auth: bool = False
+    require_observability_auth: bool = True
     log_level: str = "INFO"
-    cors_allowed_origins: tuple[str, ...] = ("*",)
+    cors_allowed_origins: tuple[str, ...] = (
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    )
 
     # Model / AI gateway credentials, OrcaRouter & OpenRouter (§23)
     llm_api_key: str | None = None
@@ -352,8 +357,7 @@ class AppConfig:
         stripe_wh_secret = e.get("STRIPE_WEBHOOK_SECRET") or e.get("AGENTPAY_WEBHOOK_SECRET")
 
         # 6. Observability & AI
-        default_obs = environment in (Environment.PRODUCTION, Environment.SANDBOX)
-        req_obs = _parse_bool(e.get("AGENTPAY_REQUIRE_OBSERVABILITY_AUTH"), default=default_obs)
+        req_obs = _parse_bool(e.get("AGENTPAY_REQUIRE_OBSERVABILITY_AUTH"), default=True)
         log_level = e.get("AGENTPAY_LOG_LEVEL", "INFO").strip().upper()
         raw_cors = e.get("AGENTPAY_CORS_ALLOWED_ORIGINS")
         if raw_cors:
@@ -361,7 +365,12 @@ class AppConfig:
         elif environment == Environment.PRODUCTION:
             cors_origins = ()
         else:
-            cors_origins = ("*",)
+            cors_origins = (
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+            )
         llm_key = e.get("LLM_API_KEY")
         orcarouter_key = e.get("ORCAROUTER_API_KEY") or llm_key
         orcarouter_base = (e.get("ORCAROUTER_BASE_URL") or "https://api.orcarouter.ai/v1").strip()

@@ -19,6 +19,7 @@ class CartStatus(StrEnum):
     """Lifecycle state of a shopping cart (ADR-0006)."""
 
     ACTIVE = "ACTIVE"
+    PROCESSING = "PROCESSING"
     CHECKED_OUT = "CHECKED_OUT"
     ABANDONED = "ABANDONED"
 
@@ -172,8 +173,22 @@ class Cart:
         items = tuple(item for item in self.items if item.variant_id != variant_id)
         return replace(self, items=items, updated_at=now or datetime.now(UTC))
 
-    def mark_checked_out(self, now: datetime | None = None) -> Cart:
+    def mark_processing(self, now: datetime | None = None) -> Cart:
         if self.status is not CartStatus.ACTIVE:
+            raise InvalidCommerceError(
+                f"Cannot transition cart in status '{self.status.value}' to PROCESSING"
+            )
+        return replace(self, status=CartStatus.PROCESSING, updated_at=now or datetime.now(UTC))
+
+    def mark_active(self, now: datetime | None = None) -> Cart:
+        if self.status is not CartStatus.PROCESSING:
+            raise InvalidCommerceError(
+                f"Cannot transition cart in status '{self.status.value}' to ACTIVE"
+            )
+        return replace(self, status=CartStatus.ACTIVE, updated_at=now or datetime.now(UTC))
+
+    def mark_checked_out(self, now: datetime | None = None) -> Cart:
+        if self.status not in (CartStatus.ACTIVE, CartStatus.PROCESSING):
             raise InvalidCommerceError(f"Cannot check out cart in status '{self.status.value}'")
         return replace(self, status=CartStatus.CHECKED_OUT, updated_at=now or datetime.now(UTC))
 

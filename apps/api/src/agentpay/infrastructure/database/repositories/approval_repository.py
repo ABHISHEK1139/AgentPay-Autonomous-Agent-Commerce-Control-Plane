@@ -80,7 +80,12 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                 rowcount = res.rowcount if isinstance(res, CursorResult) else 0
                 if rowcount == 0:
                     session.expire_all()
-                    current = session.get(ApprovalModel, approval.approval_id)
+                    current = session.scalar(
+                        select(ApprovalModel).where(
+                            ApprovalModel.tenant_id == tenant_id,
+                            ApprovalModel.approval_id == approval.approval_id,
+                        )
+                    )
                     found = current.status if current is not None else "MISSING"
                     raise ApprovalConcurrencyError(
                         f"Approval '{approval.approval_id}' was modified concurrently "
@@ -88,7 +93,11 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
                     )
                 return
 
-            model = session.get(ApprovalModel, approval.approval_id)
+            stmt_lookup = select(ApprovalModel).where(
+                ApprovalModel.tenant_id == tenant_id,
+                ApprovalModel.approval_id == approval.approval_id,
+            )
+            model = session.scalar(stmt_lookup)
             if model is None:
                 model = ApprovalModel(
                     approval_id=approval.approval_id,
@@ -134,13 +143,28 @@ class SqlAlchemyApprovalRepository(BaseSqlAlchemyRepository, ApprovalRepository)
             models = session.scalars(stmt).all()
             return [self._to_domain(m) for m in models]
 
-    def list_pending(self, tenant_id: str | None = None) -> list[Approval]:
-        """List all pending approval requests within a tenant partition (or all tenants if None)."""
+    def list_pending(self, tenant_id: str) -> list[Approval]:
+        """List all pending approval requests strictly within a tenant partition (§49, §50)."""
         with self._lock, self._session() as session:
-            stmt = select(ApprovalModel).where(ApprovalModel.status == ApprovalStatus.PENDING.value)
-            if tenant_id is not None:
-                stmt = stmt.where(ApprovalModel.tenant_id == tenant_id)
-            stmt = stmt.order_by(ApprovalModel.requested_at)
+            stmt = (
+                select(ApprovalModel)
+                .where(
+                    ApprovalModel.status == ApprovalStatus.PENDING.value,
+                    ApprovalModel.tenant_id == tenant_id,
+                )
+                .order_by(ApprovalModel.requested_at)
+            )
+            models = session.scalars(stmt).all()
+            return [self._to_domain(m) for m in models]
+
+    def list_all_pending_for_maintenance(self) -> list[Approval]:
+        """List pending approvals across all partitions strictly for background maintenance (§49)."""
+        with self._lock, self._session() as session:
+            stmt = (
+                select(ApprovalModel)
+                .where(ApprovalModel.status == ApprovalStatus.PENDING.value)
+                .order_by(ApprovalModel.requested_at)
+            )
             models = session.scalars(stmt).all()
             return [self._to_domain(m) for m in models]
 

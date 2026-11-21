@@ -12,6 +12,7 @@ Adheres strictly to AGENTS.md §2.1, §2.2, §18, §23, §134:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -29,7 +30,12 @@ from agentpay.domain.decision import (
     DecisionRecommendation,
     RiskLevel,
 )
-from agentpay.security.ssrf import SSRFConfig, validate_outbound_url
+from agentpay.security.ssrf import (
+    SSRFConfig,
+    ValidatedTarget,
+    open_pinned_connection,
+    validate_outbound_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +125,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
         """Evaluate contextual risk against the OpenAI-compatible model endpoint (§23, §28)."""
         decision_id = f"dec_oai_{uuid.uuid4().hex[:16]}"
         endpoint_url = f"{self.base_url}/chat/completions"
+        validated_target: ValidatedTarget | None = None
 
         # 1. SSRF pre-flight validation
         if self._transport is None:
@@ -132,7 +139,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
                         allow_private_ips=True,
                         resolve_dns=self.resolve_dns,
                     )
-                validate_outbound_url(endpoint_url, config=validation_config)
+                validated_target = validate_outbound_url(endpoint_url, config=validation_config)
             except Exception as ssrf_err:
                 logger.warning(
                     "SSRF check rejected AI model endpoint '%s': %s", endpoint_url, ssrf_err
@@ -175,6 +182,55 @@ class OpenAiCompatibleModelProvider(ModelProvider):
         try:
             if self._transport is not None:
                 status_code, resp_bytes, _ = self._transport(req)
+            elif validated_target is not None:
+                # TOCTOU mitigation: connect directly to pinned, pre-validated IP
+                conn = open_pinned_connection(validated_target, timeout=self.timeout_seconds)
+                try:
+                    conn_headers = dict(headers)
+                    conn_headers["Host"] = (
+                        f"{validated_target.host}:{validated_target.port}"
+                        if (
+                            (validated_target.scheme == "http" and validated_target.port != 80)
+                            or (validated_target.scheme == "https" and validated_target.port != 443)
+                        )
+                        else validated_target.host
+                    )
+                    conn.request(
+                        "POST",
+                        validated_target.path_with_query,
+                        body=req_body,
+                        headers=conn_headers,
+                    )
+                    resp = conn.getresponse()
+                    status_code = resp.status
+                    resp_bytes = resp.read()
+                finally:
+                    conn.close()
+
+                if status_code >= 400:
+                    raw_err = resp_bytes.decode("utf-8", errors="replace")
+                    safe_err = self._sanitize_error_message(str(raw_err))
+                    if status_code == 402:
+                        logger.warning(
+                            "Advisory model provider '%s' returned HTTP 402 (Payment Required / Insufficient Balance)",
+                            self.provider_name,
+                        )
+                        return self._fallback_decision(
+                            decision_id=decision_id,
+                            factor_code="MODEL_QUOTA_EXHAUSTED",
+                            description=f"Upstream AI router balance exhausted or payment required (HTTP 402): {safe_err[:200]}",
+                        )
+                    logger.warning(
+                        "Advisory model provider '%s' returned HTTP %d: %s",
+                        self.provider_name,
+                        status_code,
+                        safe_err[:200],
+                    )
+                    return self._fallback_decision(
+                        decision_id=decision_id,
+                        factor_code="MODEL_HTTP_ERROR",
+                        description=f"Upstream AI provider error (HTTP {status_code}): {safe_err[:200]}",
+                    )
             else:
                 with urllib.request.urlopen(req, timeout=self.timeout_seconds) as resp:
                     status_code = getattr(resp, "status", 200)
@@ -212,7 +268,7 @@ class OpenAiCompatibleModelProvider(ModelProvider):
                 description=f"Upstream AI provider error (HTTP {status_code}): {safe_err[:200]}",
             )
 
-        except (urllib.error.URLError, TimeoutError, OSError) as net_err:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as net_err:
             safe_err = self._sanitize_error_message(str(net_err))
             logger.warning(
                 "Network failure contacting advisory model provider '%s': %s",

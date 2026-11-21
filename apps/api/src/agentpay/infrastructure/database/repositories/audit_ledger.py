@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -27,16 +28,24 @@ class SqlAlchemyAuditRepository(BaseSqlAlchemyRepository, AuditLedger):
 
     def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
         super().__init__(session_or_factory)
+        self._meta_lock = threading.Lock()
+        self._tenant_locks: dict[str, threading.RLock] = {}
+
+    def _get_tenant_lock(self, tenant_id: str) -> threading.RLock:
+        with self._meta_lock:
+            if tenant_id not in self._tenant_locks:
+                self._tenant_locks[tenant_id] = threading.RLock()
+            return self._tenant_locks[tenant_id]
 
     def append(self, event: AuditEvent) -> None:
         """Append an audit event directly to the repository."""
-        with self._session() as session:
+        with self._get_tenant_lock(event.tenant_id), self._session() as session:
             session.add(AuditEventModel.from_domain(event))
             session.commit()
 
     def get(self, tenant_id: str, event_id: str) -> AuditEvent | None:
         """Retrieve an audit event by tenant_id and event_id."""
-        with self._session() as session:
+        with self._get_tenant_lock(tenant_id), self._session() as session:
             stmt = select(AuditEventModel).where(
                 AuditEventModel.tenant_id == tenant_id,
                 AuditEventModel.event_id == event_id,
@@ -48,7 +57,7 @@ class SqlAlchemyAuditRepository(BaseSqlAlchemyRepository, AuditLedger):
 
     def list_events(self, tenant_id: str) -> list[AuditEvent]:
         """List all audit events for a tenant ordered by timestamp and event_id."""
-        with self._session() as session:
+        with self._get_tenant_lock(tenant_id), self._session() as session:
             stmt = (
                 select(AuditEventModel)
                 .where(AuditEventModel.tenant_id == tenant_id)
@@ -76,12 +85,12 @@ class SqlAlchemyAuditRepository(BaseSqlAlchemyRepository, AuditLedger):
         if not isinstance(actor_val, str) or not actor_val.strip():
             raise InvalidAuditEventError("actor must be a non-empty string")
 
+        trace_id = trace_id.strip() if (trace_id and trace_id.strip()) else None
         resolved_type = AuditEventType(event_type)
         redacted_data = SensitiveFieldRedactor.redact(data)
         event_id = f"evt_{uuid.uuid4().hex[:16]}"
-        now = datetime.now(UTC)
 
-        with self._session() as session:
+        with self._get_tenant_lock(tenant_id), self._session() as session:
             stmt = (
                 select(AuditEventModel)
                 .where(AuditEventModel.tenant_id == tenant_id)
@@ -90,6 +99,16 @@ class SqlAlchemyAuditRepository(BaseSqlAlchemyRepository, AuditLedger):
             )
             latest = session.scalar(stmt)
             previous_hash = latest.event_hash if latest is not None else GENESIS_HASH
+
+            now = datetime.now(UTC)
+            if latest is not None and latest.timestamp is not None:
+                latest_ts = (
+                    latest.timestamp
+                    if latest.timestamp.tzinfo is not None
+                    else latest.timestamp.replace(tzinfo=UTC)
+                )
+                if now <= latest_ts:
+                    now = latest_ts + timedelta(microseconds=1)
 
             event_hash = AuditHasher.compute_event_hash(
                 event_data=redacted_data,
@@ -128,7 +147,7 @@ class SqlAlchemyAuditRepository(BaseSqlAlchemyRepository, AuditLedger):
         tenant_id: str,
         action_id: str | None = None,
     ) -> list[AuditEvent]:
-        with self._session() as session:
+        with self._get_tenant_lock(tenant_id), self._session() as session:
             stmt = (
                 select(AuditEventModel)
                 .where(AuditEventModel.tenant_id == tenant_id)

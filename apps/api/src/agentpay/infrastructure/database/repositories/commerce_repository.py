@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session, sessionmaker
 
 from agentpay.application.ports.commerce_port import (
@@ -175,15 +177,17 @@ class SqlAlchemyProductRepository(BaseSqlAlchemyRepository, ProductRepository):
 
     def search(self, tenant_id: str, query: str) -> list[Product]:
         with self._session() as session:
-            term = f"%{query.strip().lower()}%"
+            clean_query = query.strip()[:256].lower()
+            escaped = clean_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            term = f"%{escaped}%"
             stmt = (
                 select(ProductModel)
                 .where(
                     ProductModel.tenant_id == tenant_id,
                     or_(
-                        ProductModel.name.ilike(term),
-                        ProductModel.category.ilike(term),
-                        ProductModel.description.ilike(term),
+                        ProductModel.name.ilike(term, escape="\\"),
+                        ProductModel.category.ilike(term, escape="\\"),
+                        ProductModel.description.ilike(term, escape="\\"),
                     ),
                 )
                 .order_by(ProductModel.name)
@@ -245,9 +249,10 @@ class SqlAlchemyInventoryRepository(BaseSqlAlchemyRepository, InventoryRepositor
 
     def __init__(self, session_or_factory: sessionmaker[Session] | Session) -> None:
         super().__init__(session_or_factory)
+        self._lock = threading.RLock()
 
     def get(self, tenant_id: str, variant_id: str) -> Inventory | None:
-        with self._session() as session:
+        with self._lock, self._session() as session:
             stmt = select(InventoryModel).where(
                 InventoryModel.tenant_id == tenant_id,
                 InventoryModel.variant_id == variant_id,
@@ -267,7 +272,7 @@ class SqlAlchemyInventoryRepository(BaseSqlAlchemyRepository, InventoryRepositor
             raise CrossTenantAccessError(
                 f"Inventory tenant '{inventory.tenant_id}' does not match partition '{tenant_id}'"
             )
-        with self._session() as session:
+        with self._lock, self._session() as session:
             stmt = select(InventoryModel).where(
                 InventoryModel.tenant_id == tenant_id,
                 InventoryModel.variant_id == inventory.variant_id,
@@ -288,32 +293,49 @@ class SqlAlchemyInventoryRepository(BaseSqlAlchemyRepository, InventoryRepositor
             session.commit()
 
     def reserve(self, tenant_id: str, variant_id: str, qty: int) -> Inventory:
-        with self._session() as session:
-            stmt = select(InventoryModel).where(
-                InventoryModel.tenant_id == tenant_id,
-                InventoryModel.variant_id == variant_id,
-            )
-            model = session.scalar(stmt)
-            if model is None:
-                raise InsufficientInventoryError(
-                    f"No inventory record for variant '{variant_id}' in tenant '{tenant_id}'"
+        with self._lock, self._session() as session:
+            stmt = (
+                update(InventoryModel)
+                .where(
+                    InventoryModel.tenant_id == tenant_id,
+                    InventoryModel.variant_id == variant_id,
+                    (InventoryModel.available - InventoryModel.reserved) >= qty,
                 )
-            effective = model.available - model.reserved
-            if effective < qty:
+                .values(reserved=InventoryModel.reserved + qty)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            rowcount = result.rowcount if isinstance(result, CursorResult) else 0
+            if rowcount == 0:
+                check_stmt = select(InventoryModel).where(
+                    InventoryModel.tenant_id == tenant_id,
+                    InventoryModel.variant_id == variant_id,
+                )
+                model = session.scalar(check_stmt)
+                if model is None:
+                    raise InsufficientInventoryError(
+                        f"No inventory record for variant '{variant_id}' in tenant '{tenant_id}'"
+                    )
+                effective = model.available - model.reserved
                 raise InsufficientInventoryError(
                     f"Insufficient inventory for variant '{variant_id}': needed {qty}, available {effective}"
                 )
-            model.reserved += qty
-            session.commit()
+            updated = session.scalar(
+                select(InventoryModel).where(
+                    InventoryModel.tenant_id == tenant_id,
+                    InventoryModel.variant_id == variant_id,
+                )
+            )
+            assert updated is not None
             return Inventory(
-                variant_id=model.variant_id,
-                tenant_id=model.tenant_id,
-                available=model.available,
-                reserved=model.reserved,
+                variant_id=updated.variant_id,
+                tenant_id=updated.tenant_id,
+                available=updated.available,
+                reserved=updated.reserved,
             )
 
     def release(self, tenant_id: str, variant_id: str, qty: int) -> Inventory:
-        with self._session() as session:
+        with self._lock, self._session() as session:
             stmt = select(InventoryModel).where(
                 InventoryModel.tenant_id == tenant_id,
                 InventoryModel.variant_id == variant_id,
